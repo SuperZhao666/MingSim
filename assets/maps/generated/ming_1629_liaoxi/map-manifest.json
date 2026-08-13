@@ -1,6 +1,6 @@
 {
   "asset_sha256": {
-    "debug-map.png": "669d20373b7b80705cdcc0c4ec01f711ed384e09f8274840e8b1a2ff2a3e647f",
+    "debug-map.png": "218a4be6e30364ddb45cde56b1c7f1a24ac383ab27c978740fa97a6a1abacfc3",
     "history-overlay.png": "e91d7adb0c0494fb1e079ed9355f3f95f6e4f0488e677ef11c2b79156c73adc1",
     "physical-base.png": "1c1e5e5adb78daf3088017cffcc6132fb1ceec24aeb45a187db37e464932bbc9",
     "regions.geojson": "411de21d0bb3734f946d0037d9710069ed648068b0a7074788971dfee613afa7"
@@ -481,128 +481,7 @@
       "source": "places"
     }
   ],
-  "places": [
-    {
-      "claim_ids": [
-        "INFERENCE-P0-GUANNINGJIN-TOPOLOGY"
-      ],
-      "confidence": "unknown",
-      "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "medium",
-      "evidence_status": "accepted_anchor",
-      "historical_site_status": "open",
-      "id": "beijing",
-      "kind": "capital",
-      "latitude": 39.9042,
-      "longitude": 116.4074,
-      "map_representation": "approximate_point",
-      "map_x": 646.554735,
-      "map_y": 665.550967,
-      "name_zh": "京师",
-      "notes": "现代地理锚点；只作为关系拓扑端点，不表示现代行政区或1629城址中心。",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-PLACE-MODERN-ANCHOR",
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ]
-    },
-    {
-      "claim_ids": [
-        "INFERENCE-P0-GUANNINGJIN-TOPOLOGY"
-      ],
-      "confidence": "unknown",
-      "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "medium",
-      "evidence_status": "accepted_anchor",
-      "historical_site_status": "open",
-      "id": "tongzhou",
-      "kind": "transport_hub",
-      "latitude": 39.9099,
-      "longitude": 116.6564,
-      "map_representation": "approximate_point",
-      "map_x": 691.115257,
-      "map_y": 664.221181,
-      "name_zh": "通州",
-      "notes": "现代地理锚点；具体漕运仓储与道路几何保持 OPEN。",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-PLACE-MODERN-ANCHOR",
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ]
-    },
-    {
-      "claim_ids": [
-        "INFERENCE-P0-NINGYUAN-ANCHOR"
-      ],
-      "confidence": "unknown",
-      "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "medium",
-      "evidence_status": "accepted_anchor",
-      "historical_site_status": "open",
-      "id": "ningyuan",
-      "kind": "fortress",
-      "latitude": 40.6167,
-      "longitude": 120.731,
-      "map_representation": "approximate_point",
-      "map_x": 1420.2972,
-      "map_y": 498.460052,
-      "name_zh": "宁远",
-      "notes": "以今兴城古城附近为 modern_anchor；anchor_only，不表示1629驻军、库存或古城墙范围。",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-PLACE-MODERN-ANCHOR",
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ]
-    },
-    {
-      "claim_ids": [
-        "INFERENCE-P0-JINZHOU-ANCHOR"
-      ],
-      "confidence": "unknown",
-      "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "medium",
-      "evidence_status": "accepted_anchor",
-      "historical_site_status": "open",
-      "id": "jinzhou",
-      "kind": "fortress",
-      "latitude": 41.0957,
-      "longitude": 121.127,
-      "map_representation": "approximate_point",
-      "map_x": 1491.164537,
-      "map_y": 385.124903,
-      "name_zh": "锦州",
-      "notes": "现代城市锚点；anchor_only，不表示历史城址中心、1629控制或周边边线。",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-PLACE-MODERN-ANCHOR",
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ]
-    },
-    {
-      "claim_ids": [
-        "INFERENCE-P0-DENGZHOU-ANCHOR"
-      ],
-      "confidence": "unknown",
-      "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "medium",
-      "evidence_status": "accepted_anchor",
-      "historical_site_status": "open",
-      "id": "dengzhou",
-      "kind": "port",
-      "latitude": 37.8107,
-      "longitude": 120.758,
-      "map_representation": "approximate_point",
-      "map_x": 1425.129064,
-      "map_y": 1146.727091,
-      "name_zh": "登州",
-      "notes": "以今蓬莱附近为 modern_anchor；不表示古港范围、固定航线、航季或运力。",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-PLACE-MODERN-ANCHOR",
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ]
-    }
-  ],
+  "places": [],
   "projection": {
     "affine_formula": {
       "map_x": "mercator_x * scale + offset_x",
@@ -635,82 +514,7 @@
     "region_count": 15,
     "visible": false
   },
-  "routes": [
-    {
-      "claim_ids": [
-        "INFERENCE-P0-GUANNINGJIN-TOPOLOGY"
-      ],
-      "claim_status": "reviewed_inference",
-      "confidence": "low",
-      "evidence_status": "accepted",
-      "from_place_id": "beijing",
-      "id": "route-beijing-tongzhou",
-      "kind": "land",
-      "map_representation": "corridor",
-      "name_zh": "京师—通州关系拓扑",
-      "notes": "仅为场景拓扑端点关系；北京—通州具体漕运证据与数值 OPEN。",
-      "points": [
-        {
-          "latitude": 39.9042,
-          "longitude": 116.4074,
-          "map_x": 646.554735,
-          "map_y": 665.550967
-        },
-        {
-          "latitude": 39.9099,
-          "longitude": 116.6564,
-          "map_x": 691.115257,
-          "map_y": 664.221181
-        }
-      ],
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-ROUTE-DESIGN-DRAFT",
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ],
-      "to_place_id": "tongzhou"
-    },
-    {
-      "claim_ids": [
-        "INFERENCE-P0-GUANNINGJIN-TOPOLOGY"
-      ],
-      "claim_status": "reviewed_inference",
-      "confidence": "low",
-      "evidence_status": "accepted",
-      "from_place_id": "ningyuan",
-      "id": "route-ningyuan-jinzhou",
-      "kind": "land",
-      "map_representation": "corridor",
-      "name_zh": "宁远—锦州关系拓扑",
-      "notes": "只表示宁远—锦州关系拓扑；不补山海关精确位置、古道中继或连续控制面。",
-      "points": [
-        {
-          "latitude": 40.6167,
-          "longitude": 120.731,
-          "map_x": 1420.2972,
-          "map_y": 498.460052
-        },
-        {
-          "latitude": 40.8,
-          "longitude": 120.9,
-          "map_x": 1450.541089,
-          "map_y": 455.186541
-        },
-        {
-          "latitude": 41.0957,
-          "longitude": 121.127,
-          "map_x": 1491.164537,
-          "map_y": 385.124903
-        }
-      ],
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-ROUTE-DESIGN-DRAFT",
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ],
-      "to_place_id": "jinzhou"
-    }
-  ],
+  "routes": [],
   "scenario_id": "ming_1629_liaoxi_detail",
   "schema_version": 1,
   "separation_contract": {
@@ -720,7 +524,15 @@
     "route_polylines_define_simulation_costs": false
   },
   "snapshot_date": "1629-01-01",
+  "suppressed_places": [
+    "beijing",
+    "tongzhou",
+    "ningyuan",
+    "jinzhou",
+    "dengzhou"
+  ],
   "suppressed_routes": [
-    "route-dengzhou-ningyuan-sea"
+    "route-beijing-tongzhou",
+    "route-ningyuan-jinzhou"
   ]
 }

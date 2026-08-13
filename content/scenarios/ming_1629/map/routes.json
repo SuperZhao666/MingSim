@@ -14,7 +14,7 @@
       "map_representation": "corridor",
       "evidence_status": "accepted",
       "confidence": "low",
-      "review_status": "accepted",
+      "review_status": "draft",
       "claim_ids": ["INFERENCE-P0-GUANNINGJIN-TOPOLOGY"],
       "source_ids": ["SRC-ROUTE-DESIGN-DRAFT", "SRC-CTEXT-MAOSHUAIDONGJI"],
       "notes": "仅为场景拓扑端点关系；北京—通州具体漕运证据与数值 OPEN。"
@@ -30,26 +30,10 @@
       "map_representation": "corridor",
       "evidence_status": "accepted",
       "confidence": "low",
-      "review_status": "accepted",
+      "review_status": "draft",
       "claim_ids": ["INFERENCE-P0-GUANNINGJIN-TOPOLOGY"],
       "source_ids": ["SRC-ROUTE-DESIGN-DRAFT", "SRC-CTEXT-MAOSHUAIDONGJI"],
       "notes": "只表示宁远—锦州关系拓扑；不补山海关精确位置、古道中继或连续控制面。"
-    },
-    {
-      "id": "route-dengzhou-ningyuan-sea",
-      "name_zh": "登州—宁远海运候选关系（暂不画）",
-      "kind": "sea",
-      "claim_status": "design_open",
-      "map_representation": "candidate_corridor",
-      "evidence_status": "open",
-      "from_place_id": "dengzhou",
-      "to_place_id": "ningyuan",
-      "path": [[120.7580, 37.8107], [121.8, 38.0], [122.5, 38.6], [122.2, 39.5], [121.4, 40.1], [120.7310, 40.6167]],
-      "confidence": "unknown",
-      "review_status": "draft",
-      "source_ids": ["SRC-ROUTE-DESIGN-DRAFT", "SRC-CTEXT-MAOSHUAIDONGJI"],
-      "claim_ids": ["OPEN-ROUTE-GEOMETRY"],
-      "notes": "仅保留设计记录，构建器抑制；不是史实航线，也不用于计算距离。"
     }
   ]
 }
