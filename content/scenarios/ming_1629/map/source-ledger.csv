@@ -6,3 +6,9 @@ SRC-HARTWELL-1391,Hartwell China Historical GIS Ming 1391,historical_geo,https:/
 SRC-MING-GEO-DRAFT,明代地理志与晚明舆图待逐区复核,historical_text_and_map,TBD,TBD,1629_boundary_review,open,open,pending_review,正式接受前必须补具体版次页码或馆藏链接
 SRC-PLACE-MODERN-ANCHOR,历史城市现代坐标锚点初稿,derived,TBD,MIT,place_anchor,draft,accepted,anchor_only,项目原创记录；坐标来源仍为OPEN；仅作初始显示点，不表示现代行政区或历史城墙范围
 SRC-ROUTE-DESIGN-DRAFT,MVP路线表现折线初稿,design,local,MIT,route_visualization,draft,accepted,design_only,项目原创设计记录；只负责表现，运输规则与数值不由此文件定义
+SRC-CTEXT-MAOSHUAIDONGJI,《明史纪事本末补遗》相关条目,primary_text_transcription,https://ctext.org/wiki.pl?chapter=867360&if=en&remap=gb,CText terms,evidence_text,accepted,accepted,historical_claims_only,只引用链接和短引；不打包扫描图或整库
+SRC-LN-DONGJINGCITY,辽宁省文化和旅游厅《东京城城址》,official_heritage_page,https://whly.ln.gov.cn/whly/wlzt/lnww/zdwwbhdw/3D3F77FF561C4367A540E61575E0598F/index.shtml,Government page terms,evidence_text,accepted,accepted,historical_claims_only,只作历史事实引用；不复制未明确授权的页面图片或几何
+SRC-LOC-DAMINGYUDITU,Library of Congress《大明舆地图》目录,library_catalog,https://www.loc.gov/item/2002626776/,Research only,research_reference,open,pending,research_only,本轮 Cloudflare 403；不用于闭合 FACT 或复制图像
+SRC-LOC-GUANGYUTU,Library of Congress《广舆图（1579）》目录,library_catalog,https://www.loc.gov/item/2021666327/,Research only,research_reference,open,pending,research_only,本轮 Cloudflare 403；只作待复核路线线索
+SRC-LOC-HUANGMINGZHIFANG,Library of Congress《皇明职方地图（1636）》目录,library_catalog,https://www.loc.gov/item/2021668270/,Research only,research_reference,open,pending,research_only,本轮 Cloudflare 403；年代晚于快照，不复制图像
+SRC-FUDAN-CHGIS-LICENSE,复旦 CHGIS V2.0 用户协议,university_dataset_license,https://yugong.fudan.edu.cn/CHGIS/bqsm.htm,Research only,license_audit,open,accepted,research_only,只作许可审计；禁止打包 CHGIS 几何

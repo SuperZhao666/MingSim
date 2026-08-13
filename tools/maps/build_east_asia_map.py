@@ -4,7 +4,8 @@
 The builder deliberately keeps four different concerns separate:
 
 * Natural Earth land polygons provide only the physical coastline/base map.
-* Reviewed scenario records select historical geometry from the Hartwell source.
+* Reviewed scenario records select research-baseline geometry from the Hartwell source;
+  explicit evidence overlays provide the reviewed, limited map claims.
 * Place and route JSON files provide presentation anchors and polylines.
 * Simulation topology is not read, inferred, or written by this tool.
 
@@ -31,7 +32,7 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 from PIL import Image, ImageColor, ImageDraw, PngImagePlugin
 
 
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2
 SCHEMA_VERSION = 1
 EARTH_RADIUS_METRES = 6_378_137.0
 MAX_MERCATOR_LATITUDE = 85.0511287798066
@@ -683,6 +684,93 @@ def validate_source_ids(
     return source_ids
 
 
+def load_evidence_ledger(
+    path: Path,
+    source_ledger: Mapping[str, Mapping[str, str]],
+) -> tuple[dict[str, Mapping[str, Any]], set[str]]:
+    document = load_json(path, "liaodong-1629-evidence.json")
+    ensure_schema(document, "liaodong-1629-evidence.json")
+    sources = require_list(document.get("sources"), "evidence.sources")
+    source_ids: set[str] = set()
+    for index, raw_source in enumerate(sources):
+        source = require_mapping(raw_source, f"evidence.sources[{index}]")
+        source_id = require_id(source.get("id"), f"evidence.sources[{index}].id")
+        require(source_id not in source_ids, f"证据 source ID 重复：{source_id}")
+        source_ids.add(source_id)
+        require(source.get("access_checked"), f"证据 source {source_id} 缺少 access_checked。")
+        require(source.get("access_result"), f"证据 source {source_id} 缺少 access_result。")
+        require(
+            source.get("url") and source.get("license"),
+            f"证据 source {source_id} 必须记录 URL 和 license。",
+        )
+        require(source_id in source_ledger, f"证据 source {source_id} 未登记到 source-ledger.csv。")
+
+    raw_claims = require_list(document.get("claims"), "evidence.claims")
+    claims: dict[str, Mapping[str, Any]] = {}
+    for index, raw_claim in enumerate(raw_claims):
+        claim = require_mapping(raw_claim, f"evidence.claims[{index}]")
+        claim_id = require_id(claim.get("id"), f"evidence.claims[{index}].id")
+        require(claim_id not in claims, f"证据 claim ID 重复：{claim_id}")
+        status = require_string(claim.get("status"), f"claim {claim_id}.status")
+        require(status in {"FACT", "INFERENCE", "OPEN"}, f"claim {claim_id}.status 无效：{status}")
+        claims[claim_id] = claim
+
+    for claim_id, claim in claims.items():
+        refs = [
+            require_id(value, f"claim {claim_id}.source_ids[{index}]")
+            for index, value in enumerate(
+                require_list(claim.get("source_ids"), f"claim {claim_id}.source_ids")
+            )
+        ]
+        require(refs, f"claim {claim_id}.source_ids 不能为空。")
+        require(len(refs) == len(set(refs)), f"claim {claim_id}.source_ids 不能重复。")
+        for ref in refs:
+            if ref in source_ids:
+                continue
+            require(
+                ref in claims and claims[ref].get("status") != "OPEN",
+                f"claim {claim_id}.source_ids 引用了未知或 OPEN claim/source：{ref}",
+            )
+
+    admitted_claim_ids: set[str] = set()
+    for index, raw_admission in enumerate(
+        require_list(document.get("p0_map_admission"), "evidence.p0_map_admission")
+    ):
+        admission = require_mapping(raw_admission, f"evidence.p0_map_admission[{index}]")
+        admission_id = require_id(admission.get("id"), f"evidence.p0_map_admission[{index}].id")
+        admission_claims = require_list(
+            admission.get("source_claim_ids"), f"admission {admission_id}.source_claim_ids"
+        )
+        for claim_index, raw_claim_id in enumerate(admission_claims):
+            claim_id = require_id(
+                raw_claim_id, f"admission {admission_id}.source_claim_ids[{claim_index}]"
+            )
+            require(claim_id in claims, f"admission {admission_id} 引用了未知 claim：{claim_id}")
+            admitted_claim_ids.add(claim_id)
+
+    require(claims, "evidence.claims 不能为空。")
+    require(admitted_claim_ids, "evidence.p0_map_admission 不能为空。")
+    return claims, admitted_claim_ids
+
+
+def validate_claim_ids(
+    raw_claim_ids: Any,
+    label: str,
+    claims: Mapping[str, Mapping[str, Any]],
+    admitted_claim_ids: set[str],
+) -> list[str]:
+    claim_ids = [
+        require_id(value, f"{label}[{index}]")
+        for index, value in enumerate(require_list(raw_claim_ids, label))
+    ]
+    require(claim_ids, f"{label} 不能为空。")
+    require(len(set(claim_ids)) == len(claim_ids), f"{label} 不能重复。")
+    for claim_id in claim_ids:
+        require(claim_id in claims, f"{label} 引用了未知 claim：{claim_id}")
+        require(claim_id in admitted_claim_ids, f"{label} 引用的 claim 不在 P0 准入清单：{claim_id}")
+    return claim_ids
+
+
 def load_historical_regions(
     definition_path: Path,
     hartwell_path: Path,
@@ -832,42 +920,121 @@ def load_historical_regions(
     return output_geojson, output_features, manifest_regions
 
 
+def load_evidence_overlays(
+    path: Path,
+    source_ledger: Mapping[str, Mapping[str, str]],
+    claims: Mapping[str, Mapping[str, Any]],
+    admitted_claim_ids: set[str],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    document = load_json(path, "historical-overlays.json")
+    ensure_schema(document, "historical-overlays.json")
+    output_features: list[dict[str, Any]] = []
+    manifest_overlays: list[dict[str, Any]] = []
+    overlay_ids: set[str] = set()
+    for index, raw_overlay in enumerate(
+        require_list(document.get("overlays"), "historical-overlays.json.overlays")
+    ):
+        overlay = require_mapping(raw_overlay, f"historical-overlays.json.overlays[{index}]")
+        overlay_id = require_id(overlay.get("id"), f"overlays[{index}].id")
+        require(overlay_id not in overlay_ids, f"历史证据叠加层 ID 重复：{overlay_id}")
+        overlay_ids.add(overlay_id)
+        name_zh = require_string(overlay.get("name_zh"), f"overlay {overlay_id}.name_zh")
+        representation = require_string(
+            overlay.get("representation"), f"overlay {overlay_id}.representation"
+        )
+        require(
+            representation == "limited_influence_area",
+            f"overlay {overlay_id} 只允许 limited_influence_area，不能伪装成精确控制面。",
+        )
+        review_status = require_string(
+            overlay.get("review_status"), f"overlay {overlay_id}.review_status"
+        )
+        require(review_status == "accepted", f"overlay {overlay_id} 必须是 accepted。")
+        confidence = require_string(overlay.get("confidence"), f"overlay {overlay_id}.confidence")
+        require(
+            confidence in {"high", "medium", "low", "unknown"},
+            f"overlay {overlay_id}.confidence 无效：{confidence}",
+        )
+        claim_ids = validate_claim_ids(
+            overlay.get("claim_ids"), f"overlay {overlay_id}.claim_ids", claims, admitted_claim_ids
+        )
+        source_ids = validate_source_ids(
+            overlay.get("source_ids"), f"overlay {overlay_id}.source_ids", source_ledger
+        )
+        require(
+            all(claims[claim_id].get("status") != "OPEN" for claim_id in claim_ids),
+            f"overlay {overlay_id} 不能引用 OPEN claim。",
+        )
+        polygons = geometry_polygons(overlay.get("geometry"), f"overlay {overlay_id}.geometry")
+        bbox = geometry_bbox(polygons)
+        properties = {
+            "id": overlay_id,
+            "name_zh": name_zh,
+            "representation": representation,
+            "claim_ids": claim_ids,
+            "source_ids": source_ids,
+            "confidence": confidence,
+            "review_status": review_status,
+            "notes": overlay.get("notes", ""),
+        }
+        output_features.append(
+            {
+                "type": "Feature",
+                "id": overlay_id,
+                "bbox": bbox,
+                "properties": properties,
+                "geometry": overlay["geometry"],
+            }
+        )
+        manifest_overlays.append({"id": overlay_id, "bbox_lon_lat": bbox, **properties})
+
+    require(output_features, "historical-overlays.json 至少需要一个叠加层。")
+    output_geojson = {
+        "type": "FeatureCollection",
+        "name": "ming_1629_reviewed_evidence_overlays",
+        "crs": {"type": "name", "properties": {"name": "EPSG:4326"}},
+        "metadata": {
+            "schema_version": SCHEMA_VERSION,
+            "snapshot_date": document.get("snapshot_date"),
+            "claim_status": "reviewed_p0_evidence",
+            "geometry_role": "reviewed_historical_presentation_only_not_simulation_topology",
+            "warning": document.get("warning", ""),
+        },
+        "features": output_features,
+    }
+    return output_geojson, output_features, manifest_overlays
+
+
 def render_history_overlay(
     features: Sequence[Mapping[str, Any]],
     projection: WebMercatorProjection,
     style: Mapping[str, Any],
 ) -> Image.Image:
-    fill_rgb = parse_colour(style.get("history_fill"), "#B8863E", "style.history_fill", "RGB")
-    outline_rgb = parse_colour(style.get("history_outline"), "#704B24", "style.history_outline", "RGB")
+    fill_rgb = parse_colour(style.get("evidence_fill"), "#4F8C9A", "style.evidence_fill", "RGB")
     alpha_by_confidence = {"high": 72, "medium": 54, "low": 34, "unknown": 24}
     overlay = Image.new("RGBA", (projection.width, projection.height), (0, 0, 0, 0))
-    outline_draw = ImageDraw.Draw(overlay)
     for feature_index, feature in enumerate(features):
         properties = require_mapping(feature.get("properties"), f"output region[{feature_index}].properties")
         confidence = str(properties.get("confidence"))
-        review_status = str(properties.get("review_status"))
+        representation = str(properties.get("representation"))
         polygons = geometry_polygons(feature.get("geometry"), f"output region[{feature_index}].geometry")
         mask = Image.new("L", overlay.size, 0)
         mask_draw = ImageDraw.Draw(mask)
-        projected_rings: list[list[tuple[float, float]]] = []
         for polygon in polygons:
             exterior = projected_points(polygon[0], projection)
             mask_draw.polygon(exterior, fill=255)
-            projected_rings.append(exterior)
             for hole in polygon[1:]:
                 projected_hole = projected_points(hole, projection)
                 mask_draw.polygon(projected_hole, fill=0)
-                projected_rings.append(projected_hole)
         fill_alpha = alpha_by_confidence.get(confidence, alpha_by_confidence["unknown"])
-        if review_status != "accepted":
-            fill_alpha = min(fill_alpha, 54)
+        fill_alpha = min(fill_alpha, 54)
         overlay.paste((*fill_rgb, fill_alpha), (0, 0, projection.width, projection.height), mask)
-        outline = (*outline_rgb, 210 if review_status == "accepted" else 155)
-        for ring in projected_rings:
-            if review_status == "accepted":
-                outline_draw.line(ring, fill=outline, width=3, joint="curve")
-            else:
-                draw_dashed_line(outline_draw, ring, outline, width=3)
+        # A limited influence area is deliberately diffuse: its outer edge is
+        # not a claimed political boundary and therefore receives no outline.
+        require(
+            representation == "limited_influence_area",
+            f"output evidence overlay[{feature_index}] representation 无效。",
+        )
     return overlay
 
 
@@ -875,6 +1042,8 @@ def load_places(
     path: Path,
     ledger: Mapping[str, Mapping[str, str]],
     projection: WebMercatorProjection,
+    claims: Mapping[str, Mapping[str, Any]],
+    admitted_claim_ids: set[str],
 ) -> list[dict[str, Any]]:
     document = load_json(path, "places.json")
     ensure_schema(document, "places.json")
@@ -910,12 +1079,29 @@ def load_places(
             coordinate_epoch == "modern_anchor",
             f"place {place_id} 当前只能标为 coordinate_epoch=modern_anchor。",
         )
-        require(
-            historical_site_status == "open",
-            f"place {place_id} 当前必须保持 historical_site_status=open。",
+        require(historical_site_status == "open", f"place {place_id} 必须保持 historical_site_status=open。")
+        require(confidence == "unknown", f"place {place_id} 的坐标 confidence 必须保持 unknown。")
+        require(review_status == "accepted", f"place {place_id} 必须是 accepted 地图点。")
+        map_representation = require_string(
+            place.get("map_representation"), f"place {place_id}.map_representation"
         )
-        require(confidence == "unknown", f"place {place_id} 当前必须保持 confidence=unknown。")
-        require(review_status == "draft", f"place {place_id} 当前必须保持 review_status=draft。")
+        require(
+            map_representation == "approximate_point",
+            f"place {place_id} 只允许 approximate_point，不得画精确古城几何。",
+        )
+        evidence_status = require_string(
+            place.get("evidence_status"), f"place {place_id}.evidence_status"
+        )
+        require(
+            evidence_status in {"accepted_anchor", "accepted_evidence"},
+            f"place {place_id} 的 evidence_status 无效：{evidence_status}",
+        )
+        claim_ids = validate_claim_ids(
+            place.get("claim_ids"), f"place {place_id}.claim_ids", claims, admitted_claim_ids
+        )
+        evidence_confidence = require_string(
+            place.get("evidence_confidence"), f"place {place_id}.evidence_confidence"
+        )
         map_x, map_y = projection.project(longitude, latitude)
         places.append(
             {
@@ -928,8 +1114,12 @@ def load_places(
                 "map_y": round(map_y, 6),
                 "coordinate_epoch": coordinate_epoch,
                 "historical_site_status": historical_site_status,
+                "map_representation": map_representation,
+                "evidence_status": evidence_status,
+                "evidence_confidence": evidence_confidence,
                 "confidence": confidence,
                 "review_status": review_status,
+                "claim_ids": claim_ids,
                 "source_ids": source_ids,
                 "notes": place.get("notes", ""),
             }
@@ -943,11 +1133,14 @@ def load_routes(
     ledger: Mapping[str, Mapping[str, str]],
     projection: WebMercatorProjection,
     places: Sequence[Mapping[str, Any]],
-) -> list[dict[str, Any]]:
+    claims: Mapping[str, Mapping[str, Any]],
+    admitted_claim_ids: set[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
     document = load_json(path, "routes.json")
     ensure_schema(document, "routes.json")
     place_by_id = {str(place["id"]): place for place in places}
     routes: list[dict[str, Any]] = []
+    suppressed_route_ids: list[str] = []
     route_ids: set[str] = set()
     for index, raw_route in enumerate(require_list(document.get("routes"), "routes.json.routes")):
         route = require_mapping(raw_route, f"routes[{index}]")
@@ -1003,29 +1196,53 @@ def load_routes(
         review_status = require_string(
             route.get("review_status"), f"route {route_id}.review_status"
         )
+        if claim_status in {"design_open", "open"} or review_status != "accepted":
+            suppressed_route_ids.append(route_id)
+            continue
         require(
-            claim_status == "design_open",
-            f"route {route_id} 当前必须保持 claim_status=design_open。",
+            claim_status == "reviewed_inference",
+            f"route {route_id} 当前必须保持 claim_status=reviewed_inference。",
         )
-        require(confidence == "unknown", f"route {route_id} 当前必须保持 confidence=unknown。")
-        require(review_status == "draft", f"route {route_id} 当前必须保持 review_status=draft。")
+        require(
+            confidence in {"medium", "low"},
+            f"route {route_id} 的证据走廊 confidence 必须为 medium 或 low。",
+        )
+        require(review_status == "accepted", f"route {route_id} 必须是 accepted 证据走廊。")
+        map_representation = require_string(
+            route.get("map_representation"), f"route {route_id}.map_representation"
+        )
+        require(
+            map_representation == "corridor",
+            f"route {route_id} 只允许 corridor，不得伪装成精确道路。",
+        )
+        evidence_status = require_string(
+            route.get("evidence_status"), f"route {route_id}.evidence_status"
+        )
+        require(evidence_status == "accepted", f"route {route_id} 必须是 accepted 证据走廊。")
+        claim_ids = validate_claim_ids(
+            route.get("claim_ids"), f"route {route_id}.claim_ids", claims, admitted_claim_ids
+        )
         routes.append(
             {
                 "id": route_id,
                 "name_zh": require_string(route.get("name_zh"), f"route {route_id}.name_zh"),
                 "kind": require_string(route.get("kind"), f"route {route_id}.kind"),
                 "claim_status": claim_status,
+                "map_representation": map_representation,
+                "evidence_status": evidence_status,
                 "from_place_id": from_id,
                 "to_place_id": to_id,
                 "points": points,
                 "confidence": confidence,
                 "review_status": review_status,
+                "claim_ids": claim_ids,
                 "source_ids": source_ids,
                 "notes": route.get("notes", ""),
             }
         )
     require(routes, "routes.json 至少需要一条路线。")
-    return routes
+    require(routes, "routes.json 至少需要一条已准入路线。")
+    return routes, suppressed_route_ids
 
 
 def render_debug_map(
@@ -1066,7 +1283,7 @@ def render_debug_map(
     # Debug images can escape their original folder during review.  Keep an ASCII
     # warning inside the pixels so nobody can mistake this technical render for a
     # reviewed 1629 political map, even when the adjacent manifest is missing.
-    warning = "TECHNICAL DRAFT | 1391 APPROX GEOMETRY | 1629 REVIEW OPEN"
+    warning = "REVIEWED P0 EVIDENCE | OPEN BOUNDARIES | NO SIM TOPOLOGY"
     warning_box = draw.textbbox((0, 0), warning)
     warning_width = warning_box[2] - warning_box[0]
     warning_height = warning_box[3] - warning_box[1]
@@ -1113,6 +1330,8 @@ def build(config_path: Path) -> dict[str, Any]:
         "physical_land_shp",
         "hartwell_1391_geojson",
         "historical_regions",
+        "historical_overlays",
+        "evidence_ledger",
         "places",
         "routes",
         "source_ledger",
@@ -1136,11 +1355,21 @@ def build(config_path: Path) -> dict[str, Any]:
     style = require_mapping(config.get("style", {}), "map-build.style")
 
     ledger = load_source_ledger(source_paths["source_ledger"])
-    regions_geojson, region_features, manifest_regions = load_historical_regions(
+    evidence_claims, admitted_claim_ids = load_evidence_ledger(
+        source_paths["evidence_ledger"], ledger
+    )
+    baseline_geojson, baseline_features, baseline_regions = load_historical_regions(
         source_paths["historical_regions"], source_paths["hartwell_1391_geojson"], ledger
     )
-    places = load_places(source_paths["places"], ledger, projection)
-    routes = load_routes(source_paths["routes"], ledger, projection, places)
+    evidence_geojson, evidence_features, evidence_overlays = load_evidence_overlays(
+        source_paths["historical_overlays"], ledger, evidence_claims, admitted_claim_ids
+    )
+    places = load_places(
+        source_paths["places"], ledger, projection, evidence_claims, admitted_claim_ids
+    )
+    routes, suppressed_route_ids = load_routes(
+        source_paths["routes"], ledger, projection, places, evidence_claims, admitted_claim_ids
+    )
     physical, physical_counts = render_physical_base(
         source_paths["physical_land_shp"],
         source_paths.get("physical_lakes_shp"),
@@ -1148,7 +1377,10 @@ def build(config_path: Path) -> dict[str, Any]:
         projection,
         style,
     )
-    history = render_history_overlay(region_features, projection, style)
+    # Only reviewed P0 evidence overlays are rendered.  The Hartwell geometry
+    # remains an auditable research baseline in the manifest, never a visible
+    # 1629 control layer.
+    history = render_history_overlay(evidence_features, projection, style)
     debug = render_debug_map(physical, history, places, routes, style, projection)
 
     source_hashes = {
@@ -1178,7 +1410,7 @@ def build(config_path: Path) -> dict[str, Any]:
         save_png(physical, physical_path)
         save_png(history, history_path)
         save_png(debug, debug_path)
-        write_json(regions_path, regions_geojson)
+        write_json(regions_path, evidence_geojson)
 
         target_paths = {key: output_dir / filename for key, filename in output_names.items()}
         preliminary_output_hashes = {
@@ -1193,7 +1425,13 @@ def build(config_path: Path) -> dict[str, Any]:
             "generator_version": GENERATOR_VERSION,
             "scenario_id": require_id(config.get("scenario_id"), "map-build.scenario_id"),
             "snapshot_date": require_string(config.get("snapshot_date"), "map-build.snapshot_date"),
-            "historical_content": regions_geojson["metadata"],
+            "historical_content": evidence_geojson["metadata"],
+            "research_baseline": {
+                "geometry_depict_date": baseline_geojson["metadata"]["geometry_depict_date"],
+                "historical_fit_status": baseline_geojson["metadata"]["historical_fit_status"],
+                "visible": False,
+                "region_count": len(baseline_features),
+            },
             "canvas": {
                 "width": width,
                 "height": height,
@@ -1217,21 +1455,28 @@ def build(config_path: Path) -> dict[str, Any]:
                     "default_visible": True,
                 },
                 {
-                    "id": "historical_regions",
+                    "id": "reviewed_evidence_overlays",
                     "kind": "transparent_raster",
                     "asset": "history_overlay",
-                    "role": "historical_presentation_only_not_simulation_topology",
+                    "role": "reviewed_evidence_presentation_only_not_simulation_topology",
                     "default_visible": True,
                 },
             ],
             "overlays": [
-                {"id": "historical_regions", "source": "regions", "default_visible": True},
+                {"id": "reviewed_evidence_overlays", "source": "regions", "default_visible": True},
                 {"id": "routes", "source": "routes", "default_visible": True},
                 {"id": "places", "source": "places", "default_visible": True},
             ],
-            "regions": manifest_regions,
+            "regions": evidence_overlays,
+            "historical_baseline_regions": baseline_regions,
             "places": places,
             "routes": routes,
+            "suppressed_routes": suppressed_route_ids,
+            "evidence": {
+                "ledger": godot_path(repo_root, source_paths["evidence_ledger"]),
+                "admitted_claim_ids": sorted(admitted_claim_ids),
+                "claim_count": len(evidence_claims),
+            },
             "separation_contract": {
                 "physical_base_contains_political_boundaries": False,
                 "historical_geometry_defines_simulation_topology": False,
@@ -1249,14 +1494,18 @@ def build(config_path: Path) -> dict[str, Any]:
             "generator": "tools/maps/build_east_asia_map.py",
             "generator_version": GENERATOR_VERSION,
             "scenario_id": manifest["scenario_id"],
-            "status": "technical_validation_passed_historical_draft",
+            "status": "technical_validation_passed_reviewed_evidence",
             "technical_validation": "passed",
-            "historical_content_status": "draft_incomplete",
+            "historical_content_status": "reviewed_p0_evidence_with_open_items",
             "source_sha256": source_hashes,
             "output_sha256": output_hashes,
             "counts": {
                 **physical_counts,
-                "historical_regions": len(region_features),
+                "historical_regions": len(evidence_features),
+                "historical_baseline_regions": len(baseline_features),
+                "evidence_claims": len(evidence_claims),
+                "admitted_claims": len(admitted_claim_ids),
+                "suppressed_routes": len(suppressed_route_ids),
                 "places": len(places),
                 "routes": len(routes),
                 "source_ledger_entries": len(ledger),
@@ -1264,6 +1513,10 @@ def build(config_path: Path) -> dict[str, Any]:
             "validation": {
                 "source_features_unique": True,
                 "source_ids_known": True,
+                "evidence_claims_have_sources": True,
+                "open_claims_not_rendered": True,
+                "hartwell_baseline_not_rendered": True,
+                "open_routes_not_rendered": True,
                 "geometry_structurally_valid": True,
                 "place_ids_unique": True,
                 "route_ids_unique": True,
