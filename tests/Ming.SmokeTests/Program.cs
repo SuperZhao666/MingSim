@@ -9,8 +9,10 @@ using MingSim.Domain.Economy;
 using MingSim.Domain.Intents;
 using MingSim.Domain.Military;
 using MingSim.Domain.Map;
+using MingSim.Domain.Realtime;
 using MingSim.Persistence.InMemory;
 using MingSim.Simulation;
+using MingSim.Simulation.Realtime;
 
 namespace MingSim.SmokeTests;
 
@@ -31,6 +33,12 @@ internal static class Program
             ShouldRejectUnauthorizedIntentWithoutChangingWorld();
             ShouldKeepSnapshotAndAuditAfterOrchestration();
             ShouldLoadAndValidateScenarioMap();
+            ShouldNotAdvanceWhenPaused();
+            ShouldAdvanceByExplicitGameTimeAndMoveAdjacentArmy();
+            ShouldKeepSpeedAsACompatibilityTimeMapping();
+            ShouldKeepSameTimeEventsInCreationOrder();
+            ShouldKeepHashIndependentOfAdvanceFrameSplitting();
+            ShouldApplyDuplicateCommandOnlyOnce();
             Console.WriteLine("MingSim 冒烟测试全部通过。");
             return 0;
         }
@@ -155,9 +163,130 @@ internal static class Program
         Require(rejected, "地图引用不存在的省份时应该被拒绝");
     }
 
+    private static void ShouldNotAdvanceWhenPaused()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        runtime.SetPaused(true);
+        var before = runtime.StateHash;
+        var beforeTime = runtime.State.GameTime;
+
+        var result = runtime.AdvanceTo(new GameTime(beforeTime.Value.AddDays(2)));
+
+        Require(runtime.State.GameTime == beforeTime, "暂停时游戏时间不能推进");
+        Require(runtime.StateHash == before, "暂停时权威状态哈希不能变化");
+        Require(result.GameTimeAdvanced == TimeSpan.Zero, "暂停时报告的推进时长必须为零");
+    }
+
+    private static void ShouldAdvanceByExplicitGameTimeAndMoveAdjacentArmy()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        var command = new MoveArmyCommand(
+            "move-adjacent",
+            new CharacterId("war"),
+            new ArmyId("army-1"),
+            new ProvinceId("capital"),
+            runtime.State.CurrentTime,
+            TravelHours: 2);
+
+        Require(runtime.EnqueueMoveArmy(command).Accepted, "相邻行军命令应该被接纳");
+        var result = runtime.AdvanceTo(new GameTime(runtime.State.CurrentTime.AddHours(2)));
+
+        Require(result.ProcessedScheduledEvents == 1, "目标时刻应该处理一条抵达事件");
+        Require(result.State.Military.Armies[new ArmyId("army-1")].LocationId == new ProvinceId("capital"), "抵达事件应该由模拟内核修改军队位置");
+        Require(result.Events.Any(domainEvent => domainEvent.EventType == "ArmyArrived"), "应该产生军队抵达事实事件");
+    }
+
+    private static void ShouldKeepSpeedAsACompatibilityTimeMapping()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        runtime.SetSpeed(2.0);
+
+        runtime.Advance(TimeSpan.FromSeconds(1));
+
+        Require(runtime.State.CurrentTime == SimulationEpoch.DefaultForTurn(1).AddHours(12), "倍速只应改变兼容入口的游戏时间换算");
+    }
+
+    private static void ShouldKeepSameTimeEventsInCreationOrder()
+    {
+        var first = new RealtimeSimulationRuntime(CreateWorld());
+        var second = new RealtimeSimulationRuntime(CreateWorld());
+        var firstCommand = CreateMoveCommand(first, "same-time-1", "capital");
+        var secondCommand = CreateMoveCommand(first, "same-time-2", "capital");
+        var sameTarget = new GameTime(first.State.CurrentTime.AddHours(2));
+
+        Require(first.EnqueueMoveArmy(firstCommand).Accepted, "第一条同刻命令应该被接纳");
+        Require(first.EnqueueMoveArmy(secondCommand).Accepted, "第二条同刻命令应该被接纳");
+        var firstResult = first.AdvanceTo(sameTarget);
+
+        Require(second.EnqueueMoveArmy(CreateMoveCommand(second, "same-time-1", "capital")).Accepted, "重放第一条同刻命令应该被接纳");
+        Require(second.EnqueueMoveArmy(CreateMoveCommand(second, "same-time-2", "capital")).Accepted, "重放第二条同刻命令应该被接纳");
+        var replay = second.AdvanceTo(sameTarget);
+
+        Require(firstResult.Events
+            .Where(domainEvent => domainEvent.EventType == "ArmyArrived")
+            .Select(domainEvent => domainEvent.EventId)
+            .SequenceEqual(["army-arrival-same-time-1", "army-arrival-same-time-2"]), "同刻事件应该按创建序号稳定排序");
+        Require(first.StateHash == second.StateHash, "同刻事件创建顺序在重复运行中必须稳定");
+        Require(replay.Events.Count(domainEvent => domainEvent.EventType == "ArmyArrived") == 2, "同刻命令应该各自处理且不依赖优先队列偶然顺序");
+    }
+
+    private static void ShouldKeepHashIndependentOfAdvanceFrameSplitting()
+    {
+        var oneShot = new RealtimeSimulationRuntime(CreateWorld());
+        var split = new RealtimeSimulationRuntime(CreateWorld());
+        EnqueueStandardMove(oneShot, "frame-split");
+        EnqueueStandardMove(split, "frame-split");
+        var target = new GameTime(oneShot.State.CurrentTime.AddHours(3));
+
+        oneShot.AdvanceTo(target);
+        split.AdvanceTo(new GameTime(split.State.CurrentTime.AddHours(1)));
+        split.AdvanceTo(target);
+
+        Require(oneShot.StateHash == split.StateHash, "把 AdvanceTo 切成多次不能改变最终状态哈希");
+    }
+
+    private static void ShouldApplyDuplicateCommandOnlyOnce()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        var command = CreateMoveCommand(runtime, "duplicate", "capital", travelHours: 2);
+
+        var first = runtime.EnqueueMoveArmy(command);
+        var duplicate = runtime.EnqueueMoveArmy(command);
+        var result = runtime.AdvanceTo(new GameTime(runtime.State.CurrentTime.AddHours(2)));
+
+        Require(first == duplicate, "重复命令应该返回相同 Outcome");
+        Require(result.ProcessedScheduledEvents == 1, "重复命令不能重复创建调度事件");
+        Require(result.Events.Count(domainEvent => domainEvent.EventType == "ArmyArrived") == 1, "重复命令不能重复生效");
+    }
+
+    private static MoveArmyCommand CreateMoveCommand(
+        RealtimeSimulationRuntime runtime,
+        string commandId,
+        string destination,
+        int travelHours = 2) =>
+        new(
+            commandId,
+            new CharacterId("war"),
+            new ArmyId("army-1"),
+            new ProvinceId(destination),
+            runtime.State.CurrentTime,
+            travelHours);
+
+    private static void EnqueueStandardMove(RealtimeSimulationRuntime runtime, string commandId) =>
+        Require(
+            runtime.EnqueueMoveArmy(CreateMoveCommand(runtime, commandId, "capital", travelHours: 2)).Accepted,
+            "标准行军命令应该被接纳");
+
     private static WorldState CreateWorld()
     {
-        var world = new WorldState(new WorldId("smoke-world"), 1, 200_000);
+        var map = new MapDefinition(
+            "smoke-map",
+            [
+                new ProvinceDefinition(new ProvinceId("frontier"), "边地", [new ProvinceId("capital")]),
+                new ProvinceDefinition(new ProvinceId("capital"), "京师", [new ProvinceId("frontier")]),
+                new ProvinceDefinition(new ProvinceId("liaodong"), "辽东", [new ProvinceId("frontier")]),
+            ]);
+        var world = new WorldState(new WorldId("smoke-world"), 1, 200_000, map);
         world.AddCharacter(new CharacterState(
             new CharacterId("works"),
             "工部角色",
@@ -175,6 +304,10 @@ internal static class Program
         world.GrantCapability(new CapabilityGrant(
             new CharacterId("war"),
             GameCapability.ConvertArmy,
+            "army-1"));
+        world.GrantCapability(new CapabilityGrant(
+            new CharacterId("war"),
+            GameCapability.MoveArmy,
             "army-1"));
         world.Economy.Inventory.GetOrCreate("flintlock").Add(10_000);
         world.Military.Add(new ArmyState(

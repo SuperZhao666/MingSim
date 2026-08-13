@@ -33,7 +33,7 @@ public sealed class WorldState
         TurnNumber = turnNumber;
         Economy = new EconomyState(treasurySilver);
         Map = map ?? MapDefinition.Empty(id.Value);
-        CurrentTime = currentTime ?? SimulationEpoch.DefaultForTurn(turnNumber);
+        GameTime = new(currentTime ?? SimulationEpoch.DefaultForTurn(turnNumber));
     }
 
     public WorldId Id { get; }
@@ -47,7 +47,18 @@ public sealed class WorldState
     /// 以前的 TurnNumber 仍然保留，是为了兼容旧存档和旧意图；
     /// 但实时推演真正依赖的是这个时间，而不是“点击一次按钮就加一回合”。
     /// </summary>
-    public DateTime CurrentTime { get; private set; }
+    public GameTime GameTime { get; private set; }
+
+    /// <summary>
+    /// 旧代码读取时间的兼容属性；写入仍只能通过 Simulation 的 GameTime API 完成。
+    /// </summary>
+    public DateTime CurrentTime => GameTime.Value;
+
+    /// <summary>权威世界提交次数；它不随渲染帧切分而变化。</summary>
+    public long WorldVersion { get; private set; }
+
+    /// <summary>最近一次权威提交的稳定身份，不使用 Guid 或现实时间。</summary>
+    public string CommitId { get; private set; } = "genesis";
 
     public EconomyState Economy { get; }
 
@@ -88,7 +99,7 @@ public sealed class WorldState
     public bool TryGetCharacter(CharacterId characterId, out CharacterState? character) =>
         _characters.TryGetValue(characterId, out character);
 
-    public void AdvanceTurn() => TurnNumber++;
+    internal void AdvanceTurn() => TurnNumber++;
 
     /// <summary>
     /// 只推进世界时间，不自动改变回合号。
@@ -96,14 +107,37 @@ public sealed class WorldState
     /// 这正是实时模拟和传统回合制的分界：
     /// 世界可以经过 1 小时、6 小时或 3 天，期间由调度器执行到期事件。
     /// </summary>
-    public void AdvanceTime(TimeSpan elapsed)
+    internal void AdvanceTime(TimeSpan elapsed)
     {
         if (elapsed <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(elapsed), "世界时间必须向前推进。");
         }
 
-        CurrentTime = CurrentTime.Add(elapsed);
+        AdvanceTo(GameTime.Add(elapsed));
+    }
+
+    /// <summary>由单写者 Simulation 推进到明确的权威游戏时刻。</summary>
+    internal void AdvanceTo(GameTime target)
+    {
+        if (target < GameTime)
+        {
+            throw new ArgumentOutOfRangeException(nameof(target), "游戏时间不能倒退。");
+        }
+
+        GameTime = target;
+    }
+
+    /// <summary>记录一次已经完成的实时提交。</summary>
+    internal void CommitRealtime(string commitId)
+    {
+        if (string.IsNullOrWhiteSpace(commitId))
+        {
+            throw new ArgumentException("提交身份不能为空。", nameof(commitId));
+        }
+
+        WorldVersion++;
+        CommitId = commitId;
     }
 
     /// <summary>
@@ -113,7 +147,12 @@ public sealed class WorldState
     {
         // MapDefinition 是经过校验的静态对象，工作区可以安全地共享它；
         // 经济、人物、军队等会变化的数据仍然全部深拷贝。
-        var clone = new WorldState(Id, TurnNumber, Economy.Treasury.Silver, Map, CurrentTime);
+        var clone = new WorldState(Id, TurnNumber, Economy.Treasury.Silver, Map, CurrentTime)
+        {
+            GameTime = GameTime,
+            WorldVersion = WorldVersion,
+            CommitId = CommitId,
+        };
 
         foreach (var (id, character) in _characters)
         {
