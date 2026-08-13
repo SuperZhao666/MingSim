@@ -16,6 +16,8 @@
     "physical_lakes_shp": "assets/maps/sources/natural-earth-physical/lakes/ne_10m_lakes.shp",
     "hartwell_1391_geojson": "assets/maps/sources/hartwell-cc0/hartwell-ming-1391-provinces.geojson",
     "historical_regions": "content/scenarios/ming_1629/map/historical-regions.json",
+    "historical_overlays": "content/scenarios/ming_1629/map/historical-overlays.json",
+    "evidence_ledger": "content/scenarios/ming_1629/evidence/liaodong-1629-evidence.json",
     "places": "content/scenarios/ming_1629/map/places.json",
     "routes": "content/scenarios/ming_1629/map/routes.json",
     "source_ledger": "content/scenarios/ming_1629/map/source-ledger.csv"
