@@ -1,0 +1,8 @@
+source_id,title,source_type,url,license,role,review_status,license_review,historical_use,notes
+SRC-NATURAL-EARTH-LAND,Natural Earth 1:10m Land,physical_geo,https://www.naturalearthdata.com/downloads/10m-physical-vectors/10m-land/,Public Domain,physical_basemap,accepted,accepted,physical_only,只提供陆地和海岸几何；不提供历史政治边界
+SRC-NATURAL-EARTH-RIVERS,Natural Earth 1:10m Rivers and Lake Centerlines,physical_geo,https://www.naturalearthdata.com/downloads/10m-physical-vectors/10m-rivers-lake-centerlines/,Public Domain,physical_basemap,accepted,accepted,physical_only,只提供总览尺度主要河流；官方说明不含中国大运河
+SRC-NATURAL-EARTH-LAKES,Natural Earth 1:10m Lakes,physical_geo,https://www.naturalearthdata.com/downloads/10m-physical-vectors/10m-lakes/,Public Domain,physical_basemap,accepted,accepted,physical_only,现代整理的湖泊轮廓；历史时期面积变化需另考
+SRC-HARTWELL-1391,Hartwell China Historical GIS Ming 1391,historical_geo,https://doi.org/10.7910/DVN/29302,CC0-1.0,historical_geometry_baseline,accepted,accepted,research_baseline_only,1391近似空间实体；不能直接等同1629精确边界
+SRC-MING-GEO-DRAFT,明代地理志与晚明舆图待逐区复核,historical_text_and_map,TBD,TBD,1629_boundary_review,open,open,pending_review,正式接受前必须补具体版次页码或馆藏链接
+SRC-PLACE-MODERN-ANCHOR,历史城市现代坐标锚点初稿,derived,TBD,MIT,place_anchor,draft,accepted,anchor_only,项目原创记录；坐标来源仍为OPEN；仅作初始显示点，不表示现代行政区或历史城墙范围
+SRC-ROUTE-DESIGN-DRAFT,MVP路线表现折线初稿,design,local,MIT,route_visualization,draft,accepted,design_only,项目原创设计记录；只负责表现，运输规则与数值不由此文件定义

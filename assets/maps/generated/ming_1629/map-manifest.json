@@ -1,0 +1,810 @@
+{
+  "asset_sha256": {
+    "debug-map.png": "9e55941dd92e251c9f66cbfc72722955d4b7ed614ded948b9eb912778ec589b1",
+    "history-overlay.png": "7e41cd63155e69c1bd264e9ac026b90e8eb9c73bf2a6009c575b84c885aaa293",
+    "physical-base.png": "eeb1fdf47654b67a657b6a00967a9772112ec73cbe644864cd428a34cf113896",
+    "regions.geojson": "2b9de62278aa6f753b5401d70738c70b62e3858f94ef46107c88c15978ff4c4a"
+  },
+  "assets": {
+    "debug_map": "res://assets/maps/generated/ming_1629/debug-map.png",
+    "history_overlay": "res://assets/maps/generated/ming_1629/history-overlay.png",
+    "physical_base": "res://assets/maps/generated/ming_1629/physical-base.png",
+    "regions_geojson": "res://assets/maps/generated/ming_1629/regions.geojson"
+  },
+  "canvas": {
+    "content_rect": [
+      292.686902,
+      48.0,
+      1814.626197,
+      1504.0
+    ],
+    "height": 1600,
+    "padding": 48,
+    "width": 2400
+  },
+  "generator": "tools/maps/build_east_asia_map.py",
+  "generator_version": 1,
+  "historical_content": {
+    "claim_status": "open",
+    "geometry_depict_date": "1391-01-01",
+    "geometry_role": "historical_presentation_only_not_simulation_topology",
+    "historical_fit_status": "research_baseline_only",
+    "schema_version": 1,
+    "snapshot_date": "1629-01-01",
+    "warning": "当前仅为 Hartwell 1391 近似行政几何研究基线。实际控制、争议区和东亚其他政权尚未建模，不能把本文件理解为完整1629版图。"
+  },
+  "layers": [
+    {
+      "asset": "physical_base",
+      "default_visible": true,
+      "id": "physical_base",
+      "kind": "raster",
+      "role": "physical_geography_only"
+    },
+    {
+      "asset": "history_overlay",
+      "default_visible": true,
+      "id": "historical_regions",
+      "kind": "transparent_raster",
+      "role": "historical_presentation_only_not_simulation_topology"
+    }
+  ],
+  "overlays": [
+    {
+      "default_visible": true,
+      "id": "historical_regions",
+      "source": "regions"
+    },
+    {
+      "default_visible": true,
+      "id": "routes",
+      "source": "routes"
+    },
+    {
+      "default_visible": true,
+      "id": "places",
+      "source": "places"
+    }
+  ],
+  "places": [
+    {
+      "confidence": "unknown",
+      "coordinate_epoch": "modern_anchor",
+      "historical_site_status": "open",
+      "id": "beijing",
+      "kind": "capital",
+      "latitude": 39.9042,
+      "longitude": 116.4074,
+      "map_x": 1283.417299,
+      "map_y": 728.369467,
+      "name_zh": "京师",
+      "notes": "坐标是历史城市的现代地理锚点，不表示现代行政区。",
+      "review_status": "draft",
+      "source_ids": [
+        "SRC-PLACE-MODERN-ANCHOR"
+      ]
+    },
+    {
+      "confidence": "unknown",
+      "coordinate_epoch": "modern_anchor",
+      "historical_site_status": "open",
+      "id": "tongzhou",
+      "kind": "transport_hub",
+      "latitude": 39.9099,
+      "longitude": 116.6564,
+      "map_x": 1288.733086,
+      "map_y": 728.210832,
+      "name_zh": "通州",
+      "notes": "待用历史城址资料复核。",
+      "review_status": "draft",
+      "source_ids": [
+        "SRC-PLACE-MODERN-ANCHOR"
+      ]
+    },
+    {
+      "confidence": "unknown",
+      "coordinate_epoch": "modern_anchor",
+      "historical_site_status": "open",
+      "id": "shanhaiguan",
+      "kind": "pass",
+      "latitude": 40.0006,
+      "longitude": 119.7758,
+      "map_x": 1355.327733,
+      "map_y": 725.684809,
+      "name_zh": "山海关",
+      "notes": "待用关城史料复核显示点。",
+      "review_status": "draft",
+      "source_ids": [
+        "SRC-PLACE-MODERN-ANCHOR"
+      ]
+    },
+    {
+      "confidence": "unknown",
+      "coordinate_epoch": "modern_anchor",
+      "historical_site_status": "open",
+      "id": "ningyuan",
+      "kind": "fortress",
+      "latitude": 40.6167,
+      "longitude": 120.731,
+      "map_x": 1375.719861,
+      "map_y": 708.436582,
+      "name_zh": "宁远",
+      "notes": "以今兴城古城附近为锚点；历史城址范围待复核。",
+      "review_status": "draft",
+      "source_ids": [
+        "SRC-PLACE-MODERN-ANCHOR"
+      ]
+    },
+    {
+      "confidence": "unknown",
+      "coordinate_epoch": "modern_anchor",
+      "historical_site_status": "open",
+      "id": "jinzhou",
+      "kind": "fortress",
+      "latitude": 41.0957,
+      "longitude": 121.127,
+      "map_x": 1384.173885,
+      "map_y": 694.916419,
+      "name_zh": "锦州",
+      "notes": "现代城市中心仅作初始锚点；历史城址待复核。",
+      "review_status": "draft",
+      "source_ids": [
+        "SRC-PLACE-MODERN-ANCHOR"
+      ]
+    },
+    {
+      "confidence": "unknown",
+      "coordinate_epoch": "modern_anchor",
+      "historical_site_status": "open",
+      "id": "dengzhou",
+      "kind": "port",
+      "latitude": 37.8107,
+      "longitude": 120.758,
+      "map_x": 1376.296272,
+      "map_y": 785.770723,
+      "name_zh": "登州",
+      "notes": "以今蓬莱古城附近为锚点；历史港城范围待复核。",
+      "review_status": "draft",
+      "source_ids": [
+        "SRC-PLACE-MODERN-ANCHOR"
+      ]
+    }
+  ],
+  "projection": {
+    "affine_formula": {
+      "map_x": "mercator_x * scale + offset_x",
+      "map_y": "-mercator_y * scale + offset_y"
+    },
+    "bounds_lon_lat": [
+      70.0,
+      5.0,
+      155.0,
+      60.0
+    ],
+    "input_crs": "EPSG:4326",
+    "name": "web_mercator",
+    "offset_pixels": [
+      -1201.711143,
+      1658.878458
+    ],
+    "projected_bounds_metres": [
+      7792364.355529,
+      557305.257275,
+      17254521.072957,
+      8399737.889818
+    ],
+    "scale_pixels_per_metre": 0.000191777229
+  },
+  "regions": [
+    {
+      "bbox_lon_lat": [
+        113.513623687,
+        34.962340007,
+        121.676582548,
+        44.134024388
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-northern-metropolitan",
+      "name_zh": "北直隶",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M001100000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "1",
+        "property": "H_PINYIN_N",
+        "value": "Jingshi Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        118.357414113,
+        31.158316907,
+        119.623854251,
+        32.604539156
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-southern-metropolitan",
+      "name_zh": "南直隶",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M001200210000",
+        "dataset": "hartwell_1391",
+        "feature_id": "2",
+        "property": "H_PINYIN_N",
+        "value": "Nanjing Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        105.197831184,
+        34.5829969,
+        115.079514905,
+        42.458729375
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-shanxi",
+      "name_zh": "山西",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M002100000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "6",
+        "property": "H_PINYIN_N",
+        "value": "Shanxi Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        115.067128138,
+        34.379550333,
+        122.716477138,
+        38.385973727
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-shandong",
+      "name_zh": "山东",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M002500000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "3",
+        "property": "H_PINYIN_N",
+        "value": "Shandong Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        110.29640598,
+        31.296369701,
+        116.646807827,
+        37.012942798
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-henan",
+      "name_zh": "河南",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M003100000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "7",
+        "property": "H_PINYIN_N",
+        "value": "He`nan Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        97.329415746,
+        31.710179358,
+        111.241813197,
+        40.922509208
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-shaanxi",
+      "name_zh": "陕西",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M003500000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "8",
+        "property": "H_PINYIN_N",
+        "value": "Shaanxi Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        118.02272056,
+        27.13953628,
+        122.782921359,
+        31.176653273
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-zhejiang",
+      "name_zh": "浙江",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M004100000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "11",
+        "property": "H_PINYIN_N",
+        "value": "Zhejiang Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        113.575332703,
+        24.491785041,
+        118.484781209,
+        30.078515754
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-jiangxi",
+      "name_zh": "江西",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M004500000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "12",
+        "property": "H_PINYIN_N",
+        "value": "Jiangxi Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        108.36005463,
+        24.64274079,
+        116.14330857,
+        33.251725718
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-huguang",
+      "name_zh": "湖广",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M005100000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "13",
+        "property": "H_PINYIN_N",
+        "value": "Huguang Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        100.164186857,
+        25.774392172,
+        110.218946978,
+        34.319110077
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-sichuan",
+      "name_zh": "四川",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M006100000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "9",
+        "property": "H_PINYIN_N",
+        "value": "Sichuan Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        115.853267678,
+        23.565097312,
+        120.721965882,
+        28.310835078
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-fujian",
+      "name_zh": "福建",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M007100000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "14",
+        "property": "H_PINYIN_N",
+        "value": "Fujian Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        107.498218144,
+        18.161233418,
+        117.327727207,
+        25.511030454
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-guangdong",
+      "name_zh": "广东",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M008100000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "15",
+        "property": "H_PINYIN_N",
+        "value": "Guangdong Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        104.485367397,
+        21.59947516,
+        112.505699534,
+        26.384835273
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "medium",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-guangxi",
+      "name_zh": "广西",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M008500000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "16",
+        "property": "H_PINYIN_N",
+        "value": "Guangxi Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        97.535423092,
+        21.14064144,
+        106.185454848,
+        29.48162909
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "low",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-yunnan",
+      "name_zh": "云南",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M009100000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "18",
+        "property": "H_PINYIN_N",
+        "value": "Yunnan Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    },
+    {
+      "bbox_lon_lat": [
+        104.31088523,
+        24.619761219,
+        109.499167,
+        29.087094789
+      ],
+      "boundary_kind": "administrative",
+      "claim_status": "open",
+      "confidence": "low",
+      "geometry_depict_date": "1391-01-01",
+      "historical_fit_status": "research_baseline_only",
+      "id": "ming-guizhou",
+      "name_zh": "贵州",
+      "review_status": "draft",
+      "source_feature": {
+        "code": "M009500000000",
+        "dataset": "hartwell_1391",
+        "feature_id": "17",
+        "property": "H_PINYIN_N",
+        "value": "Guizhou Sheng"
+      },
+      "source_ids": [
+        "SRC-HARTWELL-1391",
+        "SRC-MING-GEO-DRAFT"
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "claim_status": "design_open",
+      "confidence": "unknown",
+      "from_place_id": "beijing",
+      "id": "route-beijing-tongzhou",
+      "kind": "land",
+      "name_zh": "京师—通州",
+      "notes": "",
+      "points": [
+        {
+          "latitude": 39.9042,
+          "longitude": 116.4074,
+          "map_x": 1283.417299,
+          "map_y": 728.369467
+        },
+        {
+          "latitude": 39.9099,
+          "longitude": 116.6564,
+          "map_x": 1288.733086,
+          "map_y": 728.210832
+        }
+      ],
+      "review_status": "draft",
+      "source_ids": [
+        "SRC-ROUTE-DESIGN-DRAFT"
+      ],
+      "to_place_id": "tongzhou"
+    },
+    {
+      "claim_status": "design_open",
+      "confidence": "unknown",
+      "from_place_id": "tongzhou",
+      "id": "route-tongzhou-shanhaiguan",
+      "kind": "land",
+      "name_zh": "通州—山海关",
+      "notes": "",
+      "points": [
+        {
+          "latitude": 39.9099,
+          "longitude": 116.6564,
+          "map_x": 1288.733086,
+          "map_y": 728.210832
+        },
+        {
+          "latitude": 39.3,
+          "longitude": 117.6,
+          "map_x": 1308.877572,
+          "map_y": 745.110675
+        },
+        {
+          "latitude": 39.6,
+          "longitude": 118.7,
+          "map_x": 1332.36097,
+          "map_y": 736.816514
+        },
+        {
+          "latitude": 40.0006,
+          "longitude": 119.7758,
+          "map_x": 1355.327733,
+          "map_y": 725.684809
+        }
+      ],
+      "review_status": "draft",
+      "source_ids": [
+        "SRC-ROUTE-DESIGN-DRAFT"
+      ],
+      "to_place_id": "shanhaiguan"
+    },
+    {
+      "claim_status": "design_open",
+      "confidence": "unknown",
+      "from_place_id": "shanhaiguan",
+      "id": "route-shanhaiguan-ningyuan",
+      "kind": "land",
+      "name_zh": "山海关—宁远",
+      "notes": "",
+      "points": [
+        {
+          "latitude": 40.0006,
+          "longitude": 119.7758,
+          "map_x": 1355.327733,
+          "map_y": 725.684809
+        },
+        {
+          "latitude": 40.2,
+          "longitude": 120.1,
+          "map_x": 1362.248931,
+          "map_y": 720.119632
+        },
+        {
+          "latitude": 40.45,
+          "longitude": 120.4,
+          "map_x": 1368.653494,
+          "map_y": 713.119049
+        },
+        {
+          "latitude": 40.6167,
+          "longitude": 120.731,
+          "map_x": 1375.719861,
+          "map_y": 708.436582
+        }
+      ],
+      "review_status": "draft",
+      "source_ids": [
+        "SRC-ROUTE-DESIGN-DRAFT"
+      ],
+      "to_place_id": "ningyuan"
+    },
+    {
+      "claim_status": "design_open",
+      "confidence": "unknown",
+      "from_place_id": "ningyuan",
+      "id": "route-ningyuan-jinzhou",
+      "kind": "land",
+      "name_zh": "宁远—锦州",
+      "notes": "",
+      "points": [
+        {
+          "latitude": 40.6167,
+          "longitude": 120.731,
+          "map_x": 1375.719861,
+          "map_y": 708.436582
+        },
+        {
+          "latitude": 40.8,
+          "longitude": 120.9,
+          "map_x": 1379.327765,
+          "map_y": 703.274327
+        },
+        {
+          "latitude": 41.0957,
+          "longitude": 121.127,
+          "map_x": 1384.173885,
+          "map_y": 694.916419
+        }
+      ],
+      "review_status": "draft",
+      "source_ids": [
+        "SRC-ROUTE-DESIGN-DRAFT"
+      ],
+      "to_place_id": "jinzhou"
+    },
+    {
+      "claim_status": "design_open",
+      "confidence": "unknown",
+      "from_place_id": "dengzhou",
+      "id": "route-dengzhou-ningyuan-sea",
+      "kind": "sea",
+      "name_zh": "登州—宁远海路",
+      "notes": "仅是可视化草线路径，不是史实航线，也不用于计算距离。",
+      "points": [
+        {
+          "latitude": 37.8107,
+          "longitude": 120.758,
+          "map_x": 1376.296272,
+          "map_y": 785.770723
+        },
+        {
+          "latitude": 38.0,
+          "longitude": 121.8,
+          "map_x": 1398.541454,
+          "map_y": 780.648865
+        },
+        {
+          "latitude": 38.6,
+          "longitude": 122.5,
+          "map_x": 1413.485435,
+          "map_y": 764.326689
+        },
+        {
+          "latitude": 39.5,
+          "longitude": 122.2,
+          "map_x": 1407.080872,
+          "map_y": 739.585209
+        },
+        {
+          "latitude": 40.1,
+          "longitude": 121.4,
+          "map_x": 1390.002037,
+          "map_y": 722.912632
+        },
+        {
+          "latitude": 40.6167,
+          "longitude": 120.731,
+          "map_x": 1375.719861,
+          "map_y": 708.436582
+        }
+      ],
+      "review_status": "draft",
+      "source_ids": [
+        "SRC-ROUTE-DESIGN-DRAFT"
+      ],
+      "to_place_id": "ningyuan"
+    }
+  ],
+  "scenario_id": "ming_1629_east_asia",
+  "schema_version": 1,
+  "separation_contract": {
+    "historical_geometry_defines_simulation_topology": false,
+    "physical_base_contains_political_boundaries": false,
+    "place_screen_coordinates_are_authoritative_world_state": false,
+    "route_polylines_define_simulation_costs": false
+  },
+  "snapshot_date": "1629-01-01"
+}

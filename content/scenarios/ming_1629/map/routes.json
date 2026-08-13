@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "snapshot_date": "1629-01-01",
+  "warning": "这里的折线只负责画在哪里，不定义运输时间、容量、风险或损耗。玩法数值必须由Simulation拥有。",
+  "routes": [
+    {
+      "id": "route-beijing-tongzhou",
+      "name_zh": "京师—通州",
+      "kind": "land",
+      "claim_status": "design_open",
+      "from_place_id": "beijing",
+      "to_place_id": "tongzhou",
+      "path": [[116.4074, 39.9042], [116.6564, 39.9099]],
+      "confidence": "unknown",
+      "review_status": "draft",
+      "source_ids": [ "SRC-ROUTE-DESIGN-DRAFT" ]
+    },
+    {
+      "id": "route-tongzhou-shanhaiguan",
+      "name_zh": "通州—山海关",
+      "kind": "land",
+      "claim_status": "design_open",
+      "from_place_id": "tongzhou",
+      "to_place_id": "shanhaiguan",
+      "path": [[116.6564, 39.9099], [117.6, 39.3], [118.7, 39.6], [119.7758, 40.0006]],
+      "confidence": "unknown",
+      "review_status": "draft",
+      "source_ids": [ "SRC-ROUTE-DESIGN-DRAFT" ]
+    },
+    {
+      "id": "route-shanhaiguan-ningyuan",
+      "name_zh": "山海关—宁远",
+      "kind": "land",
+      "claim_status": "design_open",
+      "from_place_id": "shanhaiguan",
+      "to_place_id": "ningyuan",
+      "path": [[119.7758, 40.0006], [120.1, 40.2], [120.4, 40.45], [120.7310, 40.6167]],
+      "confidence": "unknown",
+      "review_status": "draft",
+      "source_ids": [ "SRC-ROUTE-DESIGN-DRAFT" ]
+    },
+    {
+      "id": "route-ningyuan-jinzhou",
+      "name_zh": "宁远—锦州",
+      "kind": "land",
+      "claim_status": "design_open",
+      "from_place_id": "ningyuan",
+      "to_place_id": "jinzhou",
+      "path": [[120.7310, 40.6167], [120.9, 40.8], [121.1270, 41.0957]],
+      "confidence": "unknown",
+      "review_status": "draft",
+      "source_ids": [ "SRC-ROUTE-DESIGN-DRAFT" ]
+    },
+    {
+      "id": "route-dengzhou-ningyuan-sea",
+      "name_zh": "登州—宁远海路",
+      "kind": "sea",
+      "claim_status": "design_open",
+      "from_place_id": "dengzhou",
+      "to_place_id": "ningyuan",
+      "path": [[120.7580, 37.8107], [121.8, 38.0], [122.5, 38.6], [122.2, 39.5], [121.4, 40.1], [120.7310, 40.6167]],
+      "confidence": "unknown",
+      "review_status": "draft",
+      "source_ids": [ "SRC-ROUTE-DESIGN-DRAFT" ],
+      "notes": "仅是可视化草线路径，不是史实航线，也不用于计算距离。"
+    }
+  ]
+}

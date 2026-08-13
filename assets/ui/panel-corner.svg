@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 自制面板角花：四个角旋转使用即可组成统一的古籍式面板边框。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <path d="M4 30V4h26M4 16c9 0 14-5 14-12M4 22c13 0 20-7 20-18" fill="none" stroke="#B59047" stroke-width="3" stroke-linecap="round"/>
+  <path d="M10 4v8h8" fill="none" stroke="#A33A2E" stroke-width="3" stroke-linecap="round"/>
+</svg>

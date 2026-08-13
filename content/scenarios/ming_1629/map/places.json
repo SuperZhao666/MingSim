@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "snapshot_date": "1629-01-01",
+  "places": [
+    {
+      "id": "beijing",
+      "name_zh": "京师",
+      "kind": "capital",
+      "longitude": 116.4074,
+      "latitude": 39.9042,
+      "coordinate_epoch": "modern_anchor",
+      "historical_site_status": "open",
+      "confidence": "unknown",
+      "review_status": "draft",
+      "source_ids": [ "SRC-PLACE-MODERN-ANCHOR" ],
+      "notes": "坐标是历史城市的现代地理锚点，不表示现代行政区。"
+    },
+    {
+      "id": "tongzhou",
+      "name_zh": "通州",
+      "kind": "transport_hub",
+      "longitude": 116.6564,
+      "latitude": 39.9099,
+      "coordinate_epoch": "modern_anchor",
+      "historical_site_status": "open",
+      "confidence": "unknown",
+      "review_status": "draft",
+      "source_ids": [ "SRC-PLACE-MODERN-ANCHOR" ],
+      "notes": "待用历史城址资料复核。"
+    },
+    {
+      "id": "shanhaiguan",
+      "name_zh": "山海关",
+      "kind": "pass",
+      "longitude": 119.7758,
+      "latitude": 40.0006,
+      "coordinate_epoch": "modern_anchor",
+      "historical_site_status": "open",
+      "confidence": "unknown",
+      "review_status": "draft",
+      "source_ids": [ "SRC-PLACE-MODERN-ANCHOR" ],
+      "notes": "待用关城史料复核显示点。"
+    },
+    {
+      "id": "ningyuan",
+      "name_zh": "宁远",
+      "kind": "fortress",
+      "longitude": 120.7310,
+      "latitude": 40.6167,
+      "coordinate_epoch": "modern_anchor",
+      "historical_site_status": "open",
+      "confidence": "unknown",
+      "review_status": "draft",
+      "source_ids": [ "SRC-PLACE-MODERN-ANCHOR" ],
+      "notes": "以今兴城古城附近为锚点；历史城址范围待复核。"
+    },
+    {
+      "id": "jinzhou",
+      "name_zh": "锦州",
+      "kind": "fortress",
+      "longitude": 121.1270,
+      "latitude": 41.0957,
+      "coordinate_epoch": "modern_anchor",
+      "historical_site_status": "open",
+      "confidence": "unknown",
+      "review_status": "draft",
+      "source_ids": [ "SRC-PLACE-MODERN-ANCHOR" ],
+      "notes": "现代城市中心仅作初始锚点；历史城址待复核。"
+    },
+    {
+      "id": "dengzhou",
+      "name_zh": "登州",
+      "kind": "port",
+      "longitude": 120.7580,
+      "latitude": 37.8107,
+      "coordinate_epoch": "modern_anchor",
+      "historical_site_status": "open",
+      "confidence": "unknown",
+      "review_status": "draft",
+      "source_ids": [ "SRC-PLACE-MODERN-ANCHOR" ],
+      "notes": "以今蓬莱古城附近为锚点；历史港城范围待复核。"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Ming.Application\Ming.Application.csproj" />
+    <ProjectReference Include="..\Ming.Domain\Ming.Domain.csproj" />
+  </ItemGroup>
+</Project>

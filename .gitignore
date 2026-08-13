@@ -1,0 +1,55 @@
+# .NET 编译产物
+bin/
+obj/
+
+# Godot 编辑器生成的本地文件
+.godot/
+*.godot/
+*.import
+*.translation
+
+# 本地运行产生的存档和日志
+saves/
+logs/
+artifacts/
+*.db
+*.db-shm
+*.db-wal
+
+# Python 本地缓存
+__pycache__/
+*.py[cod]
+.venv/
+
+# 可从已解压数据重新取得的下载包
+assets/maps/sources/natural-earth-physical/*.zip
+assets/maps/sources/natural-earth-physical/**/*.dbf
+assets/maps/sources/natural-earth-physical/**/*.shx
+assets/maps/sources/natural-earth-physical/**/*.cpg
+
+# 已撤下的现代省界实验；只保留在本机作错误复盘，不进入公开仓库
+assets/maps/source/natural-earth/
+assets/ui/generated/ming-strategy-map-natural-earth*
+assets/ui/generated/ming-strategy-map-texture.png
+assets/ui/generated/ming-minister-portrait.png
+tools/build_real_china_map.py
+tools/render_svg_with_godot.gd
+tools/render_svg_with_godot.gd.uid
+tools/inspect_map_scene.gd
+tools/inspect_map_scene.gd.uid
+
+# 与 MingSim 无关的本机 Codex 恢复脚本
+/populate_local_thread_catalog.py
+/probe_appserver_threads.py
+/rebuild_all_local_catalog.ps1
+/restart_after_catalog_population.ps1
+
+# IDE 本地文件
+.vs/
+.idea/
+*.user
+*.suo
+
+# 常见系统文件
+.DS_Store
+Thumbs.db

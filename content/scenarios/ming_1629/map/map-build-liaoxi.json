@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "scenario_id": "ming_1629_liaoxi_detail",
+  "snapshot_date": "1629-01-01",
+  "crs": "EPSG:4326",
+  "projection": "web_mercator",
+  "bounds": [115.0, 36.0, 123.0, 42.5],
+  "canvas": {
+    "width": 2400,
+    "height": 1600,
+    "padding": 48
+  },
+  "sources": {
+    "physical_land_shp": "assets/maps/sources/natural-earth-physical/land/ne_10m_land.shp",
+    "physical_rivers_shp": "assets/maps/sources/natural-earth-physical/rivers/ne_10m_rivers_lake_centerlines.shp",
+    "physical_lakes_shp": "assets/maps/sources/natural-earth-physical/lakes/ne_10m_lakes.shp",
+    "hartwell_1391_geojson": "assets/maps/sources/hartwell-cc0/hartwell-ming-1391-provinces.geojson",
+    "historical_regions": "content/scenarios/ming_1629/map/historical-regions.json",
+    "places": "content/scenarios/ming_1629/map/places.json",
+    "routes": "content/scenarios/ming_1629/map/routes.json",
+    "source_ledger": "content/scenarios/ming_1629/map/source-ledger.csv"
+  },
+  "output_dir": "assets/maps/generated/ming_1629_liaoxi"
+}

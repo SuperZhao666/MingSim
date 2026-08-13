@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 自制奏疏图标：用于“已提交事实生成奏疏”的入口。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <path d="M14 11h36v42H14z" fill="#F4E9D8" stroke="#2B1F1A" stroke-width="3"/>
+  <path d="M20 19h24M20 27h24M20 35h18M20 43h14" stroke="#A33A2E" stroke-width="3" stroke-linecap="round"/>
+  <path d="M46 11v42l-6-5-6 5V11" fill="#A33A2E" opacity="0.9"/>
+</svg>

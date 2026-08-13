@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Ming.Agents\Ming.Agents.csproj" />
+    <ProjectReference Include="..\Ming.Application\Ming.Application.csproj" />
+    <ProjectReference Include="..\Ming.Domain\Ming.Domain.csproj" />
+    <ProjectReference Include="..\Ming.Persistence\Ming.Persistence.csproj" />
+    <ProjectReference Include="..\Ming.Simulation\Ming.Simulation.csproj" />
+  </ItemGroup>
+</Project>

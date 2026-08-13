@@ -1,0 +1,124 @@
+{
+  "id": "ming_1627_demo",
+  "startTurn": 1,
+  "treasurySilver": 200000,
+  "map": {
+    "id": "ming_1627_demo_map",
+    "provinces": [
+      {
+        "id": "capital",
+        "name": "京师",
+        "adjacentTo": [ "liaodong" ]
+      },
+      {
+        "id": "liaodong",
+        "name": "辽东",
+        "adjacentTo": [ "capital" ]
+      }
+    ]
+  },
+  "characters": [
+    {
+      "id": "emperor",
+      "name": "皇帝",
+      "locationId": "capital",
+      "officeId": "emperor",
+      "attributes": {
+        "administration": 70,
+        "finance": 55,
+        "martial": 40,
+        "intrigue": 65,
+        "learning": 80
+      },
+      "personality": {
+        "honest": true,
+        "bold": true,
+        "loyalToRuler": true,
+        "compassionate": false
+      }
+    },
+    {
+      "id": "minister-works",
+      "name": "工部尚书",
+      "locationId": "capital",
+      "officeId": "ministry_of_works",
+      "attributes": {
+        "administration": 82,
+        "finance": 60,
+        "martial": 30,
+        "intrigue": 45,
+        "learning": 75
+      },
+      "personality": {
+        "honest": true,
+        "bold": false,
+        "loyalToRuler": true,
+        "compassionate": true
+      }
+    },
+    {
+      "id": "minister-war",
+      "name": "兵部尚书",
+      "locationId": "capital",
+      "officeId": "ministry_of_war",
+      "attributes": {
+        "administration": 65,
+        "finance": 40,
+        "martial": 78,
+        "intrigue": 55,
+        "learning": 60
+      },
+      "personality": {
+        "honest": true,
+        "bold": true,
+        "loyalToRuler": true,
+        "compassionate": false
+      }
+    }
+  ],
+  "institutions": [
+    {
+      "id": "ministry-of-works",
+      "name": "工部",
+      "capabilities": [ "BuildIndustry" ],
+      "members": [ "minister-works" ]
+    },
+    {
+      "id": "ministry-of-war",
+      "name": "兵部",
+      "capabilities": [ "TrainArmy", "ConvertArmy" ],
+      "members": [ "minister-war" ]
+    }
+  ],
+  "capabilityGrants": [
+    {
+      "actorId": "minister-works",
+      "capability": "BuildIndustry",
+      "resourceId": "capital"
+    },
+    {
+      "actorId": "minister-war",
+      "capability": "ConvertArmy",
+      "resourceId": "army-frontier"
+    }
+  ],
+  "inventory": [
+    {
+      "resourceType": "flintlock",
+      "quantity": 10000
+    },
+    {
+      "resourceType": "grain",
+      "quantity": 50000
+    }
+  ],
+  "armies": [
+    {
+      "id": "army-frontier",
+      "name": "辽东前线军",
+      "locationId": "liaodong",
+      "auxiliaries": 12000,
+      "lineInfantry": 3000
+    }
+  ]
+}

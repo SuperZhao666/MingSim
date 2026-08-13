@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MingSim 自制 UI 线框图。
+  目的：先固定信息层级，再进入 Godot 做可交互组件；不是最终美术成品。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="960" viewBox="0 0 1600 960">
+  <defs>
+    <linearGradient id="topbar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2B1F1A"/>
+      <stop offset="1" stop-color="#49352A"/>
+    </linearGradient>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <path d="M28 0H0V28" fill="none" stroke="#6A9A8B" stroke-width="1" opacity="0.18"/>
+    </pattern>
+    <style>
+      .title { font: 700 28px 'Noto Serif SC','Microsoft YaHei',serif; fill:#F4E9D8; }
+      .heading { font: 700 20px 'Noto Serif SC','Microsoft YaHei',serif; fill:#2B1F1A; }
+      .body { font: 400 16px 'Noto Serif SC','Microsoft YaHei',serif; fill:#2B1F1A; }
+      .small { font: 400 13px 'Noto Serif SC','Microsoft YaHei',serif; fill:#66574B; }
+      .metric { font: 700 22px 'Noto Serif SC','Microsoft YaHei',serif; fill:#A33A2E; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="960" fill="#18232A"/>
+  <rect x="0" y="0" width="1600" height="82" fill="url(#topbar)"/>
+  <rect x="0" y="82" width="1600" height="878" fill="#132B38"/>
+  <rect x="0" y="82" width="1600" height="878" fill="url(#grid)"/>
+
+  <!-- 顶部：时间、国库、粮道等跨页面都需要看到的世界指标。 -->
+  <circle cx="42" cy="41" r="26" fill="#A33A2E"/>
+  <path d="M29 28h26v7H36v7h17v7H36v12h-7z" fill="#F4E9D8"/>
+  <text x="82" y="50" class="title">大明御案 · 崇祯元年春</text>
+  <text x="735" y="34" class="small" fill="#E2D0B5">国库</text>
+  <text x="735" y="61" class="metric" fill="#F4E9D8">150,000 两</text>
+  <text x="965" y="34" class="small" fill="#E2D0B5">辽东粮道</text>
+  <text x="965" y="61" class="metric" fill="#F4E9D8">62% 可用</text>
+  <text x="1185" y="34" class="small" fill="#E2D0B5">待阅奏疏</text>
+  <text x="1185" y="61" class="metric" fill="#F4E9D8">7 件</text>
+  <rect x="1405" y="20" width="145" height="42" rx="4" fill="#A33A2E"/>
+  <text x="1430" y="47" class="body" fill="#F4E9D8">推进一回合</text>
+
+  <!-- 左侧：活地图。颜色只是地区状态，具体拓扑由 Simulation 的 TerritoryGraph 提供。 -->
+  <rect x="30" y="112" width="890" height="818" rx="6" fill="#334A45" stroke="#B59047" stroke-width="2"/>
+  <text x="60" y="155" class="heading" fill="#F4E9D8">天下 · 军政地图</text>
+  <text x="60" y="184" class="small" fill="#E2D0B5">点击地区查看税基、官员、军队与后勤节点</text>
+  <path d="M175 260l170-55 165 75 130-40 155 100-70 205-185 75-120-60-180 80-92-165z" fill="#6A9A8B" opacity="0.42" stroke="#F4E9D8" stroke-width="3"/>
+  <path d="M215 410l190-70 210 80 150 80M300 600l180-160 190 150M470 210l-40 460" fill="none" stroke="#F4E9D8" stroke-width="3" opacity="0.7"/>
+  <circle cx="420" cy="440" r="14" fill="#A33A2E" stroke="#F4E9D8" stroke-width="4"/>
+  <circle cx="650" cy="510" r="12" fill="#B59047" stroke="#F4E9D8" stroke-width="4"/>
+  <circle cx="760" cy="330" r="11" fill="#C64A3B" stroke="#F4E9D8" stroke-width="4"/>
+  <text x="395" y="480" class="body" fill="#F4E9D8">京师</text>
+  <text x="625" y="550" class="body" fill="#F4E9D8">辽东</text>
+  <text x="730" y="370" class="body" fill="#F4E9D8">登莱</text>
+  <path d="M420 440C500 460 560 500 650 510" fill="none" stroke="#B59047" stroke-width="6" stroke-dasharray="12 8"/>
+  <text x="60" y="855" class="small" fill="#E2D0B5">图层：政治 · 税收 · 粮价 · 灾情 · 补给</text>
+
+  <!-- 右上：御案 / 奏疏列表。 -->
+  <rect x="950" y="112" width="620" height="385" rx="6" fill="#F4E9D8" stroke="#B59047" stroke-width="2"/>
+  <text x="982" y="155" class="heading">御案 · 待处理政务</text>
+  <rect x="982" y="180" width="556" height="74" rx="4" fill="#E2D0B5"/>
+  <circle cx="1015" cy="217" r="15" fill="#A33A2E"/>
+  <text x="1045" y="213" class="body">工部：军器局工坊项目已登记</text>
+  <text x="1045" y="237" class="small">预算 50,000 两 · 预计两回合后具备产能</text>
+  <rect x="982" y="269" width="556" height="74" rx="4" fill="#E2D0B5"/>
+  <circle cx="1015" cy="306" r="15" fill="#3C6B64"/>
+  <text x="1045" y="302" class="body">兵部：辽东前线完成 1,000 人改编</text>
+  <text x="1045" y="326" class="small">消耗燧发枪 1,000 支 · 列装步兵增加 1,000</text>
+  <rect x="982" y="358" width="556" height="74" rx="4" fill="#E2D0B5"/>
+  <circle cx="1015" cy="395" r="15" fill="#B59047"/>
+  <text x="1045" y="391" class="body">系统：回合已提交，快照校验通过</text>
+  <text x="1045" y="415" class="small">叙事只从已提交审计事件生成</text>
+
+  <!-- 右下：人物卡与关键指标。 -->
+  <rect x="950" y="525" width="620" height="405" rx="6" fill="#F4E9D8" stroke="#B59047" stroke-width="2"/>
+  <text x="982" y="568" class="heading">人物 · 兵部尚书</text>
+  <circle cx="1035" cy="660" r="66" fill="#334A45" stroke="#A33A2E" stroke-width="5"/>
+  <path d="M1000 690c10-45 90-45 100 0" fill="#2B1F1A"/>
+  <circle cx="1035" cy="642" r="28" fill="#E2D0B5"/>
+  <text x="1135" y="628" class="body">忠诚：78</text>
+  <text x="1135" y="660" class="body">压力：24</text>
+  <text x="1135" y="692" class="body">军略：80 · 谋略：55</text>
+  <text x="982" y="780" class="heading">当前意图</text>
+  <text x="982" y="812" class="body">“先补足装备，再请求推进辽东粮道。”</text>
+  <rect x="982" y="846" width="170" height="42" rx="4" fill="#3C6B64"/>
+  <text x="1022" y="873" class="body" fill="#F4E9D8">查看权限</text>
+  <rect x="1170" y="846" width="170" height="42" rx="4" fill="#A33A2E"/>
+  <text x="1210" y="873" class="body" fill="#F4E9D8">查看记忆</text>
+</svg>

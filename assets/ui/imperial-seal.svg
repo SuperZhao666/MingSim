@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MingSim 自制 UI 素材：朱印。
+  这是矢量图，不依赖外部图片，方便后续在 Godot 中缩放和换色。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <filter id="rough-paper" x="-10%" y="-10%" width="120%" height="120%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves="2" seed="17" result="noise"/>
+      <feColorMatrix in="noise" type="saturate" values="0" result="grayNoise"/>
+      <feComponentTransfer in="grayNoise" result="softNoise">
+        <feFuncA type="table" tableValues="0 0.08"/>
+      </feComponentTransfer>
+      <feBlend in="SourceGraphic" in2="softNoise" mode="multiply"/>
+    </filter>
+  </defs>
+  <g filter="url(#rough-paper)">
+    <rect x="10" y="10" width="108" height="108" rx="8" fill="#A33A2E"/>
+    <rect x="17" y="17" width="94" height="94" rx="4" fill="none" stroke="#F4E9D8" stroke-width="3" opacity="0.85"/>
+    <path d="M35 34h58v12H47v14h38v12H47v22H35z" fill="#F4E9D8"/>
+    <path d="M80 34h13v60H80z" fill="#F4E9D8"/>
+  </g>
+</svg>

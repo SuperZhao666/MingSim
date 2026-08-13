@@ -1,0 +1,28 @@
+; Godot project configuration for the MingSim presentation shell.
+; 规则计算仍然由 .NET solution 负责；Godot 只负责展示与交互原型。
+config_version=5
+
+[application]
+
+config/name="MingSim - 明代御案"
+run/main_scene="res://src/Ming.Godot/scenes/ui_preview.tscn"
+config/features=PackedStringArray("4.6", "C#", "GL Compatibility")
+
+[dotnet]
+
+project/assembly_name="Ming.Godot"
+project/solution_directory="res://src/Ming.Godot"
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=960
+window/size/window_width_override=1600
+window/size/window_height_override=960
+window/stretch/mode="canvas_items"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+environment/defaults/default_clear_color=Color(0.09, 0.11, 0.10, 1)

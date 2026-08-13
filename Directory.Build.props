@@ -1,0 +1,16 @@
+<Project>
+  <!--
+    这是整个解决方案共用的编译设置。
+    把它放在根目录后，src 和 tests 下的每个项目都会自动继承，
+    这样可以避免不同项目各自复制一份容易不一致的配置。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <RootNamespace>MingSim</RootNamespace>
+    <AssemblyName>$(MSBuildProjectName)</AssemblyName>
+  </PropertyGroup>
+</Project>

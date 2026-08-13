@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 自制兵部图标：旗帜和粮道比单纯的“战力数字”更能提醒玩家准备成本。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <circle cx="32" cy="32" r="27" fill="#F4E9D8" stroke="#3C6B64" stroke-width="3"/>
+  <path d="M22 14v37" stroke="#2B1F1A" stroke-width="4" stroke-linecap="round"/>
+  <path d="M24 17h23l-7 9 7 9H24z" fill="#A33A2E" stroke="#2B1F1A" stroke-width="2"/>
+  <path d="M17 51h30" stroke="#B59047" stroke-width="4" stroke-linecap="round"/>
+  <path d="M30 43c5-5 10-5 15 0" fill="none" stroke="#3C6B64" stroke-width="3" stroke-linecap="round"/>
+</svg>
