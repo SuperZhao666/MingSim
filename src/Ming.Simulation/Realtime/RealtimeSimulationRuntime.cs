@@ -8,9 +8,7 @@ using MingSim.Domain.Realtime;
 
 namespace MingSim.Simulation.Realtime;
 
-/// <summary>
-/// 玩家或代理想让实时世界做的一件事。
-/// </summary>
+/// <summary>玩家或代理想让实时世界做的一件事。</summary>
 public abstract record RealtimeCommand(
     string CommandId,
     CharacterId ActorId,
@@ -29,9 +27,16 @@ public sealed record MoveArmyCommand(
 /// <summary>调度器内部保存的一个未来事件。</summary>
 public sealed record ScheduledSimulationEvent(
     string EventId,
-    DateTime DueAt,
+    GameTime DueGameTime,
+    int Phase,
+    int Priority,
+    long CreationSequence,
     string EventType,
-    IReadOnlyDictionary<string, string> Data);
+    IReadOnlyDictionary<string, string> Data)
+{
+    /// <summary>旧原型读取时间的兼容别名；排序使用 DueGameTime。</summary>
+    public DateTime DueAt => DueGameTime.Value;
+}
 
 /// <summary>实时命令入队后的结果。</summary>
 public sealed record RealtimeCommandResult(
@@ -40,7 +45,7 @@ public sealed record RealtimeCommandResult(
     string Message,
     IReadOnlyList<SimulationError> Errors);
 
-/// <summary>一次现实时间推进后的只读报告。</summary>
+/// <summary>一次明确目标时间推进后的只读报告。</summary>
 public sealed record RealtimeAdvanceResult(
     WorldState State,
     IReadOnlyList<DomainEvent> Events,
@@ -48,30 +53,37 @@ public sealed record RealtimeAdvanceResult(
     int ProcessedScheduledEvents,
     int PendingScheduledEvents,
     bool IsPaused,
-    double Speed);
+    double Speed,
+    string StateHash);
 
 /// <summary>
-/// 混合式实时模拟运行时：固定小时基础时钟 + 离散未来事件。
+/// 可暂停实时模拟运行时，也是实时世界的单写者。
 /// </summary>
 /// <remarks>
-/// 这是从旧“ResolveTurn”骨架迈向实时推演的第一条真正执行链：
-///
-/// 1. Godot 或 Agent 只能把命令放进这里；
-/// 2. 只有这个运行时所属的模拟线程修改 WorldState；
-/// 3. 现实时间被转换成游戏时间；
-/// 4. 逐小时推进，遇到到期事件就立刻处理；
-/// 5. UI 读取 Clone，不拿到可写的权威对象。
-///
-/// 第一版只实现“军队行军”这个可见玩法切片，但调度器已经能承载公文、
-/// 粮队、财政、人物决策等后续事件。LLM 不在主循环里同步等待。
+/// <para>
+/// 权威 API 是 <see cref="AdvanceTo(GameTime)" />：调用方给出目标游戏时刻，
+/// 运行时负责按稳定调度顺序处理其间的事件。这样 30 FPS、60 FPS 或一次性快进
+/// 不会把渲染帧切分泄漏进规则结果。
+/// </para>
+/// <para>
+/// 旧的 <see cref="Advance(TimeSpan)" /> 只保留为 UI 原型兼容适配器；它先把现实时间
+/// 换算成目标 <see cref="GameTime" />，然后仍然走同一条权威推进路径。
+/// </para>
 /// </remarks>
 public sealed class RealtimeSimulationRuntime
 {
     private const double GameHoursPerRealSecondAtSpeedOne = 6.0;
+    private const int DailyHeartbeatPhase = 2;
+    private const string RandomState = "schema=1;streams=none";
+
     private readonly CapabilityAuthorizer _authorizer = new();
-    private readonly PriorityQueue<ScheduledSimulationEvent, (DateTime DueAt, long Sequence)> _events = new();
+    private readonly PriorityQueue<
+        ScheduledSimulationEvent,
+        (GameTime DueGameTime, int Phase, int Priority, long CreationSequence)> _events = new();
+    private readonly Dictionary<string, (string Fingerprint, RealtimeCommandResult Result)> _commandOutcomes =
+        new(StringComparer.Ordinal);
     private readonly List<DomainEvent> _eventBuffer = [];
-    private long _sequence;
+    private long _nextCreationSequence;
 
     public RealtimeSimulationRuntime(WorldState initialState)
     {
@@ -84,11 +96,20 @@ public sealed class RealtimeSimulationRuntime
     /// <summary>模拟线程唯一拥有的权威状态。</summary>
     public WorldState State { get; }
 
-    /// <summary>是否暂停游戏时间。暂停时 UI 仍然可以响应命令和查看地图。</summary>
+    /// <summary>是否暂停游戏时间。暂停时仍可查看状态和接纳命令。</summary>
     public bool IsPaused { get; private set; }
 
-    /// <summary>1 到 5 倍的游戏速度；它只影响时间换算，不改变规则结果。</summary>
+    /// <summary>1 到 5 倍的游戏速度；它只影响兼容适配器的时间换算。</summary>
     public double Speed { get; private set; }
+
+    /// <summary>当前状态、调度队列和随机流元数据的规范化哈希。</summary>
+    public string StateHash => RealtimeStateHasher.Compute(
+        State,
+        GetScheduledEvents(),
+        RandomState,
+        _commandOutcomes
+            .OrderBy(item => item.Key, StringComparer.Ordinal)
+            .Select(item => $"{item.Key}:{item.Value.Fingerprint}:{item.Value.Result.Accepted}:{string.Join(',', item.Value.Result.Errors.Select(error => error.Code))}"));
 
     public void SetPaused(bool paused) => IsPaused = paused;
 
@@ -104,11 +125,89 @@ public sealed class RealtimeSimulationRuntime
 
     /// <summary>
     /// 接收一条行军命令，但不马上瞬移军队。
+    /// 同一 CommandId 的重试返回第一次结果，不会再次入队。
     /// </summary>
     public RealtimeCommandResult EnqueueMoveArmy(MoveArmyCommand command)
     {
         ArgumentNullException.ThrowIfNull(command);
+        var fingerprint = Fingerprint(command);
 
+        if (_commandOutcomes.TryGetValue(command.CommandId, out var previous))
+        {
+            if (previous.Fingerprint != fingerprint)
+            {
+                return Reject(command.CommandId, "同一命令编号不能携带不同的命令内容。", "IDEMPOTENCY_CONFLICT");
+            }
+
+            return previous.Result;
+        }
+
+        var result = ValidateAndScheduleMove(command);
+        if (result.Accepted)
+        {
+            // 接纳命令会改变权威 Scheduler，因此它本身就是一次最小实时提交。
+            State.CommitRealtime($"command-{command.CommandId}");
+        }
+
+        _commandOutcomes.Add(command.CommandId, (fingerprint, result));
+        return result;
+    }
+
+    /// <summary>
+    /// 确定性地推进到目标游戏时刻。
+    /// </summary>
+    public RealtimeAdvanceResult AdvanceTo(GameTime targetGameTime)
+    {
+        _eventBuffer.Clear();
+        var startTime = State.GameTime;
+        var processed = 0;
+
+        if (!IsPaused && targetGameTime > State.GameTime)
+        {
+            while (State.GameTime < targetGameTime)
+            {
+                if (!_events.TryPeek(out _, out var nextPriority) || nextPriority.DueGameTime > targetGameTime)
+                {
+                    State.AdvanceTo(targetGameTime);
+                    break;
+                }
+
+                // 直接跳到下一个权威边界；不把现实帧或无意义的小时切分写进规则。
+                State.AdvanceTo(nextPriority.DueGameTime);
+                processed += ProcessDueEvents();
+            }
+        }
+
+        return Report(State.GameTime.Value - startTime.Value, processed);
+    }
+
+    /// <summary>
+    /// 旧 UI 原型的兼容入口，最终仍调用 AdvanceTo。
+    /// </summary>
+    public RealtimeAdvanceResult Advance(TimeSpan realElapsed)
+    {
+        if (realElapsed < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(realElapsed), "现实时间不能倒退。");
+        }
+
+        var gameHours = realElapsed.TotalSeconds * GameHoursPerRealSecondAtSpeedOne * Speed;
+        var targetTime = new GameTime(State.GameTime.Value.AddHours(gameHours));
+        return AdvanceTo(targetTime);
+    }
+
+    /// <summary>按 (时间、阶段、优先级、创建序号) 返回调度器的稳定快照。</summary>
+    public IReadOnlyList<ScheduledSimulationEvent> GetScheduledEvents() =>
+        _events.UnorderedItems
+            .OrderBy(item => item.Priority.DueGameTime)
+            .ThenBy(item => item.Priority.Phase)
+            .ThenBy(item => item.Priority.Priority)
+            .ThenBy(item => item.Priority.CreationSequence)
+            .Select(item => item.Element)
+            .ToArray();
+
+    private RealtimeCommandResult ValidateAndScheduleMove(MoveArmyCommand command)
+    {
         if (!State.Military.Armies.TryGetValue(command.ArmyId, out var army))
         {
             return Reject(command.CommandId, $"军队 {command.ArmyId} 不存在。", "ARMY_NOT_FOUND");
@@ -142,10 +241,12 @@ public sealed class RealtimeSimulationRuntime
             return Reject(command.CommandId, "行军时间必须在 1 小时到 365 天之间。", "INVALID_TRAVEL_TIME");
         }
 
-        var dueAt = State.CurrentTime.AddHours(command.TravelHours);
+        var dueGameTime = new GameTime(State.GameTime.Value.AddHours(command.TravelHours));
         Schedule(
             $"army-arrival-{command.CommandId}",
-            dueAt,
+            dueGameTime,
+            phase: 1,
+            priority: 0,
             "ArmyArrival",
             new Dictionary<string, string>
             {
@@ -157,60 +258,23 @@ public sealed class RealtimeSimulationRuntime
         _eventBuffer.Add(CreateEvent(
             command.CommandId,
             "ArmyMarchStarted",
-            $"军队 {army.Name} 已从 {army.LocationId} 出发，预计 {dueAt:yyyy-MM-dd HH:mm} 抵达 {command.DestinationId}。",
+            $"军队 {army.Name} 已从 {army.LocationId} 出发，预计 {dueGameTime.Value:yyyy-MM-dd HH:mm} 抵达 {command.DestinationId}。",
             ("army_id", command.ArmyId.Value),
             ("from", army.LocationId.Value),
             ("to", command.DestinationId.Value),
-            ("due_at", dueAt.ToString("O"))));
+            ("due_at", dueGameTime.ToString())));
 
         return new RealtimeCommandResult(true, command.CommandId, "行军命令已进入实时调度器。", []);
-    }
-
-    /// <summary>
-    /// 把一段现实时间换算成游戏时间，并执行所有已经到期的事件。
-    /// </summary>
-    public RealtimeAdvanceResult Advance(TimeSpan realElapsed)
-    {
-        if (realElapsed < TimeSpan.Zero)
-        {
-            throw new ArgumentOutOfRangeException(nameof(realElapsed), "现实时间不能倒退。");
-        }
-
-        _eventBuffer.Clear();
-        if (IsPaused || realElapsed == TimeSpan.Zero)
-        {
-            return Report(TimeSpan.Zero, 0);
-        }
-
-        var gameHours = realElapsed.TotalSeconds * GameHoursPerRealSecondAtSpeedOne * Speed;
-        var targetTime = State.CurrentTime.AddHours(gameHours);
-        var startTime = State.CurrentTime;
-        var processed = 0;
-
-        // 固定 1 小时推进，确保事件顺序稳定，也方便以后在小时边界挂载系统。
-        while (State.CurrentTime.AddHours(1) <= targetTime)
-        {
-            State.AdvanceTime(TimeSpan.FromHours(1));
-            processed += ProcessDueEvents();
-        }
-
-        var remainder = targetTime - State.CurrentTime;
-        if (remainder > TimeSpan.Zero)
-        {
-            State.AdvanceTime(remainder);
-            processed += ProcessDueEvents();
-        }
-
-        return Report(State.CurrentTime - startTime, processed);
     }
 
     private int ProcessDueEvents()
     {
         var processed = 0;
-        while (_events.TryPeek(out _, out var priority) && priority.DueAt <= State.CurrentTime)
+        while (_events.TryPeek(out _, out var priority) && priority.DueGameTime <= State.GameTime)
         {
             var scheduled = _events.Dequeue();
             ApplyScheduledEvent(scheduled);
+            State.CommitRealtime($"realtime-{scheduled.CreationSequence}");
             processed++;
         }
 
@@ -268,20 +332,33 @@ public sealed class RealtimeSimulationRuntime
         var nextMidnight = State.CurrentTime.Date.AddDays(1);
         Schedule(
             $"daily-heartbeat-{nextMidnight:yyyyMMdd}",
-            nextMidnight,
+            new GameTime(nextMidnight),
+            DailyHeartbeatPhase,
+            priority: 0,
             "DailyHeartbeat",
             new Dictionary<string, string>());
     }
 
     private void Schedule(
         string eventId,
-        DateTime dueAt,
+        GameTime dueGameTime,
+        int phase,
+        int priority,
         string eventType,
         IReadOnlyDictionary<string, string> data)
     {
+        var creationSequence = _nextCreationSequence++;
+        var scheduled = new ScheduledSimulationEvent(
+            eventId,
+            dueGameTime,
+            phase,
+            priority,
+            creationSequence,
+            eventType,
+            new Dictionary<string, string>(data, StringComparer.Ordinal));
         _events.Enqueue(
-            new ScheduledSimulationEvent(eventId, dueAt, eventType, data),
-            (dueAt, _sequence++));
+            scheduled,
+            (dueGameTime, phase, priority, creationSequence));
     }
 
     private RealtimeAdvanceResult Report(TimeSpan advanced, int processed)
@@ -293,7 +370,8 @@ public sealed class RealtimeSimulationRuntime
             processed,
             _events.Count,
             IsPaused,
-            Speed);
+            Speed,
+            StateHash);
     }
 
     private DomainEvent CreateEvent(
@@ -311,6 +389,15 @@ public sealed class RealtimeSimulationRuntime
             data.ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal),
             State.CurrentTime);
     }
+
+    private static string Fingerprint(MoveArmyCommand command) =>
+        string.Join(
+            "|",
+            command.ActorId.Value,
+            command.ArmyId.Value,
+            command.DestinationId.Value,
+            command.TravelHours,
+            command.RequestedAt.ToUniversalTime().Ticks);
 
     private static RealtimeCommandResult Reject(
         string commandId,

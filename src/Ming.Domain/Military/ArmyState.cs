@@ -60,7 +60,7 @@ public sealed class ArmyState
     /// 只有模拟内核在“行军抵达事件”里才应该调用它；
     /// UI 画面上的图标移动不能直接修改这个字段。
     /// </summary>
-    public void ArriveAt(ProvinceId locationId) => LocationId = locationId;
+    internal void ArriveAt(ProvinceId locationId) => LocationId = locationId;
 
     public ArmyState Clone()
     {
