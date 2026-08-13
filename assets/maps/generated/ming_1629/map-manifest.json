@@ -2,8 +2,8 @@
   "asset_sha256": {
     "debug-map.png": "f4427c4d4cc8a037850cf9f9b89550c99f953f2f5d2fa6e28437f2a3519d18aa",
     "history-overlay.png": "dace64ac6bb444f32718ccc699fb08bbc4f9bcc407af24607f473a227c51603a",
-    "physical-base.png": "eeb1fdf47654b67a657b6a00967a9772112ec73cbe644864cd428a34cf113896",
-    "regions.geojson": "9f734ca7c8be3a3c4c601ae30d7b7ef6224410e4d5d2207b54ccdef796b63069"
+    "physical-base.png": "b5fa597ca11482ea295e062b388bf3d6afca72c37484a83183e547bd993ef6a5",
+    "regions.geojson": "220cd351c79718b9554b1f1aa3f1710979ad2b4013f448c18bea5b78df039c37"
   },
   "assets": {
     "debug_map": "res://assets/maps/generated/ming_1629/debug-map.png",

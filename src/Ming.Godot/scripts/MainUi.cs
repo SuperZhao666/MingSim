@@ -5,277 +5,398 @@ using System.Collections.Generic;
 namespace Ming.Godot;
 
 /// <summary>
-/// 御案页面壳。这里的按钮只改变展示态或生成“待核验”的演示反馈，绝不写 WorldState。
+/// 御书房页面壳：玩家面对御案，桌面物件才是入口；中央舆图滚轮放大后进入策略地图。
+/// 这里仍只改展示状态，不推进 GameTime，也不写 WorldState。
 /// </summary>
 public partial class MainUi : Control
 {
-    private const string DemoNotice = "演示壳：尚未接入 Simulation，不会推进时间或修改世界状态。";
+    private sealed record MemorialEntry(string Id, string Title, string Meta, string Summary, string Status);
+
+    private readonly List<MemorialEntry> _pendingMemorials =
+    [
+        new("liaoxi", "辽西急报", "宁远 · 卯初送达", "前线粮秣告急，须核漕运与陆路转输。", "OPEN"),
+        new("revenue", "户部请旨", "京师 · 昨日申刻", "漕运拨款待决定，容量与承办人尚待核验。", "DESIGN"),
+        new("censor", "御史弹章", "京师 · 昨日辰刻", "证据不足，暂列待复核。", "OPEN")
+    ];
+
     private readonly Dictionary<string, string> _placeDescriptions = new()
     {
-        ["beijing"] = "中枢 · 直属仓与六部文书汇集处。",
-        ["tongzhou"] = "漕运节点 · 粮道瓶颈与仓储上报待复核。",
-        ["shanhaiguan"] = "关隘节点 · 前线道路信息为 OPEN 草稿。",
-        ["ningyuan"] = "辽西前线 · 急报提示当前最高优先级。",
-        ["jinzhou"] = "前线节点 · 驻军与粮秣尚未接入只读快照。",
-        ["dengzhou"] = "海运节点 · 海路方案仅作交互比较演示。"
+        ["beijing"] = "京师中枢 · 六部文书与直属仓奏报汇集处。",
+        ["tongzhou"] = "通州漕运 · 粮道、仓储与转运瓶颈。",
+        ["shanhaiguan"] = "山海关 · 关宁防线的西端门户。",
+        ["ningyuan"] = "宁远前线 · 当前急报最高优先级。",
+        ["jinzhou"] = "锦州前线 · 驻军与粮秣仍待只读快照接入。",
+        ["dengzhou"] = "登州海运 · 海路方案仅作演示比较。"
     };
+
     private MapView _map = null!;
-    private Label _dateLabel = null!;
-    private Label _speedLabel = null!;
-    private Label _pauseLabel = null!;
-    private Label _selectionLabel = null!;
-    private Label _selectionBody = null!;
-    private Label _noticeLabel = null!;
-    private Label _layerLabel = null!;
-    private Button _pauseButton = null!;
-    private Button _overviewButton = null!;
-    private Button _liaoxiButton = null!;
-    private Button _routeButton = null!;
-    private Button _historyButton = null!;
-    private Button _draftButton = null!;
-    private Button _confirmButton = null!;
-    private Panel _draftPanel = null!;
-    private Panel _confirmPanel = null!;
-    private bool _paused = true;
-    private double _speed = 1;
+    private Control _deskLayer = null!;
+    private Control _mapLayer = null!;
+    private Panel _memorialSheet = null!;
+    private Panel _decreeSheet = null!;
+    private Label _sheetTitle = null!;
+    private Label _sheetMeta = null!;
+    private Label _sheetBody = null!;
+    private Label _notice = null!;
+    private Label _mapNotice = null!;
+    private Label _selectedPlace = null!;
+    private Font _titleFont = null!;
+    private Font _bodyFont = null!;
+    private bool _strategicView;
+
+    public int PendingMemorialCount => _pendingMemorials.Count;
+    public bool StrategicView => _strategicView;
+    public bool MemorialOpen => _memorialSheet.Visible;
 
     public override void _Ready()
     {
+        _titleFont = new SystemFont
+        {
+            FontNames = ["华文楷体", "KaiTi", "楷体", "Noto Serif CJK SC"],
+            AllowSystemFallback = true,
+            MultichannelSignedDistanceField = true
+        };
+        _bodyFont = new SystemFont
+        {
+            FontNames = ["华文仿宋", "FangSong", "仿宋", "Noto Serif CJK SC"],
+            AllowSystemFallback = true,
+            MultichannelSignedDistanceField = true
+        };
+
         _map = GetNode<MapView>("MapView");
-        BuildUi();
         _map.PlaceSelected += OnPlaceSelected;
-        OnPlaceSelected(_map.SelectedPlaceId);
-        ShowNotice(DemoNotice);
+        _map.ExitRequested += () => SetStrategicView(false);
+        BuildDesk();
+        BuildStrategicMap();
+        SetStrategicView(false);
     }
 
-    private void BuildUi()
+    public override void _GuiInput(InputEvent @event)
+    {
+        if (@event is not InputEventMouseButton { Pressed: true } wheel) return;
+        if (!_strategicView && wheel.ButtonIndex == MouseButton.WheelUp)
+        {
+            SetStrategicView(true);
+            AcceptEvent();
+        }
+        else if (_strategicView && wheel.ButtonIndex == MouseButton.WheelDown && _map.Zoom <= 1.001f)
+        {
+            SetStrategicView(false);
+            AcceptEvent();
+        }
+    }
+
+    public void SetStrategicView(bool enabled)
+    {
+        _strategicView = enabled;
+        _deskLayer.Visible = !enabled;
+        _mapLayer.Visible = enabled;
+        _map.Visible = enabled;
+        _map.MouseFilter = enabled ? MouseFilterEnum.Stop : MouseFilterEnum.Ignore;
+        if (enabled) _map.EnterStrategicView();
+        else _map.ExitStrategicView();
+        _notice.Text = enabled
+            ? "舆图已铺展 · 滚轮缩放，拖动移图；缩到最远再向下滚轮返回御案。"
+            : $"御案上有 {_pendingMemorials.Count} 封待阅奏疏 · 点击翻阅；在中央舆图上向上滚轮进入策略地图。";
+    }
+
+    private void BuildDesk()
     {
         SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
-        AddColorRect("#101A1C", new Rect2(0, 0, 1, 1), true);
-        var paper = GD.Load<Texture2D>("res://assets/ui/generated/ming-imperial-paper-background.png");
-        if (paper != null)
+        AddBackground();
+        _deskLayer = AddFullRectLayer("DeskLayer");
+
+        AddLabel(_deskLayer, "大明御书房", new Vector2(54, 34), 30, "#E8D8B9", true);
+        AddLabel(_deskLayer, "崇祯二年 · 春分前后", new Vector2(58, 76), 14, "#BBA98D");
+        AddLabel(_deskLayer, "1629-03-18 06:00", new Vector2(1280, 44), 18, "#D7BC7B");
+        AddLabel(_deskLayer, "演示预览 · 未接 Simulation", new Vector2(1282, 74), 12, "#8AA79D");
+
+        var deskMapTexture = GD.Load<Texture2D>("res://assets/maps/generated/ming_1629/physical-base.png");
+        var deskMapPreview = new Polygon2D
         {
-            var background = new TextureRect { Texture = paper, ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize, StretchMode = TextureRect.StretchModeEnum.KeepAspectCovered, MouseFilter = MouseFilterEnum.Ignore };
-            background.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
-            background.Modulate = new Color(1, 1, 1, 0.2f);
-            AddChild(background);
-            MoveChild(background, 0);
-        }
+            Name = "DeskMapPreview",
+            Polygon =
+            [
+                new Vector2(438, 463),
+                new Vector2(1208, 463),
+                new Vector2(1358, 708),
+                new Vector2(337, 708)
+            ],
+            UV =
+            [
+                Vector2.Zero,
+                new Vector2(deskMapTexture.GetWidth(), 0),
+                new Vector2(deskMapTexture.GetWidth(), deskMapTexture.GetHeight()),
+                new Vector2(0, deskMapTexture.GetHeight())
+            ],
+            Texture = deskMapTexture,
+            Color = new Color(0.91f, 0.90f, 0.78f, 0.72f)
+        };
+        _deskLayer.AddChild(deskMapPreview);
 
-        var topBar = AddPanel(this, "#172529", "#B59047", new Rect2(20, 16, 1560, 90), 8);
-        AddLabel(topBar, "大明御案", new Vector2(24, 18), 28, "#F4E9D8");
-        AddLabel(topBar, "崇祯二年 · 春分前后", new Vector2(26, 55), 13, "#B7A795");
-        _dateLabel = AddLabel(topBar, "1629-03-18 06:00", new Vector2(250, 21), 22, "#F0D39A");
-        _pauseLabel = AddLabel(topBar, "PAUSED · 演示状态", new Vector2(250, 55), 13, "#E7B46B");
-        _pauseButton = AddButton(topBar, "▶ 解除暂停", new Rect2(490, 22, 138, 44));
-        _pauseButton.Pressed += TogglePause;
-        _speedLabel = AddLabel(topBar, "速度 1×", new Vector2(650, 36), 14, "#D9C5A4");
-        foreach (var speed in new[] { 0.5, 1.0, 2.0, 3.0 })
+        var deskMap = new Button
         {
-            var button = AddButton(topBar, $"{speed:0.#}×", new Rect2(715 + (float)(speed * 48), 22, 44, 44));
-            var selectedSpeed = speed;
-            button.Pressed += () => SetSpeed(selectedSpeed);
-        }
-        AddLabel(topBar, "模型增强 · 离线规则", new Vector2(1030, 27), 13, "#9EC3AD");
-        AddLabel(topBar, "● 安全快照", new Vector2(1030, 52), 13, "#6A9A8B");
-        AddLabel(topBar, "1391 近似 / 1629 OPEN", new Vector2(1260, 27), 13, "#E3C27E");
-        AddLabel(topBar, "未完整建模诸政权", new Vector2(1260, 52), 13, "#C7B19B");
+            Name = "DeskMapScroll",
+            Position = new Vector2(337, 458),
+            Size = new Vector2(1021, 254),
+            Flat = true,
+            FocusMode = FocusModeEnum.None,
+            MouseForcePassScrollEvents = true,
+            TooltipText = "滚轮向上：展开东亚舆图"
+        };
+        deskMap.Pressed += () => SetStrategicView(true);
+        deskMap.GuiInput += OnDeskMapInput;
+        _deskLayer.AddChild(deskMap);
+        AddLabel(deskMap, "东亚舆图", new Vector2(150, 14), 22, "#493C2A", true);
+        AddLabel(deskMap, "案上铺图 · 点击或滚轮进入战略视域", new Vector2(152, 48), 12, "#665945");
 
-        var left = AddPanel(this, "#192526", "#866943", new Rect2(20, 122, 308, 710), 8);
-        AddLabel(left, "御案 · 待处理", new Vector2(22, 20), 20, "#F4E9D8");
-        AddLabel(left, "3 件事务 · 1 件高优先级", new Vector2(22, 50), 12, "#B7A795");
-        AddMemorial(left, "辽西急报", "宁远 · 06:00送达", "前线粮秣告急 · OPEN", "#C64A3B", 88);
-        AddMemorial(left, "户部请旨", "京师 · 昨日午后", "漕运拨款待决定 · DESIGN", "#D0A85C", 194);
-        AddMemorial(left, "御史弹劾", "京师 · 昨日辰刻", "证据不足 · 待复核", "#7EA39A", 300);
-        AddLabel(left, "事件流", new Vector2(22, 408), 15, "#E8D4B0");
-        AddLabel(left, "05:42  宁远驿报抵京", new Vector2(22, 440), 13, "#D7C4AB");
-        AddLabel(left, "04:10  通州仓上报延迟", new Vector2(22, 470), 13, "#D7C4AB");
-        AddLabel(left, "昨日  漕运方案仍未签发", new Vector2(22, 500), 13, "#D7C4AB");
-        AddLabel(left, "提示", new Vector2(22, 560), 13, "#E7B46B");
-        AddLabel(left, "暂停、倍速、库存、政令均未接 Simulation。", new Vector2(22, 586), 12, "#B7A795");
-        AddLabel(left, "此处只展示命令草案与反馈。", new Vector2(22, 610), 12, "#B7A795");
+        for (var index = 0; index < _pendingMemorials.Count; index++)
+            AddDeskMemorial(_pendingMemorials[index], index);
 
-        var right = AddPanel(this, "#192526", "#866943", new Rect2(1272, 122, 308, 710), 8);
-        AddLabel(right, "所选 · 节点详情", new Vector2(22, 20), 20, "#F4E9D8");
-        _selectionLabel = AddLabel(right, "京师", new Vector2(22, 66), 24, "#F0D39A");
-        _selectionBody = AddLabel(right, "", new Vector2(22, 104), 13, "#D7C4AB");
-        _selectionBody.AutowrapMode = TextServer.AutowrapMode.WordSmart;
-        _selectionBody.Size = new Vector2(264, 160);
-        AddLabel(right, "玩家可见情报", new Vector2(22, 258), 14, "#E8D4B0");
-        AddInfoRow(right, "粮秣", "约 8,400 石 · 昨日上报", 286);
-        AddInfoRow(right, "军情", "可见度 62% · 待复核", 326);
-        AddInfoRow(right, "路线", "京师—通州 · DESIGN", 366);
-        AddLabel(right, "图层与焦点", new Vector2(22, 428), 14, "#E8D4B0");
-        _overviewButton = AddButton(right, "天下概览", new Rect2(22, 460, 122, 38));
-        _overviewButton.Pressed += () => { _map.LoadManifest("res://assets/maps/generated/ming_1629/map-manifest.json"); ShowNotice("已切换：东亚概览 · 只读清单"); };
-        _liaoxiButton = AddButton(right, "辽西细节", new Rect2(160, 460, 122, 38));
-        _liaoxiButton.Pressed += () => { _map.LoadManifest("res://assets/maps/generated/ming_1629_liaoxi/map-manifest.json"); ShowNotice("已切换：辽西细节 · 只读清单"); };
-        _routeButton = AddButton(right, "路线层  ON", new Rect2(22, 508, 122, 38));
-        _routeButton.Pressed += ToggleRoutes;
-        _historyButton = AddButton(right, "历史层  ON", new Rect2(160, 508, 122, 38));
-        _historyButton.Pressed += ToggleHistory;
-        _layerLabel = AddLabel(right, "图层只改变显示，不改变世界。", new Vector2(22, 560), 12, "#B7A795");
-        _layerLabel.AutowrapMode = TextServer.AutowrapMode.WordSmart;
-        _layerLabel.Size = new Vector2(264, 60);
+        _notice = AddLabel(_deskLayer, "", new Vector2(525, 728), 12, "#CBB994");
+        _notice.Name = "SimulationNotice";
+        _notice.Size = new Vector2(620, 28);
+        _notice.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        _memorialSheet = BuildMemorialSheet();
+        _decreeSheet = BuildDecreeSheet();
+    }
 
-        var bottom = AddPanel(this, "#172529", "#B59047", new Rect2(20, 848, 1560, 92), 8);
-        AddLabel(bottom, "行动区", new Vector2(22, 15), 14, "#E8D4B0");
-        foreach (var (label, x) in new[] { ("召见", 112f), ("要求复核", 186f), ("拟旨", 278f), ("交部议", 352f), ("留中", 426f) })
+    private void AddDeskMemorial(MemorialEntry entry, int index)
+    {
+        var button = new TextureButton
         {
-            var actionButton = AddButton(bottom, label, new Rect2(x, 18, 68, 38));
-            actionButton.Pressed += () => ShowNotice($"已生成“{label}”待核验 Intent · 尚未执行");
-        }
-        _draftButton = AddButton(bottom, "拟定结构化政令", new Rect2(520, 18, 164, 38));
-        _draftButton.Pressed += ShowDraft;
-        _noticeLabel = AddLabel(bottom, DemoNotice, new Vector2(716, 17), 12, "#D8C6AE");
-        _noticeLabel.Name = "SimulationNotice";
-        _noticeLabel.AutowrapMode = TextServer.AutowrapMode.WordSmart;
-        _noticeLabel.Size = new Vector2(812, 48);
-        _draftPanel = BuildDraftPanel();
-        _confirmPanel = BuildConfirmPanel();
+            Name = $"DeskMemorial-{index + 1}",
+            // 背景图的真实桌面从约 y=700 开始；三封奏疏沿桌面纵深错落摆放，
+            // 不再悬在窗格、灯笼或砚台前方。
+            Position = new Vector2(430 + index * 285, 794 + (index % 2) * 18),
+            Size = new Vector2(232, 104),
+            Rotation = Mathf.DegToRad(index switch { 0 => -2.2f, 1 => 1.1f, _ => -0.8f }),
+            PivotOffset = new Vector2(116, 52),
+            TextureNormal = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/memorials/memorial-normal.png"),
+            TextureHover = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/memorials/memorial-hover.png"),
+            TexturePressed = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/memorials/memorial-selected.png"),
+            IgnoreTextureSize = true,
+            StretchMode = TextureButton.StretchModeEnum.Scale,
+            TooltipText = entry.Title
+        };
+        button.Pressed += () => OpenMemorial(entry);
+        _deskLayer.AddChild(button);
+        AddLabel(button, entry.Title, new Vector2(18, 23), 16, "#4A3022", true);
+        AddLabel(button, entry.Status == "OPEN" ? "待阅" : "待拟", new Vector2(180, 70), 10,
+            entry.Status == "OPEN" ? "#6B302A" : "#8A5B24", true);
+    }
+
+    private Panel BuildMemorialSheet()
+    {
+        var sheet = new Panel
+        {
+            Name = "MemorialSheet",
+            Position = new Vector2(452, 150),
+            Size = new Vector2(696, 610),
+            Visible = false
+        };
+        sheet.AddThemeStyleboxOverride("panel", MakePaperStyle());
+        _deskLayer.AddChild(sheet);
+        _sheetTitle = AddLabel(sheet, "", new Vector2(58, 48), 28, "#342A1F", true);
+        _sheetMeta = AddLabel(sheet, "", new Vector2(60, 98), 13, "#816B4C");
+        _sheetBody = AddLabel(sheet, "", new Vector2(60, 152), 17, "#3D352A");
+        _sheetBody.Size = new Vector2(576, 300);
+        _sheetBody.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        var close = AddPaperButton(sheet, "合卷", new Rect2(60, 492, 136, 54));
+        close.Name = "CloseMemorial";
+        close.Pressed += () => sheet.Visible = false;
+        var compare = AddPaperButton(sheet, "查看方略", new Rect2(474, 492, 162, 54));
+        compare.Name = "OpenDecreeDraft";
+        compare.Pressed += OpenDecreeSheet;
+        return sheet;
+    }
+
+    private Panel BuildDecreeSheet()
+    {
+        var sheet = new Panel
+        {
+            Name = "EdictConfirmPanel",
+            Position = new Vector2(474, 170),
+            Size = new Vector2(652, 570),
+            Visible = false
+        };
+        sheet.AddThemeStyleboxOverride("panel", MakePaperStyle());
+        _deskLayer.AddChild(sheet);
+        AddLabel(sheet, "御前方略 · 只读预览", new Vector2(56, 42), 27, "#342A1F", true);
+        AddLabel(sheet, "辽西粮运案", new Vector2(58, 96), 17, "#7E231F", true);
+        var body = AddLabel(sheet,
+            "拟令户部核清漕运拨款，兵部复核陆路转输，\n待证据与权限校验通过后，方可形成 WorldIntent。\n\n此处只展示交互样式；不会推进时间，也不会直接修改世界状态。",
+            new Vector2(58, 142), 17, "#3D352A");
+        body.Size = new Vector2(536, 240);
+        body.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+
+        var close = AddPaperButton(sheet, "退回奏疏", new Rect2(58, 452, 148, 56));
+        close.Name = "CloseEdictConfirm";
+        close.Pressed += () => sheet.Visible = false;
+
+        var seal = AddSealButton(sheet, "朱批候核", new Rect2(414, 434, 180, 92));
+        seal.Name = "ConfirmSealButton";
+        seal.Pressed += () =>
+        {
+            _notice.Text = "朱批预览已确认 · 未提交 Intent，等待 Simulation 接入。";
+            sheet.Visible = false;
+        };
+        return sheet;
+    }
+
+    private void OpenDecreeSheet()
+    {
+        _memorialSheet.Visible = false;
+        _decreeSheet.Visible = true;
+        _decreeSheet.MoveToFront();
+        _notice.Text = "仅打开方略草案 · 未创建、未提交 Intent。";
+    }
+
+    private void OnDeskMapInput(InputEvent @event)
+    {
+        if (@event is not InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.WheelUp }) return;
+        SetStrategicView(true);
+        AcceptEvent();
+    }
+
+    private void OpenMemorial(MemorialEntry entry)
+    {
+        _sheetTitle.Text = entry.Title;
+        _sheetMeta.Text = $"{entry.Meta} · {entry.Status}";
+        _sheetBody.Text = entry.Summary + "\n\n此页只读呈现奏报，不推进时间，不修改世界状态。";
+        _memorialSheet.Visible = true;
+        _memorialSheet.MoveToFront();
+    }
+
+    private void BuildStrategicMap()
+    {
+        _mapLayer = AddFullRectLayer("StrategicMapLayer");
+        _mapLayer.MouseFilter = MouseFilterEnum.Ignore;
+        _map.Position = new Vector2(0, 72);
+        _map.Size = new Vector2(1600, 888);
         _map.MoveToFront();
-    }
 
-    private Panel BuildDraftPanel()
-    {
-        var panel = AddPanel(this, "#202E2F", "#C6A25F", new Rect2(500, 280, 420, 340), 8);
-        panel.Visible = false;
-        AddLabel(panel, "拟定结构化政令", new Vector2(24, 20), 20, "#F4E9D8");
-        AddLabel(panel, "目标 · 宁远急饷", new Vector2(24, 68), 14, "#F0D39A");
-        AddLabel(panel, "方案 · 陆运 / 海运 / 两路并行", new Vector2(24, 102), 13, "#D7C4AB");
-        AddLabel(panel, "期限 · 请选择后再提交", new Vector2(24, 134), 13, "#D7C4AB");
-        AddLabel(panel, "范围 · 预计影响京师—通州—宁远", new Vector2(24, 166), 13, "#D7C4AB");
-        AddLabel(panel, "状态 · 草案，不代表已经执行", new Vector2(24, 198), 13, "#E7B46B");
-        var close = AddButton(panel, "返回", new Rect2(24, 252, 92, 42));
-        close.Pressed += () => panel.Visible = false;
-        var submit = AddButton(panel, "查看确认", new Rect2(280, 252, 116, 42));
-        submit.Pressed += () => { panel.Visible = false; _confirmPanel.Visible = true; };
-        return panel;
-    }
-
-    private Panel BuildConfirmPanel()
-    {
-        var panel = AddPanel(this, "#202E2F", "#C6A25F", new Rect2(470, 224, 520, 450), 8);
-        panel.Visible = false;
-        AddLabel(panel, "确认前 · 方案对比", new Vector2(24, 20), 20, "#F4E9D8");
-        AddLabel(panel, "这是提交申请，不是已执行。", new Vector2(24, 56), 13, "#E7B46B");
-        AddComparison(panel, "陆运", "约 12 日 · 约 4,600 石 · 风险中", 96, "#6A9A8B");
-        AddComparison(panel, "海运", "约 8 日 · 区间值 · 风险较高", 166, "#C6A25F");
-        AddComparison(panel, "两路并行", "分批到达 · 银耗合计 · 风险分散", 236, "#A987B2");
-        AddLabel(panel, "缺失信息：期限、承办人和最终容量仍待 Simulation 核验。", new Vector2(24, 324), 12, "#D7C4AB");
-        var cancel = AddButton(panel, "返回修改", new Rect2(24, 374, 116, 42));
-        cancel.Pressed += () => panel.Visible = false;
-        _confirmButton = AddButton(panel, "提交待核验 Intent", new Rect2(348, 374, 148, 42));
-        _confirmButton.Pressed += () => { panel.Visible = false; ShowNotice("已提交待核验 Intent · Simulation 尚未接入"); };
-        return panel;
+        var topWash = new ColorRect { Position = new Vector2(0, 0), Size = new Vector2(1600, 72), Color = new Color(0.05f, 0.075f, 0.065f, 0.90f), MouseFilter = MouseFilterEnum.Ignore };
+        _mapLayer.AddChild(topWash);
+        AddLabel(topWash, "东亚舆图", new Vector2(32, 18), 26, "#E5D4B2", true);
+        _selectedPlace = AddLabel(topWash, "所选：京师", new Vector2(220, 25), 15, "#D1B875");
+        _mapNotice = AddLabel(topWash, "滚轮放大后逐级显示地名 · 拖动边界受限", new Vector2(980, 25), 13, "#9EB2A5");
+        var returnButton = AddPaperButton(topWash, "收卷归案", new Rect2(1430, 14, 134, 42));
+        returnButton.Name = "ReturnToDesk";
+        returnButton.Pressed += () => SetStrategicView(false);
+        _mapLayer.MoveToFront();
     }
 
     private void OnPlaceSelected(string placeId)
     {
-        var name = placeId switch { "beijing" => "京师", "tongzhou" => "通州", "shanhaiguan" => "山海关", "ningyuan" => "宁远", "jinzhou" => "锦州", "dengzhou" => "登州", _ => "未知节点" };
-        _selectionLabel.Text = name;
-        _selectionBody.Text = _placeDescriptions.TryGetValue(placeId, out var body) ? body + "\n\n来源状态：OPEN / DESIGN，非完整 1629 势力图。" : "节点信息不可用。";
-        ShowNotice($"已选中 {name} · 只读呈现，不会直接修改世界状态");
+        var body = _placeDescriptions.TryGetValue(placeId, out var description) ? description : "节点信息不可用。";
+        _selectedPlace.Text = "所选：" + body;
     }
 
-    private void TogglePause()
+    private void AddBackground()
     {
-        _paused = !_paused;
-        _pauseButton.Text = _paused ? "▶ 解除暂停" : "Ⅱ 暂停";
-        _pauseLabel.Text = _paused ? "PAUSED · 演示状态" : "RUNNING · 演示状态";
-        ShowNotice(_paused ? "展示态已暂停 · 未接入 Simulation" : "展示态已运行 · 不会自行推进权威时间");
+        var texture = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/backgrounds/ming-imperial-study-desk-map.png");
+        var background = new TextureRect
+        {
+            Texture = texture,
+            ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+            StretchMode = TextureRect.StretchModeEnum.KeepAspectCovered,
+            MouseFilter = MouseFilterEnum.Ignore
+        };
+        background.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
+        AddChild(background);
+        MoveChild(background, 0);
     }
 
-    private void SetSpeed(double speed)
+    private Control AddFullRectLayer(string name)
     {
-        _speed = speed;
-        _speedLabel.Text = $"速度 {_speed:0.#}×";
-        ShowNotice($"展示态速度切换为 {_speed:0.#}× · 尚未接入 Simulation");
+        var layer = new Control { Name = name };
+        layer.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
+        AddChild(layer);
+        return layer;
     }
 
-    private void ToggleRoutes()
+    private Label AddLabel(Control parent, string text, Vector2 position, int size, string color, bool title = false)
     {
-        _map.ToggleRoutes();
-        _routeButton.Text = _map.RoutesVisible ? "路线层  ON" : "路线层  OFF";
-        ShowNotice("路线层只改变显示，不改变拓扑或世界状态");
-    }
-
-    private void ToggleHistory()
-    {
-        _map.ToggleHistoricalLayer();
-        _historyButton.Text = _map.HistoricalLayerVisible ? "历史层  ON" : "历史层  OFF";
-        ShowNotice("历史层只改变显示；1391 近似基线仍标为 OPEN");
-    }
-
-    private void ShowDraft() => _draftPanel.Visible = true;
-    private void ShowNotice(string message) => _noticeLabel.Text = message;
-
-    private Panel AddMemorial(Control parent, string title, string meta, string status, string accent, float y)
-    {
-        var card = AddPanel(parent, "#243133", accent, new Rect2(18, y, 272, 88), 6);
-        AddLabel(card, title, new Vector2(14, 12), 16, "#F4E9D8");
-        AddLabel(card, meta, new Vector2(14, 38), 12, "#C8B7A1");
-        AddLabel(card, status, new Vector2(14, 61), 12, accent);
-        return card;
-    }
-
-    private void AddComparison(Control parent, string title, string body, float y, string accent)
-    {
-        var card = AddPanel(parent, "#273536", accent, new Rect2(22, y, 476, 54), 5);
-        AddLabel(card, title, new Vector2(14, 8), 14, accent);
-        AddLabel(card, body, new Vector2(92, 9), 12, "#E4D4BD");
-    }
-
-    private void AddInfoRow(Control parent, string key, string value, float y)
-    {
-        AddLabel(parent, key, new Vector2(22, y), 12, "#B59047");
-        AddLabel(parent, value, new Vector2(76, y), 12, "#D7C4AB");
-    }
-
-    private Label AddLabel(Control parent, string text, Vector2 position, int size, string color)
-    {
-        var label = new Label { Text = text, Position = position };
-        if (!string.IsNullOrWhiteSpace(text)) label.Name = text;
+        var label = new Label { Text = text, Position = position, MouseFilter = MouseFilterEnum.Ignore };
+        label.AddThemeFontOverride("font", title ? _titleFont : _bodyFont);
         label.AddThemeFontSizeOverride("font_size", size);
         label.AddThemeColorOverride("font_color", new Color(color));
+        label.AddThemeColorOverride("font_outline_color", new Color(0.07f, 0.06f, 0.045f, title ? 0.78f : 0.52f));
+        label.AddThemeConstantOverride("outline_size", title ? 3 : 1);
         parent.AddChild(label);
         return label;
     }
 
-    private Button AddButton(Control parent, string text, Rect2 rect)
+    private TextureRect AddImage(Control parent, string path, Rect2 rect)
     {
-        var button = new Button { Text = text, Position = rect.Position, Size = rect.Size, FocusMode = Control.FocusModeEnum.All };
-        button.AddThemeStyleboxOverride("normal", MakePanel("#2B3B3C", "#866943", 1, 4));
-        button.AddThemeStyleboxOverride("hover", MakePanel("#3A4D4A", "#D0A85C", 1, 4));
-        button.AddThemeStyleboxOverride("pressed", MakePanel("#6E302D", "#F0C46B", 2, 4));
-        button.AddThemeColorOverride("font_color", new Color("#F4E9D8"));
-        button.AddThemeColorOverride("font_hover_color", new Color("#FFF2D2"));
-        button.AddThemeFontSizeOverride("font_size", 13);
+        var image = new TextureRect
+        {
+            Texture = GD.Load<Texture2D>(path),
+            Position = rect.Position,
+            Size = rect.Size,
+            ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+            StretchMode = TextureRect.StretchModeEnum.KeepAspectCovered,
+            ClipContents = true,
+            MouseFilter = MouseFilterEnum.Ignore
+        };
+        parent.AddChild(image);
+        return image;
+    }
+
+    private Button AddPaperButton(Control parent, string text, Rect2 rect)
+    {
+        var button = new Button { Text = text, Position = rect.Position, Size = rect.Size, FocusMode = FocusModeEnum.All };
+        button.AddThemeFontOverride("font", _bodyFont);
+        button.AddThemeFontSizeOverride("font_size", 16);
+        button.AddThemeColorOverride("font_color", new Color("#35291E"));
+        button.AddThemeStyleboxOverride("normal", MakeTextureStyle("buttons/primary-normal.png", 10, 12));
+        button.AddThemeStyleboxOverride("hover", MakeTextureStyle("buttons/primary-hover.png", 10, 12));
+        button.AddThemeStyleboxOverride("pressed", MakeTextureStyle("buttons/primary-selected.png", 10, 12));
+        button.AddThemeStyleboxOverride("disabled", MakeTextureStyle("buttons/primary-disabled.png", 10, 12));
         parent.AddChild(button);
         return button;
     }
 
-    private Panel AddPanel(Control parent, string background, string border, Rect2 rect, int radius)
+    private Button AddSealButton(Control parent, string text, Rect2 rect)
     {
-        var panel = new Panel { Position = rect.Position, Size = rect.Size };
-        panel.AddThemeStyleboxOverride("panel", MakePanel(background, border, 1, radius));
-        parent.AddChild(panel);
-        return panel;
+        var button = new Button { Text = text, Position = rect.Position, Size = rect.Size, FocusMode = FocusModeEnum.All };
+        button.AddThemeFontOverride("font", _titleFont);
+        button.AddThemeFontSizeOverride("font_size", 19);
+        button.AddThemeColorOverride("font_color", new Color("#F4E5C5"));
+        button.AddThemeStyleboxOverride("normal", MakeTextureStyle("buttons/seal-normal.png", 22, 8));
+        button.AddThemeStyleboxOverride("hover", MakeTextureStyle("buttons/seal-hover.png", 22, 8));
+        button.AddThemeStyleboxOverride("pressed", MakeTextureStyle("buttons/seal-pressed.png", 22, 8));
+        button.AddThemeStyleboxOverride("disabled", MakeTextureStyle("buttons/seal-disabled.png", 22, 8));
+        parent.AddChild(button);
+        return button;
     }
 
-    private ColorRect AddColorRect(string color, Rect2 normalizedRect, bool normalized)
+    private static StyleBoxTexture MakePaperStyle()
     {
-        var rect = new ColorRect { Color = new Color(color), MouseFilter = MouseFilterEnum.Ignore };
-        rect.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
-        AddChild(rect);
-        return rect;
+        var style = new StyleBoxTexture
+        {
+            Texture = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/cards/ming-booklet-paper-ninepatch.png"),
+            AxisStretchHorizontal = StyleBoxTexture.AxisStretchMode.Stretch,
+            AxisStretchVertical = StyleBoxTexture.AxisStretchMode.Stretch,
+            DrawCenter = true
+        };
+        style.SetTextureMarginAll(38);
+        style.SetContentMarginAll(32);
+        return style;
     }
 
-    private static StyleBoxFlat MakePanel(string background, string border, int width, int radius)
+    private static StyleBoxTexture MakeTextureStyle(string relativePath, float margin, float contentMargin)
     {
-        var style = new StyleBoxFlat { BgColor = new Color(background), BorderColor = new Color(border) };
-        style.SetBorderWidthAll(width);
-        style.SetCornerRadiusAll(radius);
+        var style = new StyleBoxTexture
+        {
+            Texture = GD.Load<Texture2D>($"res://assets/ui/generated/ming_ui_v2/{relativePath}"),
+            AxisStretchHorizontal = StyleBoxTexture.AxisStretchMode.Stretch,
+            AxisStretchVertical = StyleBoxTexture.AxisStretchMode.Stretch,
+            DrawCenter = true
+        };
+        style.SetTextureMarginAll(margin);
+        style.SetContentMarginAll(contentMargin);
         return style;
     }
 }
