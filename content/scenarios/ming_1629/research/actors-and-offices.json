@@ -569,9 +569,9 @@
   "authority_matrix": [
     {
       "action": "提出需求/方案",
-      "candidate_ids": ["ACTOR-YUAN-CHONGHUAN", "ACTOR-MAO-WENLONG", "ACTOR-MAN-GUI", "ACTOR-ZU-DASHOU"],
+      "candidate_ids": ["ACTOR-YUAN-CHONGHUAN", "ACTOR-MAO-WENLONG"],
       "status": "FACT",
-      "basis_claim_ids": ["CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE", "CLAIM-MAO-REQUESTED-GRAIN", "CLAIM-GUANNING-GENERALS"],
+      "basis_claim_ids": ["CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE", "CLAIM-MAO-REQUESTED-GRAIN"],
       "limit": "提出不等于批准、筹集或实际运抵。"
     },
     {
