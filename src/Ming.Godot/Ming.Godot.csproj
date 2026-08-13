@@ -1,0 +1,15 @@
+<Project Sdk="Godot.NET.Sdk/4.6.0">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <AssemblyName>Ming.Godot</AssemblyName>
+    <RootNamespace>MingSim.GodotUi</RootNamespace>
+    <GodotProjectDir>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../'))</GodotProjectDir>
+    <GodotProjectDirBase64>$([MSBuild]::ConvertToBase64('$(GodotProjectDir)'))</GodotProjectDirBase64>
+    <BaseOutputPath>$(GodotProjectDir).godot/mono/temp/bin/</BaseOutputPath>
+    <OutputPath>$(BaseOutputPath)$(Configuration)/</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Ming.Application\Ming.Application.csproj" />
+  </ItemGroup>
+</Project>
