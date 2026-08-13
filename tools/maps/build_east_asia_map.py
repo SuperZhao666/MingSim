@@ -690,11 +690,11 @@ def load_evidence_ledger(
 ) -> tuple[dict[str, Mapping[str, Any]], set[str]]:
     document = load_json(path, "liaodong-1629-evidence.json")
     # The evidence ledger owns schema version 2; map input files remain on the
-    # builder's schema version 1.  Keep this compatibility gate local to the
-    # ledger loader so the empty-overlay change does not broaden other schemas.
+    # builder's schema version 1.  Keep this gate local to the ledger loader so
+    # the empty-overlay change does not broaden other schemas.
     require(
-        document.get("schema_version") in {1, 2},
-        "liaodong-1629-evidence.json.schema_version 必须为 1 或 2。",
+        document.get("schema_version") == 2,
+        "liaodong-1629-evidence.json.schema_version 必须为 2。",
     )
     sources = require_list(document.get("sources"), "evidence.sources")
     source_ids: set[str] = set()
