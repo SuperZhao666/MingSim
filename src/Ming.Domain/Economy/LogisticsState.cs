@@ -54,7 +54,7 @@ public sealed class StockpileState
     /// <summary>给 UI 和玩家看的简短别名；这个库存点只保存 grain。</summary>
     public long Quantity => GrainQuantity;
 
-    public bool CanStore(long quantity) => quantity >= 0 && quantity <= Capacity - GrainQuantity;
+    internal bool CanStore(long quantity) => quantity >= 0 && quantity <= Capacity - GrainQuantity;
 
     internal bool TryTakeGrain(long quantity)
     {
@@ -78,7 +78,7 @@ public sealed class StockpileState
         return true;
     }
 
-    public StockpileState Clone() => new(Id, LocationId, Capacity, GrainQuantity);
+    internal StockpileState Clone() => new(Id, LocationId, Capacity, GrainQuantity);
 }
 
 /// <summary>一条固定的粮运路线，同时定义在途容量、行程时间和损耗率。</summary>
@@ -233,13 +233,16 @@ public sealed class LogisticsState
     private readonly Dictionary<RouteId, RouteState> _routes = [];
     private readonly Dictionary<ShipmentId, ShipmentState> _shipments = [];
 
-    public IReadOnlyDictionary<StockpileId, StockpileState> Stockpiles => _stockpiles;
+    public IReadOnlyDictionary<StockpileId, StockpileState> Stockpiles =>
+        new System.Collections.ObjectModel.ReadOnlyDictionary<StockpileId, StockpileState>(_stockpiles);
 
-    public IReadOnlyDictionary<RouteId, RouteState> Routes => _routes;
+    public IReadOnlyDictionary<RouteId, RouteState> Routes =>
+        new System.Collections.ObjectModel.ReadOnlyDictionary<RouteId, RouteState>(_routes);
 
-    public IReadOnlyDictionary<ShipmentId, ShipmentState> Shipments => _shipments;
+    public IReadOnlyDictionary<ShipmentId, ShipmentState> Shipments =>
+        new System.Collections.ObjectModel.ReadOnlyDictionary<ShipmentId, ShipmentState>(_shipments);
 
-    public void AddStockpile(StockpileState stockpile)
+    internal void AddStockpile(StockpileState stockpile)
     {
         if (!_stockpiles.TryAdd(stockpile.Id, stockpile))
         {
@@ -247,7 +250,7 @@ public sealed class LogisticsState
         }
     }
 
-    public void AddRoute(RouteState route)
+    internal void AddRoute(RouteState route)
     {
         if (!_stockpiles.ContainsKey(route.FromStockpileId) || !_stockpiles.ContainsKey(route.ToStockpileId))
         {
@@ -260,7 +263,7 @@ public sealed class LogisticsState
         }
     }
 
-    public void AddShipment(ShipmentState shipment)
+    internal void AddShipment(ShipmentState shipment)
     {
         if (!_shipments.TryAdd(shipment.Id, shipment))
         {
@@ -288,7 +291,7 @@ public sealed class LogisticsState
                 _shipments.Values.Where(shipment => shipment.Status == ShipmentStatus.Arrived)
                     .Sum(shipment => shipment.LossGrain));
 
-    public LogisticsState Clone()
+    internal LogisticsState Clone()
     {
         var clone = new LogisticsState();
         foreach (var stockpile in _stockpiles.Values)

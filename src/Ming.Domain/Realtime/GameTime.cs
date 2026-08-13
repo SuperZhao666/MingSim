@@ -9,14 +9,26 @@ namespace MingSim.Domain.Realtime;
 /// </remarks>
 public readonly record struct GameTime : IComparable<GameTime>
 {
-    public GameTime(DateTime value)
+    public GameTime(DateTimeOffset value)
     {
-        Value = DateTime.SpecifyKind(value, DateTimeKind.Utc);
+        if (value.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException("GameTime 必须使用 UTC+00:00。", nameof(value));
+        }
+
+        Value = value.ToUniversalTime();
     }
 
-    public DateTime Value { get; }
+    public GameTime(DateTime value)
+        : this(value.Kind == DateTimeKind.Utc
+            ? new DateTimeOffset(value)
+            : throw new ArgumentException("GameTime 的 DateTime 必须明确标记为 UTC。", nameof(value)))
+    {
+    }
 
-    public DateTime Date => Value.Date;
+    public DateTimeOffset Value { get; }
+
+    public DateTimeOffset Date => new(Value.Date, TimeSpan.Zero);
 
     public GameTime Add(TimeSpan elapsed) => new(Value.Add(elapsed));
 

@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using MingSim.Domain.Authorization;
 using MingSim.Domain.Characters;
 using MingSim.Domain.Common;
@@ -21,19 +22,55 @@ public sealed class WorldState
     private readonly Dictionary<CharacterId, CharacterState> _characters = [];
     private readonly Dictionary<InstitutionId, InstitutionState> _institutions = [];
     private readonly List<CapabilityGrant> _capabilityGrants = [];
+    private readonly Dictionary<ArmyId, MovementState> _movements = [];
 
-    public WorldState(
+    internal WorldState(
         WorldId id,
         int turnNumber,
         long treasurySilver,
         MapDefinition? map = null,
-        DateTime? currentTime = null)
+        DateTimeOffset? currentTime = null)
     {
+        if (string.IsNullOrWhiteSpace(id.Value))
+        {
+            throw new ArgumentException("世界编号不能为空。", nameof(id));
+        }
+
+        if (turnNumber < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(turnNumber), "回合号必须从 1 开始。");
+        }
+
         Id = id;
         TurnNumber = turnNumber;
         Economy = new EconomyState(treasurySilver);
         Map = map ?? MapDefinition.Empty(id.Value);
         GameTime = new(currentTime ?? SimulationEpoch.DefaultForTurn(turnNumber));
+    }
+
+    /// <summary>受控剧本初始化入口；初始化完成后写入权只属于 Simulation。</summary>
+    public static WorldState CreateInitial(
+        WorldId id,
+        int turnNumber,
+        long treasurySilver,
+        MapDefinition map,
+        IEnumerable<CharacterState>? characters = null,
+        IEnumerable<InstitutionState>? institutions = null,
+        IEnumerable<CapabilityGrant>? capabilityGrants = null,
+        IEnumerable<(string ResourceType, long Quantity)>? inventory = null,
+        IEnumerable<ArmyState>? armies = null,
+        IEnumerable<StockpileState>? stockpiles = null,
+        IEnumerable<RouteState>? routes = null)
+    {
+        var world = new WorldState(id, turnNumber, treasurySilver, map);
+        foreach (var character in characters ?? []) world.AddCharacter(character);
+        foreach (var institution in institutions ?? []) world.AddInstitution(institution);
+        foreach (var grant in capabilityGrants ?? []) world.GrantCapability(grant);
+        foreach (var (resourceType, quantity) in inventory ?? []) world.Economy.Inventory.GetOrCreate(resourceType).Add(quantity);
+        foreach (var army in armies ?? []) world.Military.Add(army);
+        foreach (var stockpile in stockpiles ?? []) world.Logistics.AddStockpile(stockpile);
+        foreach (var route in routes ?? []) world.Logistics.AddRoute(route);
+        return world;
     }
 
     public WorldId Id { get; }
@@ -52,7 +89,7 @@ public sealed class WorldState
     /// <summary>
     /// 旧代码读取时间的兼容属性；写入仍只能通过 Simulation 的 GameTime API 完成。
     /// </summary>
-    public DateTime CurrentTime => GameTime.Value;
+    public DateTimeOffset CurrentTime => GameTime.Value;
 
     /// <summary>权威世界提交次数；它不随渲染帧切分而变化。</summary>
     public long WorldVersion { get; private set; }
@@ -75,13 +112,23 @@ public sealed class WorldState
     /// <summary>实时物流的权威状态；只能由 Simulation 的命令和到期动作改变。</summary>
     public LogisticsState Logistics { get; } = new();
 
-    public IReadOnlyDictionary<CharacterId, CharacterState> Characters => _characters;
+    public IReadOnlyDictionary<CharacterId, CharacterState> Characters =>
+        new ReadOnlyDictionary<CharacterId, CharacterState>(_characters);
 
-    public IReadOnlyDictionary<InstitutionId, InstitutionState> Institutions => _institutions;
+    public IReadOnlyDictionary<InstitutionId, InstitutionState> Institutions =>
+        new ReadOnlyDictionary<InstitutionId, InstitutionState>(_institutions);
 
-    public IReadOnlyList<CapabilityGrant> CapabilityGrants => _capabilityGrants;
+    public IReadOnlyList<CapabilityGrant> CapabilityGrants =>
+        new ReadOnlyCollection<CapabilityGrant>(_capabilityGrants);
 
-    public void AddCharacter(CharacterState character)
+    public IReadOnlyDictionary<ArmyId, MovementState> Movements =>
+        new ReadOnlyDictionary<ArmyId, MovementState>(_movements);
+
+    internal void SetMovement(MovementState movement) => _movements[movement.ArmyId] = movement;
+
+    internal bool RemoveMovement(ArmyId armyId) => _movements.Remove(armyId);
+
+    internal void AddCharacter(CharacterState character)
     {
         if (!_characters.TryAdd(character.Id, character))
         {
@@ -89,7 +136,7 @@ public sealed class WorldState
         }
     }
 
-    public void AddInstitution(InstitutionState institution)
+    internal void AddInstitution(InstitutionState institution)
     {
         if (!_institutions.TryAdd(institution.Id, institution))
         {
@@ -97,7 +144,7 @@ public sealed class WorldState
         }
     }
 
-    public void GrantCapability(CapabilityGrant grant) => _capabilityGrants.Add(grant);
+    internal void GrantCapability(CapabilityGrant grant) => _capabilityGrants.Add(grant);
 
     public bool TryGetCharacter(CharacterId characterId, out CharacterState? character) =>
         _characters.TryGetValue(characterId, out character);
@@ -132,14 +179,19 @@ public sealed class WorldState
     }
 
     /// <summary>记录一次已经完成的实时提交。</summary>
-    internal void CommitRealtime(string commitId)
+    internal void CommitRealtime(long worldVersion, string commitId)
     {
         if (string.IsNullOrWhiteSpace(commitId))
         {
             throw new ArgumentException("提交身份不能为空。", nameof(commitId));
         }
 
-        WorldVersion++;
+        if (worldVersion < WorldVersion)
+        {
+            throw new ArgumentOutOfRangeException(nameof(worldVersion), "世界版本不能倒退。");
+        }
+
+        WorldVersion = worldVersion;
         CommitId = commitId;
     }
 
@@ -170,6 +222,11 @@ public sealed class WorldState
         foreach (var grant in _capabilityGrants)
         {
             clone._capabilityGrants.Add(grant);
+        }
+
+        foreach (var (armyId, movement) in _movements)
+        {
+            clone._movements.Add(armyId, movement);
         }
 
         CopyEconomy(clone);

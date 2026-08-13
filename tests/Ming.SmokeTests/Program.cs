@@ -1,473 +1,317 @@
-using MingSim.Application.Workflows;
-using MingSim.Application.Ports;
-using MingSim.Application.Scenarios;
+using System.Reflection;
 using MingSim.Domain;
 using MingSim.Domain.Authorization;
 using MingSim.Domain.Characters;
 using MingSim.Domain.Common;
 using MingSim.Domain.Economy;
-using MingSim.Domain.Intents;
-using MingSim.Domain.Military;
 using MingSim.Domain.Map;
+using MingSim.Domain.Military;
 using MingSim.Domain.Realtime;
-using MingSim.Persistence.InMemory;
-using MingSim.Simulation;
 using MingSim.Simulation.Realtime;
 
 namespace MingSim.SmokeTests;
 
 /// <summary>
-/// 不依赖第三方测试框架的冒烟测试。
+/// 不依赖第三方测试框架的实时内核边界测试。
+/// 每条测试都从公开的 Command/ReadModel 入口验证一条审查红线。
 /// </summary>
-/// <remarks>
-/// 这样即使还没有恢复完整 .NET 工具链，也能清楚看到第一版必须守住的行为契约。
-/// 工具链可用后，可以把这些断言迁移到 xUnit/MSTest，而不改变测试内容。
-/// </remarks>
 internal static class Program
 {
+    private static readonly DateTimeOffset FixedUtc =
+        new(2026, 8, 13, 0, 0, 0, TimeSpan.Zero);
+
     private static int Main()
     {
         try
         {
-            ShouldCommitValidIntentsAtomically();
-            ShouldRejectUnauthorizedIntentWithoutChangingWorld();
-            ShouldKeepSnapshotAndAuditAfterOrchestration();
-            ShouldLoadAndValidateScenarioMap();
-            ShouldNotAdvanceWhenPaused();
-            ShouldAdvanceByExplicitGameTimeAndMoveAdjacentArmy();
-            ShouldKeepSpeedAsACompatibilityTimeMapping();
-            ShouldKeepSameTimeEventsInCreationOrder();
-            ShouldKeepHashIndependentOfAdvanceFrameSplitting();
-            ShouldApplyDuplicateCommandOnlyOnce();
-            ShouldCompleteGrainShipmentAndKeepLedgerBalanced();
-            ShouldRejectGrainShipmentWhenSourceInventoryIsInsufficient();
-            ShouldRejectGrainShipmentWhenRouteCapacityIsInsufficient();
-            ShouldRejectGrainShipmentWhenDestinationCapacityIsInsufficient();
-            ShouldRejectGrainShipmentWithoutLogisticsPermission();
-            ShouldReplayGrainShipmentToTheSameHash();
-            Console.WriteLine("MingSim 冒烟测试全部通过。");
+            RuntimeMustNotExposeWritableWorldState();
+            ShouldRejectNonUtcAndInvalidInputs();
+            ShouldKeepReadModelCollectionsImmutable();
+            ShouldRejectPastTargetStructurally();
+            ShouldKeepPausedWorldUnchanged();
+            ShouldCommitTimeAndVersionTogether();
+            ShouldKeepRemainderIndependentOfFrameSplitting();
+            ShouldKeepFrameSplittingHashStableAcrossScheduledEvent();
+            ShouldAcceptOnlyOneMovementAndRecheckArrival();
+            ShouldKeepStartedAndArrivedEventsObservable();
+            ShouldKeepSameTimeSchedulerOrderStable();
+            ShouldRollbackFailedScheduledEvent();
+            ShouldKeepCanonicalHashCompleteAndCollisionSafe();
+            ShouldRestoreQueueAndIdempotencyFromSnapshot();
+            ShouldRejectExpiredCommandByExpectedWorldVersion();
+            ShouldDisableLegacyTurnCommitPath();
+            Console.WriteLine("MingSim 实时内核补审测试全部通过。");
             return 0;
         }
         catch (Exception exception)
         {
-            Console.Error.WriteLine($"冒烟测试失败：{exception.Message}");
+            Console.Error.WriteLine($"实时内核补审测试失败：{exception.Message}");
             Console.Error.WriteLine(exception.StackTrace);
             return 1;
         }
     }
 
-    private static void ShouldCommitValidIntentsAtomically()
+    private static void RuntimeMustNotExposeWritableWorldState()
     {
-        var world = CreateWorld();
-        var resolution = new SimulationKernel().ResolveTurn(
-            world,
-            [
-                new BuildFacilityIntent(
-                    "test-build",
-                    new CharacterId("works"),
-                    1,
-                    "test-build-key",
-                    new FacilityId("facility-1"),
-                    new ProvinceId("capital"),
-                    FacilityType.FlintlockWorkshop,
-                    50_000,
-                    800,
-                    80),
-                new ConvertArmyIntent(
-                    "test-convert",
-                    new CharacterId("war"),
-                    1,
-                    "test-convert-key",
-                    new ArmyId("army-1"),
-                    1_000),
-            ]);
-
-        Require(resolution.Committed, "合法意图应该提交");
-        Require(resolution.State.TurnNumber == 2, "提交后应该进入下一回合");
-        Require(resolution.State.Economy.Treasury.Silver == 150_000, "工坊预算应该从国库扣除");
-        Require(resolution.State.Military.Armies[new ArmyId("army-1")].Auxiliaries == 9_000, "辅兵应该减少");
-        Require(resolution.State.Military.Armies[new ArmyId("army-1")].LineInfantry == 4_000, "列装步兵应该增加");
-        Require(resolution.State.Economy.Inventory.GetOrCreate("flintlock").Quantity == 9_000, "装备应该真实消耗");
-        Require(resolution.Events.Any(domainEvent => domainEvent.EventType == "TurnCommitted"), "应该生成回合提交事件");
+        Require(typeof(RealtimeSimulationRuntime).GetProperty("State") is null,
+            "Runtime 不能公开活 WorldState");
+        Require(typeof(WorldState).GetMethod("AdvanceTo", BindingFlags.Public | BindingFlags.Instance) is null,
+            "WorldState 的时间写入口不能公开");
+        Require(typeof(WorldState).GetMethod("AddCharacter", BindingFlags.Public | BindingFlags.Instance) is null,
+            "WorldState 的初始化写入口不能公开给 UI/Agent");
+        Require(typeof(RealtimeSimulationRuntime).GetProperty("ReadModel") is not null,
+            "Runtime 必须公开只读 ReadModel");
     }
 
-    private static void ShouldRejectUnauthorizedIntentWithoutChangingWorld()
+    private static void ShouldRejectNonUtcAndInvalidInputs()
     {
-        var world = CreateWorld();
-        var resolution = new SimulationKernel().ResolveTurn(
-            world,
-            [new BuildFacilityIntent(
-                "test-unauthorized-build",
-                new CharacterId("war"),
-                1,
-                "test-unauthorized-build-key",
-                new FacilityId("facility-denied"),
-                new ProvinceId("capital"),
-                FacilityType.FlintlockWorkshop,
-                50_000,
-                800,
-                80)]);
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        var nonUtc = CreateMove(runtime, "non-utc", new DateTimeOffset(FixedUtc.DateTime, TimeSpan.FromHours(8)));
+        var receipt = runtime.EnqueueMoveArmy(nonUtc);
+        Require(!receipt.Queued && receipt.Errors.Any(error => error.Code == "NON_UTC_COMMAND_TIME"),
+            "非 UTC 命令必须被收件箱拒绝");
 
-        Require(!resolution.Committed, "无权限意图不能提交");
-        Require(resolution.Errors.Any(error => error.Code == "TOOL_SCOPE_DENIED"), "应该返回权限错误");
-        Require(world.Economy.Treasury.Silver == 200_000, "拒绝后原世界国库不能变化");
-        Require(world.Industry.Facilities.Count == 0, "拒绝后原世界不能出现工坊");
+        RequireThrows<ArgumentOutOfRangeException>(() => runtime.SetSpeed(double.NaN));
+        RequireThrows<ArgumentOutOfRangeException>(() => runtime.SetSpeed(double.PositiveInfinity));
+        RequireThrows<ArgumentOutOfRangeException>(() => runtime.SetSpeed(0));
+
+        var invalidId = CreateMove(runtime, " ", FixedUtc);
+        Require(!runtime.EnqueueMoveArmy(invalidId).Queued, "空 CommandId 必须被拒绝");
+        RequireThrows<ArgumentException>(() => new GameTime(new DateTime(2026, 8, 13)));
     }
 
-    private static void ShouldKeepSnapshotAndAuditAfterOrchestration()
+    private static void ShouldKeepReadModelCollectionsImmutable()
     {
-        var world = CreateWorld();
-        var store = new InMemoryWorldStore(world);
-        var audit = new InMemoryAuditJournal();
-        var snapshots = new InMemorySnapshotStore();
-        var orchestrator = new TurnOrchestrator(store, audit, snapshots, new SimulationKernel());
-
-        var result = orchestrator.ExecuteTurn(
-            world.Id,
-            [new ConvertArmyIntent(
-                "test-orchestrated-convert",
-                new CharacterId("war"),
-                1,
-                "test-orchestrated-convert-key",
-                new ArmyId("army-1"),
-                1_000)]);
-
-        Require(result.Committed, "编排器应该提交合法回合");
-        Require(audit.Read(world.Id).Count == result.EventCount, "审计事件数应该与回合结果一致");
-        Require(snapshots.Current is not null && snapshots.Current.IsValid, "当前快照应该通过校验");
-        Require(store.Load(world.Id).TurnNumber == 2, "存储中的回合应该已经前进");
+        var model = new RealtimeSimulationRuntime(CreateWorld()).ReadModel;
+        var armies = (IList<ArmyReadModel>)model.Armies;
+        RequireThrows<NotSupportedException>(() => armies.Add(model.Armies[0]));
+        var actions = (IList<ScheduledActionReadModel>)model.ScheduledActions;
+        RequireThrows<NotSupportedException>(() => actions.Clear());
     }
 
-    private static void ShouldLoadAndValidateScenarioMap()
+    private static void ShouldRejectPastTargetStructurally()
     {
-        var scenarioPath = Path.GetFullPath(Path.Combine("content", "ming_1627", "world.json"));
-        var world = new ScenarioLoader().Load(scenarioPath);
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        var current = runtime.ReadModel.GameTime;
+        var advanced = runtime.AdvanceTo(new GameTime(current.Value.AddHours(1)));
+        var beforeVersion = advanced.ReadModel.WorldVersion;
+        var rejected = runtime.AdvanceTo(new GameTime(current.Value.AddMinutes(30)));
 
-        Require(world.Map.Id == "ming_1627_demo_map", "剧本应该加载独立的地图编号");
-        Require(world.Map.Contains(new ProvinceId("capital")), "地图应该包含京师");
-        Require(world.Map.Contains(new ProvinceId("liaodong")), "地图应该包含辽东");
-        Require(
-            world.Map.IsAdjacent(new ProvinceId("capital"), new ProvinceId("liaodong")),
-            "地图应该保留京师到辽东的邻接关系");
-
-        // MapDefinition 会在构造时拒绝自环、重复邻接和未知引用。
-        var rejected = false;
-        try
-        {
-            _ = new MapDefinition(
-                "invalid-map",
-                [new ProvinceDefinition(
-                    new ProvinceId("capital"),
-                    "京师",
-                    [new ProvinceId("missing")])]);
-        }
-        catch (InvalidDataException)
-        {
-            rejected = true;
-        }
-
-        Require(rejected, "地图引用不存在的省份时应该被拒绝");
+        Require(!rejected.Succeeded, "过去目标必须返回失败结果");
+        Require(rejected.Errors.Any(error => error.Code == "TARGET_GAME_TIME_IN_PAST"), "过去目标必须有结构化错误码");
+        Require(rejected.ReadModel.WorldVersion == beforeVersion, "拒绝过去目标不能产生提交");
     }
 
-    private static void ShouldNotAdvanceWhenPaused()
+    private static void ShouldKeepPausedWorldUnchanged()
     {
         var runtime = new RealtimeSimulationRuntime(CreateWorld());
         runtime.SetPaused(true);
-        var before = runtime.StateHash;
-        var beforeTime = runtime.State.GameTime;
+        var before = runtime.ReadModel;
+        var result = runtime.AdvanceTo(new GameTime(before.GameTime.Value.AddDays(2)));
 
-        var result = runtime.AdvanceTo(new GameTime(beforeTime.Value.AddDays(2)));
-
-        Require(runtime.State.GameTime == beforeTime, "暂停时游戏时间不能推进");
-        Require(runtime.StateHash == before, "暂停时权威状态哈希不能变化");
-        Require(result.GameTimeAdvanced == TimeSpan.Zero, "暂停时报告的推进时长必须为零");
+        Require(result.Succeeded, "暂停请求本身不是错误");
+        Require(result.ReadModel.GameTime == before.GameTime, "暂停时游戏时间不能推进");
+        Require(result.ReadModel.WorldVersion == before.WorldVersion, "暂停时世界版本不能变化");
+        Require(result.ReadModel.StateHash == before.StateHash, "暂停时 canonical hash 不能变化");
     }
 
-    private static void ShouldAdvanceByExplicitGameTimeAndMoveAdjacentArmy()
+    private static void ShouldCommitTimeAndVersionTogether()
     {
         var runtime = new RealtimeSimulationRuntime(CreateWorld());
-        var command = new MoveArmyCommand(
-            "move-adjacent",
-            new CharacterId("war"),
-            new ArmyId("army-1"),
-            new ProvinceId("capital"),
-            runtime.State.CurrentTime,
-            TravelHours: 2);
+        var before = runtime.ReadModel;
+        var result = runtime.AdvanceTo(new GameTime(before.GameTime.Value.AddHours(1)));
 
-        Require(runtime.EnqueueMoveArmy(command).Accepted, "相邻行军命令应该被接纳");
-        var result = runtime.AdvanceTo(new GameTime(runtime.State.CurrentTime.AddHours(2)));
-
-        Require(result.ProcessedScheduledEvents == 1, "目标时刻应该处理一条抵达事件");
-        Require(result.State.Military.Armies[new ArmyId("army-1")].LocationId == new ProvinceId("capital"), "抵达事件应该由模拟内核修改军队位置");
-        Require(result.Events.Any(domainEvent => domainEvent.EventType == "ArmyArrived"), "应该产生军队抵达事实事件");
+        Require(result.ReadModel.GameTime.Value == before.GameTime.Value.AddHours(1), "目标时间必须成为权威时间");
+        Require(result.ReadModel.WorldVersion == before.WorldVersion + 1, "权威时间推进必须同时增加 WorldVersion");
+        Require(result.ReadModel.CommitId.StartsWith("time-", StringComparison.Ordinal), "时间提交必须有稳定 CommitId");
+        Require(result.Events.Any(domainEvent => domainEvent.EventType == "TimeAdvanced"), "时间提交必须产生可观察事件");
     }
 
-    private static void ShouldKeepSpeedAsACompatibilityTimeMapping()
+    private static void ShouldKeepRemainderIndependentOfFrameSplitting()
+    {
+        var oneFrame = new RealtimeSimulationRuntime(CreateWorld());
+        var splitFrames = new RealtimeSimulationRuntime(CreateWorld());
+        oneFrame.Advance(TimeSpan.FromSeconds(1));
+        splitFrames.Advance(TimeSpan.FromMilliseconds(400));
+        splitFrames.Advance(TimeSpan.FromMilliseconds(600));
+
+        Require(oneFrame.ReadModel.GameTime == splitFrames.ReadModel.GameTime,
+            "现实帧切分不能改变累计后的 GameTime");
+        Require(oneFrame.ReadModel.ScheduledActions.SequenceEqual(splitFrames.ReadModel.ScheduledActions),
+            "现实帧切分不能改变 Scheduler");
+    }
+
+    private static void ShouldKeepFrameSplittingHashStableAcrossScheduledEvent()
+    {
+        var oneFrame = new RealtimeSimulationRuntime(CreateWorld());
+        var splitFrames = new RealtimeSimulationRuntime(CreateWorld());
+        Require(oneFrame.EnqueueMoveArmy(CreateMove(oneFrame, "hash-event", FixedUtc, 0, 2)).Queued, "事件测试命令应该进入收件箱");
+        Require(splitFrames.EnqueueMoveArmy(CreateMove(splitFrames, "hash-event", FixedUtc, 0, 2)).Queued, "事件测试命令应该进入收件箱");
+        oneFrame.AdvanceTo(oneFrame.ReadModel.GameTime);
+        splitFrames.AdvanceTo(splitFrames.ReadModel.GameTime);
+        oneFrame.Advance(TimeSpan.FromSeconds(6));
+        splitFrames.Advance(TimeSpan.FromSeconds(1));
+        splitFrames.Advance(TimeSpan.FromSeconds(5));
+        Require(oneFrame.ReadModel.StateHash == splitFrames.ReadModel.StateHash,
+            "跨越到期事件时，帧切分不能改变最终 canonical hash");
+        Require(oneFrame.ReadModel.WorldVersion == splitFrames.ReadModel.WorldVersion,
+            "跨越到期事件时，帧切分不能改变最终 WorldVersion");
+    }
+
+    private static void ShouldAcceptOnlyOneMovementAndRecheckArrival()
     {
         var runtime = new RealtimeSimulationRuntime(CreateWorld());
-        runtime.SetSpeed(2.0);
+        var first = CreateMove(runtime, "move-1", FixedUtc, expectedVersion: 0, travelHours: 2);
+        Require(runtime.EnqueueMoveArmy(first).Queued, "第一条行军应该进入收件箱");
+        var accepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(accepted.CommandResults.Single().Accepted, "安全点应该接纳第一条行军");
+        Require(accepted.ReadModel.Movements.Count == 1, "接纳命令必须建立唯一 MovementState");
 
-        runtime.Advance(TimeSpan.FromSeconds(1));
+        var second = CreateMove(runtime, "move-2", FixedUtc, expectedVersion: accepted.ReadModel.WorldVersion, travelHours: 2);
+        Require(runtime.EnqueueMoveArmy(second).Queued, "第二条行军应该进入收件箱");
+        var rejected = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(rejected.CommandResults.Single().Errors.Any(error => error.Code == "ARMY_ALREADY_IN_TRANSIT"),
+            "在途军队必须拒绝冲突行军");
 
-        Require(runtime.State.CurrentTime == SimulationEpoch.DefaultForTurn(1).AddHours(12), "倍速只应改变兼容入口的游戏时间换算");
+        var arrived = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddHours(2)));
+        Require(arrived.ReadModel.Movements.Count == 0, "抵达成功后 MovementState 必须清除");
+        Require(arrived.ReadModel.Armies.Single().LocationId == new ProvinceId("capital"), "抵达必须更新只读军队视图");
     }
 
-    private static void ShouldKeepSameTimeEventsInCreationOrder()
-    {
-        var first = new RealtimeSimulationRuntime(CreateWorld());
-        var second = new RealtimeSimulationRuntime(CreateWorld());
-        var firstCommand = CreateMoveCommand(first, "same-time-1", "capital");
-        var secondCommand = CreateMoveCommand(first, "same-time-2", "capital");
-        var sameTarget = new GameTime(first.State.CurrentTime.AddHours(2));
-
-        Require(first.EnqueueMoveArmy(firstCommand).Accepted, "第一条同刻命令应该被接纳");
-        Require(first.EnqueueMoveArmy(secondCommand).Accepted, "第二条同刻命令应该被接纳");
-        var firstResult = first.AdvanceTo(sameTarget);
-
-        Require(second.EnqueueMoveArmy(CreateMoveCommand(second, "same-time-1", "capital")).Accepted, "重放第一条同刻命令应该被接纳");
-        Require(second.EnqueueMoveArmy(CreateMoveCommand(second, "same-time-2", "capital")).Accepted, "重放第二条同刻命令应该被接纳");
-        var replay = second.AdvanceTo(sameTarget);
-
-        Require(firstResult.Events
-            .Where(domainEvent => domainEvent.EventType == "ArmyArrived")
-            .Select(domainEvent => domainEvent.EventId)
-            .SequenceEqual(["army-arrival-same-time-1", "army-arrival-same-time-2"]), "同刻事件应该按创建序号稳定排序");
-        Require(first.StateHash == second.StateHash, "同刻事件创建顺序在重复运行中必须稳定");
-        Require(replay.Events.Count(domainEvent => domainEvent.EventType == "ArmyArrived") == 2, "同刻命令应该各自处理且不依赖优先队列偶然顺序");
-    }
-
-    private static void ShouldKeepHashIndependentOfAdvanceFrameSplitting()
-    {
-        var oneShot = new RealtimeSimulationRuntime(CreateWorld());
-        var split = new RealtimeSimulationRuntime(CreateWorld());
-        EnqueueStandardMove(oneShot, "frame-split");
-        EnqueueStandardMove(split, "frame-split");
-        var target = new GameTime(oneShot.State.CurrentTime.AddHours(3));
-
-        oneShot.AdvanceTo(target);
-        split.AdvanceTo(new GameTime(split.State.CurrentTime.AddHours(1)));
-        split.AdvanceTo(target);
-
-        Require(oneShot.StateHash == split.StateHash, "把 AdvanceTo 切成多次不能改变最终状态哈希");
-    }
-
-    private static void ShouldApplyDuplicateCommandOnlyOnce()
+    private static void ShouldKeepStartedAndArrivedEventsObservable()
     {
         var runtime = new RealtimeSimulationRuntime(CreateWorld());
-        var command = CreateMoveCommand(runtime, "duplicate", "capital", travelHours: 2);
+        Require(runtime.EnqueueMoveArmy(CreateMove(runtime, "visible", FixedUtc, 0, 1)).Queued, "命令应该进入收件箱");
+        var accepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(accepted.Events.Any(domainEvent => domainEvent.EventType == "ArmyMarchStarted"), "started 事件必须在接纳报告中可见");
+        Require(runtime.OutboxEvents.Any(domainEvent => domainEvent.EventType == "ArmyMarchStarted"), "started 事件不能被下一次 Advance 清空");
 
-        var first = runtime.EnqueueMoveArmy(command);
-        var duplicate = runtime.EnqueueMoveArmy(command);
-        var result = runtime.AdvanceTo(new GameTime(runtime.State.CurrentTime.AddHours(2)));
-
-        Require(first == duplicate, "重复命令应该返回相同 Outcome");
-        Require(result.ProcessedScheduledEvents == 1, "重复命令不能重复创建调度事件");
-        Require(result.Events.Count(domainEvent => domainEvent.EventType == "ArmyArrived") == 1, "重复命令不能重复生效");
+        var arrived = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddHours(1)));
+        Require(arrived.Events.Any(domainEvent => domainEvent.EventType == "ArmyArrived"), "arrived 事件必须在到期报告中可见");
+        Require(runtime.OutboxEvents.Any(domainEvent => domainEvent.EventType == "ArmyArrived"), "arrived 事件必须进入 outbox");
     }
 
-    private static void ShouldCompleteGrainShipmentAndKeepLedgerBalanced()
+    private static void ShouldKeepSameTimeSchedulerOrderStable()
     {
         var runtime = new RealtimeSimulationRuntime(CreateWorld());
-        var beforeLedger = runtime.State.Logistics.GrainLedgerTotal();
-        var command = CreateShipmentCommand(runtime, "grain-normal", 300);
+        var command = CreateMove(runtime, "same-time-order", FixedUtc, 0, 24);
+        Require(runtime.EnqueueMoveArmy(command).Queued, "同刻顺序测试命令应该进入收件箱");
+        var accepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(accepted.Events.Any(domainEvent => domainEvent.EventType == "ArmyMarchStarted"), "同刻顺序测试必须先记录接纳事件");
 
-        var accepted = runtime.EnqueueCreateShipment(command);
-        Require(accepted.Accepted, "正常粮运命令应该被接受");
-        Require(runtime.State.Logistics.Stockpiles[new StockpileId("capital-granary")].Quantity == 700,
-            "计划粮运时应该先从起点库存扣除粮食");
-        Require(runtime.State.Logistics.Shipments[new ShipmentId("shipment-grain-normal")].Status == ShipmentStatus.Planned,
-            "命令接受后运输单应该先处于计划状态");
-
-        var inTransit = runtime.AdvanceTo(new GameTime(runtime.State.CurrentTime.AddHours(1)));
-        var shipment = runtime.State.Logistics.Shipments[new ShipmentId("shipment-grain-normal")];
-        Require(shipment.Status == ShipmentStatus.InTransit, "到达前运输单应该处于在途状态");
-        Require(runtime.State.Logistics.Stockpiles[new StockpileId("capital-granary")].Quantity == 700,
-            "在途时起点库存不能回流");
-        Require(runtime.State.Logistics.Stockpiles[new StockpileId("ningyuan-granary")].Quantity == 0,
-            "在途时终点不能提前收到粮食");
-        Require(runtime.State.Logistics.GrainLedgerTotal() == beforeLedger, "在途阶段必须守恒");
-        Require(inTransit.Events.Any(domainEvent => domainEvent.EventType == "ShipmentDeparted"),
-            "在途阶段应该产生玩家可读的出发结果");
-
-        var arrived = runtime.AdvanceTo(new GameTime(runtime.State.CurrentTime.AddHours(1)));
-        shipment = runtime.State.Logistics.Shipments[new ShipmentId("shipment-grain-normal")];
-        Require(shipment.Status == ShipmentStatus.Arrived, "行程结束后运输单应该抵达");
-        Require(shipment.DeliveredGrain == 270 && shipment.LossGrain == 30,
-            "300 粮食按 100‰ 损耗后应交付 270、损耗 30");
-        Require(runtime.State.Logistics.Stockpiles[new StockpileId("ningyuan-granary")].Quantity == 270,
-            "抵达后终点库存应该增加实际交付量");
-        Require(runtime.State.Logistics.GrainLedgerTotal() == beforeLedger, "抵达损耗也必须守恒");
-        Require(arrived.Events.Any(domainEvent => domainEvent.EventType == "ShipmentArrived" &&
-                                                   domainEvent.Data["delivered_grain"] == "270" &&
-                                                   domainEvent.Data["loss_grain"] == "30"),
-            "抵达结果必须向玩家报告交付量和损耗量");
+        var arrival = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddHours(24)));
+        var eventTypes = arrival.Events.Select(domainEvent => domainEvent.EventType).ToArray();
+        Require(eventTypes.SequenceEqual(["ArmyArrived", "DailySimulationTick"]),
+            "同刻事件必须按 phase、priority、creation sequence 稳定排序");
     }
 
-    private static void ShouldRejectGrainShipmentWhenSourceInventoryIsInsufficient()
+    private static void ShouldRollbackFailedScheduledEvent()
     {
         var runtime = new RealtimeSimulationRuntime(CreateWorld());
-        var before = runtime.State.Logistics.GrainLedgerTotal();
-        var result = runtime.EnqueueCreateShipment(CreateShipmentCommand(runtime, "grain-short", 1_001));
+        var snapshot = runtime.CaptureSnapshot();
+        var field = typeof(RealtimeSimulationRuntime).GetField("_scheduledEvents", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var actions = (List<ScheduledSimulationEvent>)field.GetValue(runtime)!;
+        actions.Add(new ScheduledSimulationEvent("broken", new GameTime(runtime.ReadModel.GameTime.Value.AddHours(1)), 1, 0, 999, "Unknown", new Dictionary<string, string>()));
+        var before = runtime.ReadModel;
 
-        Require(!result.Accepted, "库存不足的粮运不能被接受");
-        Require(result.Errors.Any(error => error.Code == "INSUFFICIENT_GRAIN"), "库存不足应返回结构化错误");
-        Require(runtime.State.Logistics.Shipments.Count == 0, "库存不足不能生成运输单");
-        Require(runtime.State.Logistics.GrainLedgerTotal() == before, "库存不足不能破坏守恒");
+        var result = runtime.AdvanceTo(new GameTime(before.GameTime.Value.AddHours(1)));
+
+        Require(!result.Succeeded && result.Errors.Any(error => error.Code == "SCHEDULED_EVENT_FAILED"), "异常事件必须返回结构化失败");
+        Require(result.ReadModel.GameTime == before.GameTime, "异常事件不能提交时间");
+        Require(result.ReadModel.ScheduledActions.Any(action => action.EventId == "broken"), "异常事件不能从权威队列丢失");
+        Require(runtime.CaptureSnapshot().StateHash != snapshot.StateHash, "测试注入的损坏队列应进入诊断哈希");
     }
 
-    private static void ShouldRejectGrainShipmentWhenRouteCapacityIsInsufficient()
+    private static void ShouldKeepCanonicalHashCompleteAndCollisionSafe()
+    {
+        var first = new RealtimeSimulationRuntime(CreateWorld("world-a", "name|with:delimiters"));
+        var second = new RealtimeSimulationRuntime(CreateWorld("world-a", "name"));
+        Require(first.StateHash != second.StateHash, "影响未来行为的字符串变化必须改变 canonical hash");
+        Require(CanonicalStateHasher.SchemaVersion >= 2, "canonical hash 必须带明确 schema 版本");
+        Require(!File.Exists(Path.Combine("src", "Ming.Simulation", "Realtime", "RealtimeStateHasher.cs")),
+            "不能保留第二套实时 StateHasher");
+    }
+
+    private static void ShouldRestoreQueueAndIdempotencyFromSnapshot()
+    {
+        var pendingRuntime = new RealtimeSimulationRuntime(CreateWorld());
+        var pendingCommand = CreateMove(pendingRuntime, "pending-snapshot", FixedUtc, 0, 2);
+        Require(pendingRuntime.EnqueueMoveArmy(pendingCommand).Queued, "快照前收件箱命令应该进入队列");
+        var pendingSnapshot = pendingRuntime.CaptureSnapshot();
+        var pendingRestored = RealtimeSimulationRuntime.Restore(pendingSnapshot);
+        Require(pendingRestored.ReadModel.StateHash == pendingRuntime.ReadModel.StateHash,
+            "恢复后待处理收件箱也必须保持 canonical hash");
+        var pendingOriginalResult = pendingRuntime.AdvanceTo(pendingRuntime.ReadModel.GameTime);
+        var pendingRestoredResult = pendingRestored.AdvanceTo(pendingRestored.ReadModel.GameTime);
+        Require(pendingOriginalResult.ReadModel.StateHash == pendingRestoredResult.ReadModel.StateHash,
+            "恢复后的收件箱命令必须按同一顺序接纳");
+
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        var command = CreateMove(runtime, "snapshot-move", FixedUtc, 0, 2);
+        Require(runtime.EnqueueMoveArmy(command).Queued, "快照前命令应该进入收件箱");
+        runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        var snapshot = runtime.CaptureSnapshot();
+        var restored = RealtimeSimulationRuntime.Restore(snapshot);
+
+        Require(restored.ReadModel.StateHash == runtime.ReadModel.StateHash, "恢复后 canonical hash 必须一致");
+        var duplicate = restored.EnqueueMoveArmy(command);
+        var originalDuplicate = runtime.EnqueueMoveArmy(command);
+        var duplicateResult = restored.AdvanceTo(restored.ReadModel.GameTime);
+        runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(duplicate.Queued && duplicateResult.CommandResults.Single().Accepted, "恢复后相同命令必须保持幂等结果");
+        Require(originalDuplicate.Queued, "原运行时也应该接纳相同的幂等重试");
+        var target = new GameTime(runtime.ReadModel.GameTime.Value.AddHours(2));
+        var originalArrival = runtime.AdvanceTo(target);
+        var restoredArrival = restored.AdvanceTo(target);
+        Require(originalArrival.ReadModel.StateHash == restoredArrival.ReadModel.StateHash, "恢复后的队列推进必须与原运行时一致");
+    }
+
+    private static void ShouldRejectExpiredCommandByExpectedWorldVersion()
     {
         var runtime = new RealtimeSimulationRuntime(CreateWorld());
-        var result = runtime.EnqueueCreateShipment(CreateShipmentCommand(runtime, "grain-capacity", 501));
-
-        Require(!result.Accepted, "超过路线容量的粮运不能被接受");
-        Require(result.Errors.Any(error => error.Code == "ROUTE_CAPACITY_EXCEEDED"), "容量不足应返回结构化错误");
-        Require(runtime.State.Logistics.Stockpiles[new StockpileId("capital-granary")].Quantity == 1_000,
-            "容量拒绝不能扣减起点库存");
+        runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddHours(1)));
+        var command = CreateMove(runtime, "expired", FixedUtc, expectedVersion: 0, travelHours: 1);
+        Require(runtime.EnqueueMoveArmy(command).Queued, "过期命令仍应进入收件箱等待安全点判定");
+        var result = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!result.CommandResults.Single().Accepted, "过期命令不能被接纳");
+        Require(result.CommandResults.Single().Errors.Any(error => error.Code == "STATE_VERSION_CONFLICT"), "过期命令必须返回版本冲突");
     }
 
-    private static void ShouldRejectGrainShipmentWhenDestinationCapacityIsInsufficient()
+    private static void ShouldDisableLegacyTurnCommitPath()
     {
-        var runtime = new RealtimeSimulationRuntime(CreateWorld(destinationCapacity: 100));
-        var before = runtime.State.Logistics.GrainLedgerTotal();
-        var result = runtime.EnqueueCreateShipment(CreateShipmentCommand(runtime, "grain-destination-capacity", 300));
-
-        Require(!result.Accepted, "超过终点库存容量的粮运不能被接受");
-        Require(result.Errors.Any(error => error.Code == "DESTINATION_CAPACITY_EXCEEDED"),
-            "终点容量不足应返回结构化错误");
-        Require(runtime.State.Logistics.Shipments.Count == 0, "终点容量不足不能生成运输单");
-        Require(runtime.State.Logistics.GrainLedgerTotal() == before, "终点容量拒绝不能破坏守恒");
+        var kernel = new MingSim.Simulation.SimulationKernel();
+        var result = kernel.ResolveTurn(CreateWorld(), []);
+        Require(!result.Committed, "旧回合路径不能提交");
+        Require(result.Errors.Any(error => error.Code == "LEGACY_TURN_PATH_DISABLED"), "旧回合路径必须明确返回封存错误");
     }
 
-    private static void ShouldRejectGrainShipmentWithoutLogisticsPermission()
-    {
-        var runtime = new RealtimeSimulationRuntime(CreateWorld());
-        var result = runtime.EnqueueCreateShipment(CreateShipmentCommand(
-            runtime,
-            "grain-denied",
-            100,
-            actorId: new CharacterId("war")));
-
-        Require(!result.Accepted, "没有物流权限的角色不能创建粮运");
-        Require(result.Errors.Any(error => error.Code == "TOOL_SCOPE_DENIED"), "无权限应返回权限错误");
-        Require(runtime.State.Logistics.Shipments.Count == 0, "无权限不能生成运输单");
-    }
-
-    private static void ShouldReplayGrainShipmentToTheSameHash()
-    {
-        var first = new RealtimeSimulationRuntime(CreateWorld());
-        var replay = new RealtimeSimulationRuntime(CreateWorld());
-        var firstCommand = CreateShipmentCommand(first, "grain-replay", 200);
-        var replayCommand = CreateShipmentCommand(replay, "grain-replay", 200);
-
-        Require(first.EnqueueCreateShipment(firstCommand).Accepted, "第一次重放命令应该被接受");
-        Require(replay.EnqueueCreateShipment(replayCommand).Accepted, "重放命令应该被接受");
-        var duplicate = first.EnqueueCreateShipment(firstCommand);
-        Require(duplicate == first.EnqueueCreateShipment(firstCommand), "相同 CommandId 重试应该返回同一结果");
-        var conflict = first.EnqueueCreateShipment(firstCommand with { GrainQuantity = 201 });
-        Require(!conflict.Accepted && conflict.Errors.Any(error => error.Code == "IDEMPOTENCY_CONFLICT"),
-            "相同 CommandId 携带不同内容必须被拒绝");
-
-        var target = new GameTime(first.State.CurrentTime.AddHours(2));
-        first.AdvanceTo(target);
-        replay.AdvanceTo(new GameTime(replay.State.CurrentTime.AddHours(1)));
-        replay.AdvanceTo(new GameTime(replay.State.CurrentTime.AddHours(1)));
-
-        Require(first.StateHash == replay.StateHash, "相同命令和调度结果的 Replay 哈希必须一致");
-    }
-
-    private static MoveArmyCommand CreateMoveCommand(
+    private static MoveArmyCommand CreateMove(
         RealtimeSimulationRuntime runtime,
         string commandId,
-        string destination,
+        DateTimeOffset submittedAt,
+        long expectedVersion = 0,
         int travelHours = 2) =>
-        new(
-            commandId,
-            new CharacterId("war"),
-            new ArmyId("army-1"),
-            new ProvinceId(destination),
-            runtime.State.CurrentTime,
-            travelHours);
+        new(commandId, new CharacterId("war"), new ArmyId("army-1"), new ProvinceId("capital"), submittedAt, expectedVersion, travelHours);
 
-    private static void EnqueueStandardMove(RealtimeSimulationRuntime runtime, string commandId) =>
-        Require(
-            runtime.EnqueueMoveArmy(CreateMoveCommand(runtime, commandId, "capital", travelHours: 2)).Accepted,
-            "标准行军命令应该被接纳");
-
-    private static WorldState CreateWorld(long destinationCapacity = 1_000)
+    private static WorldState CreateWorld(string worldId = "smoke-world", string characterName = "兵部角色")
     {
         var map = new MapDefinition(
             "smoke-map",
             [
                 new ProvinceDefinition(new ProvinceId("frontier"), "边地", [new ProvinceId("capital")]),
                 new ProvinceDefinition(new ProvinceId("capital"), "京师", [new ProvinceId("frontier")]),
-                new ProvinceDefinition(new ProvinceId("liaodong"), "辽东", [new ProvinceId("frontier")]),
             ]);
-        var world = new WorldState(new WorldId("smoke-world"), 1, 200_000, map);
-        world.AddCharacter(new CharacterState(
-            new CharacterId("works"),
-            "工部角色",
-            new CharacterAttributes(80, 60, 30, 40, 70),
-            new CharacterPersonality(true, false, true, true)));
-        world.AddCharacter(new CharacterState(
-            new CharacterId("war"),
-            "兵部角色",
-            new CharacterAttributes(60, 40, 80, 50, 60),
-            new CharacterPersonality(true, true, true, false)));
-        world.GrantCapability(new CapabilityGrant(
-            new CharacterId("works"),
-            GameCapability.BuildIndustry,
-            "capital"));
-        world.GrantCapability(new CapabilityGrant(
-            new CharacterId("war"),
-            GameCapability.ConvertArmy,
-            "army-1"));
-        world.GrantCapability(new CapabilityGrant(
-            new CharacterId("war"),
-            GameCapability.MoveArmy,
-            "army-1"));
-        world.Economy.Inventory.GetOrCreate("flintlock").Add(10_000);
-        world.Logistics.AddStockpile(new StockpileState(
-            new StockpileId("capital-granary"),
-            new ProvinceId("capital"),
-            capacity: 2_000,
-            grainQuantity: 1_000));
-        world.Logistics.AddStockpile(new StockpileState(
-            new StockpileId("ningyuan-granary"),
-            new ProvinceId("liaodong"),
-            capacity: destinationCapacity));
-        world.Logistics.AddRoute(new RouteState(
-            new RouteId("capital-ningyuan-grain"),
-            new StockpileId("capital-granary"),
-            new StockpileId("ningyuan-granary"),
-            capacity: 500,
-            travelHours: 2,
-            lossPerThousand: 100));
-        world.GrantCapability(new CapabilityGrant(
-            new CharacterId("works"),
-            GameCapability.PlanLogistics,
-            "capital-ningyuan-grain"));
-        world.Military.Add(new ArmyState(
-            new ArmyId("army-1"),
-            "测试军",
-            new ProvinceId("frontier"),
-            auxiliaries: 10_000,
-            lineInfantry: 3_000));
-        return world;
+        return WorldState.CreateInitial(
+            new WorldId(worldId),
+            1,
+            200_000,
+            map,
+            [new CharacterState(new CharacterId("war"), characterName,
+                new CharacterAttributes(60, 40, 80, 50, 60),
+                new CharacterPersonality(true, true, true, false))],
+            capabilityGrants: [new CapabilityGrant(new CharacterId("war"), GameCapability.MoveArmy, "army-1")],
+            armies: [new ArmyState(new ArmyId("army-1"), "测试军", new ProvinceId("frontier"), 10_000, 3_000)]);
     }
-
-    private static CreateShipmentCommand CreateShipmentCommand(
-        RealtimeSimulationRuntime runtime,
-        string commandId,
-        long grainQuantity,
-        CharacterId? actorId = null) =>
-        new(
-            commandId,
-            actorId ?? new CharacterId("works"),
-            new ShipmentId($"shipment-{commandId}"),
-            new RouteId("capital-ningyuan-grain"),
-            grainQuantity,
-            runtime.State.CurrentTime);
 
     private static void Require(bool condition, string message)
     {
@@ -475,5 +319,20 @@ internal static class Program
         {
             throw new InvalidOperationException(message);
         }
+    }
+
+    private static void RequireThrows<TException>(Action action)
+        where TException : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (TException)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException($"应该抛出 {typeof(TException).Name}。");
     }
 }
