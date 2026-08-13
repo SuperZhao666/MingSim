@@ -72,6 +72,9 @@ public sealed class WorldState
 
     public MilitaryState Military { get; } = new();
 
+    /// <summary>实时物流的权威状态；只能由 Simulation 的命令和到期动作改变。</summary>
+    public LogisticsState Logistics { get; } = new();
+
     public IReadOnlyDictionary<CharacterId, CharacterState> Characters => _characters;
 
     public IReadOnlyDictionary<InstitutionId, InstitutionState> Institutions => _institutions;
@@ -172,6 +175,7 @@ public sealed class WorldState
         CopyEconomy(clone);
         CopyIndustry(clone);
         CopyMilitary(clone);
+        CopyLogistics(clone);
         return clone;
     }
 
@@ -201,6 +205,24 @@ public sealed class WorldState
         foreach (var army in Military.Armies.Values)
         {
             clone.Military.Add(army.Clone());
+        }
+    }
+
+    private void CopyLogistics(WorldState clone)
+    {
+        foreach (var stockpile in Logistics.Stockpiles.Values)
+        {
+            clone.Logistics.AddStockpile(stockpile.Clone());
+        }
+
+        foreach (var route in Logistics.Routes.Values)
+        {
+            clone.Logistics.AddRoute(route);
+        }
+
+        foreach (var shipment in Logistics.Shipments.Values)
+        {
+            clone.Logistics.AddShipment(shipment.Clone());
         }
     }
 }
