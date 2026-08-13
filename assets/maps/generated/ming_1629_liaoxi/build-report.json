@@ -1,11 +1,11 @@
 {
   "counts": {
-    "admitted_claims": 10,
-    "evidence_claims": 17,
+    "admitted_claims": 4,
+    "evidence_claims": 23,
     "historical_baseline_regions": 15,
-    "historical_regions": 2,
-    "places": 11,
-    "routes": 4,
+    "historical_regions": 0,
+    "places": 5,
+    "routes": 2,
     "source_ledger_entries": 13,
     "suppressed_routes": 1,
     "visible_lake_points": 58,
@@ -26,11 +26,11 @@
     "历史区域几何仅供表现；本构建器不读取、推导或写入 Simulation 拓扑。"
   ],
   "output_sha256": {
-    "debug-map.png": "090379cc8e37f8b2cde261311b24707455561e61c0f107f6486393b1c52f320b",
-    "history-overlay.png": "a4648521b548841995fcc06462d7f8aa954531c11daaf8813103f9442a2f998a",
-    "map-manifest.json": "8406445e29a3a942489aec09cd042fbc30a1efc674cc47ece83ea057f30acd5c",
+    "debug-map.png": "669d20373b7b80705cdcc0c4ec01f711ed384e09f8274840e8b1a2ff2a3e647f",
+    "history-overlay.png": "e91d7adb0c0494fb1e079ed9355f3f95f6e4f0488e677ef11c2b79156c73adc1",
+    "map-manifest.json": "c5c703f554a1218329d8bf2dde813fce61e390875b825e28e8d6207e04c103df",
     "physical-base.png": "1c1e5e5adb78daf3088017cffcc6132fb1ceec24aeb45a187db37e464932bbc9",
-    "regions.geojson": "9f734ca7c8be3a3c4c601ae30d7b7ef6224410e4d5d2207b54ccdef796b63069"
+    "regions.geojson": "411de21d0bb3734f946d0037d9710069ed648068b0a7074788971dfee613afa7"
   },
   "scenario_id": "ming_1629_liaoxi_detail",
   "schema_version": 1,
@@ -39,13 +39,13 @@
     "assets/maps/sources/natural-earth-physical/lakes/ne_10m_lakes.shp": "11064fa55ed91b56a0d86733643c1a5bfcc137fdf044e83f471978a5b86617e1",
     "assets/maps/sources/natural-earth-physical/land/ne_10m_land.shp": "4cad3a49bc75c1a4c2f3d7efae04f2f8e63151c96764b2658effabf524331fa6",
     "assets/maps/sources/natural-earth-physical/rivers/ne_10m_rivers_lake_centerlines.shp": "f9a1cf6d9f58c0a6f182a7f25771a03e0a48026253d4484aab782b2586354d78",
-    "content/scenarios/ming_1629/evidence/liaodong-1629-evidence.json": "149c43f23cc71535e1e95bb826a82e0720384ddbf1c119df7fd5580f37b8394c",
-    "content/scenarios/ming_1629/map/historical-overlays.json": "c22af1c82e51ed1eef300fe23479eb82a9a7a8255da253c0b90f938915686a91",
+    "content/scenarios/ming_1629/evidence/liaodong-1629-evidence.json": "6f7ee294c8c20f23a25edc95bd7d65e9c041db1487eab1f1e08f8e26a3cf37a9",
+    "content/scenarios/ming_1629/map/historical-overlays.json": "f4c4c3e4f5eb0d59e6f7cc63739a58876f0f7a194372f188fddcc936aa5d2ff3",
     "content/scenarios/ming_1629/map/historical-regions.json": "ecaa3c1f16b866506c93b8ad59ee2458a08387bc779b7ec428e7a088cc678074",
-    "content/scenarios/ming_1629/map/map-build-liaoxi.json": "f280eef8a7651ab7f15125493a8f86685c9b6e240df7ee68cb62d5d05d433387",
-    "content/scenarios/ming_1629/map/places.json": "26cd94b2a605264e8eeb39a9343f8f2c83d83c7b3ee2a628b1d52c262ca8425f",
-    "content/scenarios/ming_1629/map/routes.json": "07bfb05547fc452c6e7264a915df5166e2b00329f18e4d1dd62f76f9fbe661d5",
-    "content/scenarios/ming_1629/map/source-ledger.csv": "c91e3d6a46291b835d86f8a65b233e1b23b8a34f16b65e56f8ea5e54988c18b1"
+    "content/scenarios/ming_1629/map/map-build-liaoxi.json": "697638448125a913f004f4da32e2be108172c02f20a7345c01ee2ef45a72dd9f",
+    "content/scenarios/ming_1629/map/places.json": "c58af36201bad43b75d5c2d323d4d721aedcac8b248298ede29ec581b1073590",
+    "content/scenarios/ming_1629/map/routes.json": "b6aff782a19b91b9b9c1d9ddcdec58662a6a1edbbabed8a32278e8d1b56d0b95",
+    "content/scenarios/ming_1629/map/source-ledger.csv": "e23764402954cf5f2b3ffdbd9d768c3ea6b9d7c6f3f7180aa7f3f3935ccaf8a2"
   },
   "status": "technical_validation_passed_reviewed_evidence",
   "technical_validation": "passed",

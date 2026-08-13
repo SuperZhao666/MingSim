@@ -1,9 +1,9 @@
 {
   "asset_sha256": {
-    "debug-map.png": "090379cc8e37f8b2cde261311b24707455561e61c0f107f6486393b1c52f320b",
-    "history-overlay.png": "a4648521b548841995fcc06462d7f8aa954531c11daaf8813103f9442a2f998a",
+    "debug-map.png": "669d20373b7b80705cdcc0c4ec01f711ed384e09f8274840e8b1a2ff2a3e647f",
+    "history-overlay.png": "e91d7adb0c0494fb1e079ed9355f3f95f6e4f0488e677ef11c2b79156c73adc1",
     "physical-base.png": "1c1e5e5adb78daf3088017cffcc6132fb1ceec24aeb45a187db37e464932bbc9",
-    "regions.geojson": "9f734ca7c8be3a3c4c601ae30d7b7ef6224410e4d5d2207b54ccdef796b63069"
+    "regions.geojson": "411de21d0bb3734f946d0037d9710069ed648068b0a7074788971dfee613afa7"
   },
   "assets": {
     "debug_map": "res://assets/maps/generated/ming_1629_liaoxi/debug-map.png",
@@ -24,18 +24,12 @@
   },
   "evidence": {
     "admitted_claim_ids": [
-      "FACT-DENGZHOU-LIAODONG-LINK",
-      "FACT-DONGJIANG-NODES",
-      "FACT-GUANNINGJIN-NETWORK",
-      "FACT-JINZHOU-FRONTIER",
-      "FACT-LIAOSHEN-LATER-QING-CORE",
-      "FACT-NINGYUAN-FRONTIER",
-      "FACT-SHANHAIGUAN-GATE",
-      "FACT-TOKYO-CITY-SITE",
-      "INFERENCE-GUANNINGJIN-CORRIDOR",
-      "INFERENCE-POSTJIN-LIAOSHEN-CORE"
+      "INFERENCE-P0-DENGZHOU-ANCHOR",
+      "INFERENCE-P0-GUANNINGJIN-TOPOLOGY",
+      "INFERENCE-P0-JINZHOU-ANCHOR",
+      "INFERENCE-P0-NINGYUAN-ANCHOR"
     ],
-    "claim_count": 17,
+    "claim_count": 23,
     "ledger": "res://content/scenarios/ming_1629/evidence/liaodong-1629-evidence.json"
   },
   "generator": "tools/maps/build_east_asia_map.py",
@@ -452,7 +446,7 @@
     "geometry_role": "reviewed_historical_presentation_only_not_simulation_topology",
     "schema_version": 1,
     "snapshot_date": "1629-01-01",
-    "warning": "仅显示证据准入的有限影响区；外沿不是1629政治边界，不进入Simulation拓扑。"
+    "warning": "当前没有可审计的面状历史证据；东江、辽沈、山海关均不输出Polygon，历史覆盖层暂时不画。"
   },
   "layers": [
     {
@@ -490,7 +484,7 @@
   "places": [
     {
       "claim_ids": [
-        "INFERENCE-GUANNINGJIN-CORRIDOR"
+        "INFERENCE-P0-GUANNINGJIN-TOPOLOGY"
       ],
       "confidence": "unknown",
       "coordinate_epoch": "modern_anchor",
@@ -505,7 +499,7 @@
       "map_x": 646.554735,
       "map_y": 665.550967,
       "name_zh": "京师",
-      "notes": "坐标是历史城市的现代地理锚点，不表示现代行政区。",
+      "notes": "现代地理锚点；只作为关系拓扑端点，不表示现代行政区或1629城址中心。",
       "review_status": "accepted",
       "source_ids": [
         "SRC-PLACE-MODERN-ANCHOR",
@@ -514,7 +508,7 @@
     },
     {
       "claim_ids": [
-        "INFERENCE-GUANNINGJIN-CORRIDOR"
+        "INFERENCE-P0-GUANNINGJIN-TOPOLOGY"
       ],
       "confidence": "unknown",
       "coordinate_epoch": "modern_anchor",
@@ -529,7 +523,7 @@
       "map_x": 691.115257,
       "map_y": 664.221181,
       "name_zh": "通州",
-      "notes": "待用历史城址资料复核。",
+      "notes": "现代地理锚点；具体漕运仓储与道路几何保持 OPEN。",
       "review_status": "accepted",
       "source_ids": [
         "SRC-PLACE-MODERN-ANCHOR",
@@ -538,37 +532,12 @@
     },
     {
       "claim_ids": [
-        "FACT-SHANHAIGUAN-GATE"
+        "INFERENCE-P0-NINGYUAN-ANCHOR"
       ],
       "confidence": "unknown",
       "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "high",
-      "evidence_status": "accepted_evidence",
-      "historical_site_status": "open",
-      "id": "shanhaiguan",
-      "kind": "pass",
-      "latitude": 40.0006,
-      "longitude": 119.7758,
-      "map_representation": "approximate_point",
-      "map_x": 1249.356594,
-      "map_y": 643.04635,
-      "name_zh": "山海关",
-      "notes": "待用关城史料复核显示点。",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-PLACE-MODERN-ANCHOR",
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ]
-    },
-    {
-      "claim_ids": [
-        "FACT-NINGYUAN-FRONTIER",
-        "FACT-GUANNINGJIN-NETWORK"
-      ],
-      "confidence": "unknown",
-      "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "high",
-      "evidence_status": "accepted_evidence",
+      "evidence_confidence": "medium",
+      "evidence_status": "accepted_anchor",
       "historical_site_status": "open",
       "id": "ningyuan",
       "kind": "fortress",
@@ -578,7 +547,7 @@
       "map_x": 1420.2972,
       "map_y": 498.460052,
       "name_zh": "宁远",
-      "notes": "以今兴城古城附近为锚点；历史城址范围待复核。",
+      "notes": "以今兴城古城附近为 modern_anchor；anchor_only，不表示1629驻军、库存或古城墙范围。",
       "review_status": "accepted",
       "source_ids": [
         "SRC-PLACE-MODERN-ANCHOR",
@@ -587,12 +556,12 @@
     },
     {
       "claim_ids": [
-        "FACT-JINZHOU-FRONTIER"
+        "INFERENCE-P0-JINZHOU-ANCHOR"
       ],
       "confidence": "unknown",
       "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "high",
-      "evidence_status": "accepted_evidence",
+      "evidence_confidence": "medium",
+      "evidence_status": "accepted_anchor",
       "historical_site_status": "open",
       "id": "jinzhou",
       "kind": "fortress",
@@ -602,7 +571,7 @@
       "map_x": 1491.164537,
       "map_y": 385.124903,
       "name_zh": "锦州",
-      "notes": "现代城市中心仅作初始锚点；历史城址待复核。",
+      "notes": "现代城市锚点；anchor_only，不表示历史城址中心、1629控制或周边边线。",
       "review_status": "accepted",
       "source_ids": [
         "SRC-PLACE-MODERN-ANCHOR",
@@ -611,12 +580,12 @@
     },
     {
       "claim_ids": [
-        "FACT-DENGZHOU-LIAODONG-LINK"
+        "INFERENCE-P0-DENGZHOU-ANCHOR"
       ],
       "confidence": "unknown",
       "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "high",
-      "evidence_status": "accepted_evidence",
+      "evidence_confidence": "medium",
+      "evidence_status": "accepted_anchor",
       "historical_site_status": "open",
       "id": "dengzhou",
       "kind": "port",
@@ -626,133 +595,11 @@
       "map_x": 1425.129064,
       "map_y": 1146.727091,
       "name_zh": "登州",
-      "notes": "以今蓬莱古城附近为锚点；历史港城范围待复核。",
+      "notes": "以今蓬莱附近为 modern_anchor；不表示古港范围、固定航线、航季或运力。",
       "review_status": "accepted",
       "source_ids": [
         "SRC-PLACE-MODERN-ANCHOR",
         "SRC-CTEXT-MAOSHUAIDONGJI"
-      ]
-    },
-    {
-      "claim_ids": [
-        "FACT-DONGJIANG-NODES"
-      ],
-      "confidence": "unknown",
-      "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "high",
-      "evidence_status": "accepted_evidence",
-      "historical_site_status": "open",
-      "id": "juehua",
-      "kind": "island_node",
-      "latitude": 40.53,
-      "longitude": 120.95,
-      "map_representation": "approximate_point",
-      "map_x": 1459.488985,
-      "map_y": 518.88684,
-      "name_zh": "觉华岛",
-      "notes": "近似海岛节点；不表示岛屿边界、驻军或持续控制。",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-PLACE-MODERN-ANCHOR",
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ]
-    },
-    {
-      "claim_ids": [
-        "FACT-DONGJIANG-NODES"
-      ],
-      "confidence": "unknown",
-      "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "high",
-      "evidence_status": "accepted_evidence",
-      "historical_site_status": "open",
-      "id": "pi-island",
-      "kind": "island_node",
-      "latitude": 39.0,
-      "longitude": 123.15,
-      "map_representation": "approximate_point",
-      "map_x": 1853.19641,
-      "map_y": 875.117023,
-      "name_zh": "皮岛",
-      "notes": "近似海岛节点；不表示岛屿边界、驻军或持续控制。",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-PLACE-MODERN-ANCHOR",
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ]
-    },
-    {
-      "claim_ids": [
-        "FACT-LIAOSHEN-LATER-QING-CORE",
-        "FACT-TOKYO-CITY-SITE"
-      ],
-      "confidence": "unknown",
-      "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "high",
-      "evidence_status": "accepted_evidence",
-      "historical_site_status": "open",
-      "id": "liaoyang",
-      "kind": "historical_core_node",
-      "latitude": 41.27,
-      "longitude": 123.17,
-      "map_representation": "approximate_point",
-      "map_x": 1856.775568,
-      "map_y": 343.679385,
-      "name_zh": "辽阳",
-      "notes": "辽沈核心近似节点；不表示精确都城/城墙几何。",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-PLACE-MODERN-ANCHOR",
-        "SRC-LN-DONGJINGCITY"
-      ]
-    },
-    {
-      "claim_ids": [
-        "FACT-LIAOSHEN-LATER-QING-CORE"
-      ],
-      "confidence": "unknown",
-      "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "high",
-      "evidence_status": "accepted_evidence",
-      "historical_site_status": "open",
-      "id": "shenyang",
-      "kind": "historical_core_node",
-      "latitude": 41.8,
-      "longitude": 123.43,
-      "map_representation": "approximate_point",
-      "map_x": 1903.304628,
-      "map_y": 216.969794,
-      "name_zh": "沈阳",
-      "notes": "迁都事实对应的近似节点；不表示精确控制外沿。",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-PLACE-MODERN-ANCHOR",
-        "SRC-LN-DONGJINGCITY"
-      ]
-    },
-    {
-      "claim_ids": [
-        "FACT-TOKYO-CITY-SITE",
-        "FACT-LIAOSHEN-LATER-QING-CORE"
-      ],
-      "confidence": "unknown",
-      "coordinate_epoch": "modern_anchor",
-      "evidence_confidence": "high",
-      "evidence_status": "accepted_evidence",
-      "historical_site_status": "open",
-      "id": "tokyo-city",
-      "kind": "historical_core_node",
-      "latitude": 41.37,
-      "longitude": 123.47,
-      "map_representation": "approximate_point",
-      "map_x": 1910.462944,
-      "map_y": 319.851163,
-      "name_zh": "东京城",
-      "notes": "官方遗址说明对应的近似节点；不画城垣多边形。",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-PLACE-MODERN-ANCHOR",
-        "SRC-LN-DONGJINGCITY"
       ]
     }
   ],
@@ -781,50 +628,7 @@
     ],
     "scale_pixels_per_metre": 0.001607606352
   },
-  "regions": [
-    {
-      "bbox_lon_lat": [
-        121.7,
-        41.65,
-        123.0,
-        42.42
-      ],
-      "claim_ids": [
-        "FACT-LIAOSHEN-LATER-QING-CORE",
-        "FACT-TOKYO-CITY-SITE",
-        "INFERENCE-POSTJIN-LIAOSHEN-CORE"
-      ],
-      "confidence": "medium",
-      "id": "liaoshen-limited-core",
-      "name_zh": "辽沈核心（有限影响区）",
-      "notes": "只作辽阳—沈阳方向的有限核心提示；不得解释为后金精确外沿。",
-      "representation": "limited_influence_area",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-LN-DONGJINGCITY"
-      ]
-    },
-    {
-      "bbox_lon_lat": [
-        120.45,
-        37.35,
-        123.0,
-        40.75
-      ],
-      "claim_ids": [
-        "FACT-DONGJIANG-NODES"
-      ],
-      "confidence": "medium",
-      "id": "dongjiang-island-coastal-network",
-      "name_zh": "东江海岛—辽南沿岸网络（有限影响区）",
-      "notes": "只提示海岛、港口、辽南沿岸的网络影响；不表示连续陆地控制。",
-      "representation": "limited_influence_area",
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ]
-    }
-  ],
+  "regions": [],
   "research_baseline": {
     "geometry_depict_date": "1391-01-01",
     "historical_fit_status": "research_baseline_only",
@@ -834,17 +638,17 @@
   "routes": [
     {
       "claim_ids": [
-        "INFERENCE-GUANNINGJIN-CORRIDOR"
+        "INFERENCE-P0-GUANNINGJIN-TOPOLOGY"
       ],
       "claim_status": "reviewed_inference",
-      "confidence": "medium",
+      "confidence": "low",
       "evidence_status": "accepted",
       "from_place_id": "beijing",
       "id": "route-beijing-tongzhou",
       "kind": "land",
       "map_representation": "corridor",
-      "name_zh": "京师—通州",
-      "notes": "",
+      "name_zh": "京师—通州关系拓扑",
+      "notes": "仅为场景拓扑端点关系；北京—通州具体漕运证据与数值 OPEN。",
       "points": [
         {
           "latitude": 39.9042,
@@ -868,113 +672,17 @@
     },
     {
       "claim_ids": [
-        "INFERENCE-GUANNINGJIN-CORRIDOR"
+        "INFERENCE-P0-GUANNINGJIN-TOPOLOGY"
       ],
       "claim_status": "reviewed_inference",
-      "confidence": "medium",
-      "evidence_status": "accepted",
-      "from_place_id": "tongzhou",
-      "id": "route-tongzhou-shanhaiguan",
-      "kind": "land",
-      "map_representation": "corridor",
-      "name_zh": "通州—山海关",
-      "notes": "",
-      "points": [
-        {
-          "latitude": 39.9099,
-          "longitude": 116.6564,
-          "map_x": 691.115257,
-          "map_y": 664.221181
-        },
-        {
-          "latitude": 39.3,
-          "longitude": 117.6,
-          "map_x": 859.979951,
-          "map_y": 805.88709
-        },
-        {
-          "latitude": 39.6,
-          "longitude": 118.7,
-          "map_x": 1056.833664,
-          "map_y": 736.359824
-        },
-        {
-          "latitude": 40.0006,
-          "longitude": 119.7758,
-          "map_x": 1249.356594,
-          "map_y": 643.04635
-        }
-      ],
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-ROUTE-DESIGN-DRAFT",
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ],
-      "to_place_id": "shanhaiguan"
-    },
-    {
-      "claim_ids": [
-        "FACT-GUANNINGJIN-NETWORK",
-        "FACT-NINGYUAN-FRONTIER",
-        "INFERENCE-GUANNINGJIN-CORRIDOR"
-      ],
-      "claim_status": "reviewed_inference",
-      "confidence": "medium",
-      "evidence_status": "accepted",
-      "from_place_id": "shanhaiguan",
-      "id": "route-shanhaiguan-ningyuan",
-      "kind": "land",
-      "map_representation": "corridor",
-      "name_zh": "山海关—宁远",
-      "notes": "",
-      "points": [
-        {
-          "latitude": 40.0006,
-          "longitude": 119.7758,
-          "map_x": 1249.356594,
-          "map_y": 643.04635
-        },
-        {
-          "latitude": 40.2,
-          "longitude": 120.1,
-          "map_x": 1307.374752,
-          "map_y": 596.395269
-        },
-        {
-          "latitude": 40.45,
-          "longitude": 120.4,
-          "map_x": 1361.062128,
-          "map_y": 537.711657
-        },
-        {
-          "latitude": 40.6167,
-          "longitude": 120.731,
-          "map_x": 1420.2972,
-          "map_y": 498.460052
-        }
-      ],
-      "review_status": "accepted",
-      "source_ids": [
-        "SRC-ROUTE-DESIGN-DRAFT",
-        "SRC-CTEXT-MAOSHUAIDONGJI"
-      ],
-      "to_place_id": "ningyuan"
-    },
-    {
-      "claim_ids": [
-        "FACT-GUANNINGJIN-NETWORK",
-        "FACT-JINZHOU-FRONTIER",
-        "INFERENCE-GUANNINGJIN-CORRIDOR"
-      ],
-      "claim_status": "reviewed_inference",
-      "confidence": "medium",
+      "confidence": "low",
       "evidence_status": "accepted",
       "from_place_id": "ningyuan",
       "id": "route-ningyuan-jinzhou",
       "kind": "land",
       "map_representation": "corridor",
-      "name_zh": "宁远—锦州",
-      "notes": "",
+      "name_zh": "宁远—锦州关系拓扑",
+      "notes": "只表示宁远—锦州关系拓扑；不补山海关精确位置、古道中继或连续控制面。",
       "points": [
         {
           "latitude": 40.6167,

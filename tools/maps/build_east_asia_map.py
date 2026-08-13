@@ -689,7 +689,13 @@ def load_evidence_ledger(
     source_ledger: Mapping[str, Mapping[str, str]],
 ) -> tuple[dict[str, Mapping[str, Any]], set[str]]:
     document = load_json(path, "liaodong-1629-evidence.json")
-    ensure_schema(document, "liaodong-1629-evidence.json")
+    # The evidence ledger owns schema version 2; map input files remain on the
+    # builder's schema version 1.  Keep this compatibility gate local to the
+    # ledger loader so the empty-overlay change does not broaden other schemas.
+    require(
+        document.get("schema_version") in {1, 2},
+        "liaodong-1629-evidence.json.schema_version 必须为 1 或 2。",
+    )
     sources = require_list(document.get("sources"), "evidence.sources")
     source_ids: set[str] = set()
     for index, raw_source in enumerate(sources):
@@ -988,7 +994,6 @@ def load_evidence_overlays(
         )
         manifest_overlays.append({"id": overlay_id, "bbox_lon_lat": bbox, **properties})
 
-    require(output_features, "historical-overlays.json 至少需要一个叠加层。")
     output_geojson = {
         "type": "FeatureCollection",
         "name": "ming_1629_reviewed_evidence_overlays",
