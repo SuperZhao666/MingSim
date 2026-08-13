@@ -1,0 +1,40 @@
+name: MingSim Core CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mingsim-core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mingsim-core:
+    name: mingsim-core
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.400
+
+      - name: Restore core solution
+        run: dotnet restore MyGame.sln
+
+      - name: Build core solution
+        run: dotnet build MyGame.sln -c Release --no-restore --nologo
+
+      - name: Run core smoke tests
+        run: dotnet run --project tests/Ming.SmokeTests/Ming.SmokeTests.csproj -c Release --no-build
