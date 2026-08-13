@@ -36,6 +36,7 @@
 - 代码 PR 必查正确性、失败原子性、权限、幂等、不变量、确定性、恢复和缺失边界测试。
 - UI/地图/史料 PR 还必须检查真实运行画面、来源、许可证以及 `FACT` / `DESIGN` / `OPEN` 语义。
 - 存在未解决的 P0 或 P1 时标记 `review:changes-requested`，禁止合并；修复后必须重新审查。
-- 审查通过后由总控标记 `review:passed`；此后任何新提交都会使通过结果失效，必须复审。
-- 只有总控可以在 `review:passed` 且验证通过后执行 Squash merge 和删除远程分支。
+- 审查必须记录当时的 PR head SHA；通过后由总控标记 `review:passed`，并只为该 SHA 写入 `independent-review-gate` 成功状态。
+- 任何新提交都会产生没有通过状态的新 SHA，必须重新审查；标签本身不能代替这个 SHA 绑定门禁。
+- 只有总控可以在 `review:passed`、`independent-review-gate` 和验证均通过后执行 Squash merge 和删除远程分支。
 - 下游任务只能依赖“独立审查通过并已合并”的 PR，不能只看分支存在、测试通过或 PR 已创建。
