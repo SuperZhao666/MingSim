@@ -1,0 +1,414 @@
+{
+  "schema_version": 1,
+  "ledger_id": "ming_1629_liaodong_liaoxi_evidence",
+  "snapshot": {
+    "id": "ming_1629_01_01",
+    "date_normalized": "1629-01-01",
+    "date_original": "崇祯二年正月初一（场景快照标签；原始史料的年/月/日仍须逐条换算）",
+    "calendar_policy": "保留原始明代年号日期；未完成逐日换算的事件不得用来宣称快照日精确控制",
+    "scope_note": "本账本是宁远急饷垂直切片的证据层，不是1629全年不变的政治边界图。"
+  },
+  "claim_status_definitions": {
+    "FACT": "来源页面或原始史料条目直接支持的、限定到时间和对象的断言；不自动支持精确几何。",
+    "INFERENCE": "依据一个或多个FACT作出的制图/玩法归纳；必须可替换，不能伪装成史料原话。",
+    "OPEN": "证据、日期换算、坐标、控制范围、边线或许可证仍不足；禁止写死。"
+  },
+  "map_semantics": {
+    "精确点": "仅用于来源明确存在且可与现代地点可靠对应的历史节点；坐标仍需记录为现代锚点，不等于古城墙测绘。",
+    "近似点": "历史地点存在但公开来源没有可复核的古城中心或边界坐标。",
+    "走廊": "多个节点/史料明确支持的交通、驻防或转运关系；不表示固定宽度、里程、时长或连续主权面。",
+    "淡色影响区": "只能表达活动、牵制、盟属或可能影响，不表达稳定行政控制。",
+    "暂时不画": "精确边界、快照日驻军/仓储、未完成日期换算或许可未闭合的对象。"
+  },
+  "sources": [
+    {
+      "id": "SRC-CTEXT-MAOSHUAIDONGJI",
+      "title": "《明史纪事本末补遗》卷四《毛帅东江》及《锦宁战守》相关条目",
+      "type": "primary_text_transcription_with_page_links",
+      "url": "https://ctext.org/wiki.pl?chapter=867360&if=en&remap=gb",
+      "locator": "CText 条目页；相关扫描页链接 file=18446&page=2、5、11、22、25；页面提示文本含OCR转录，引用时保留原文异体/识读不确定性",
+      "access_checked": "2026-08-13",
+      "access_result": "HTTP 200；条目和页码链接可见",
+      "bibliography": "《明史纪事本末补遗》卷四《毛帅东江》、卷五/相关《锦宁战守》条目；CText 数字转录",
+      "license": "CText 页面版权/使用条件；仅引用链接与短引，不打包扫描图或整库",
+      "allowed_use": "史料引用、节点/关系的研究证据",
+      "redistribution": "不得将CText扫描图或整库作为游戏资产再分发"
+    },
+    {
+      "id": "SRC-LN-DONGJINGCITY",
+      "title": "东京城城址",
+      "type": "official_heritage_page",
+      "url": "https://whly.ln.gov.cn/whly/wlzt/lnww/zdwwbhdw/3D3F77FF561C4367A540E61575E0598F/index.shtml",
+      "locator": "辽宁省文化和旅游厅页面；发布时间2020-08-27；正文“东京城建于后金天命六年（1621年）”“天命十年（1625年）三月……迁都沈阳”段落",
+      "access_checked": "2026-08-13",
+      "access_result": "HTTP 200；标题、发布时间、来源和正文可读",
+      "bibliography": "辽宁省文化和旅游厅文物管理处，《东京城城址》，2020-08-27",
+      "license": "政府网站页面/图片权利未在本条目明确授予再分发；仅作引用，不复制图片",
+      "allowed_use": "历史事件与遗址存在的证据引用",
+      "redistribution": "不得把页面图片或未明确授权的几何打包"
+    },
+    {
+      "id": "SRC-LOC-DAMINGYUDITU",
+      "title": "大明舆地图",
+      "type": "library_catalog",
+      "url": "https://www.loc.gov/item/2002626776/",
+      "locator": "Library of Congress item 2002626776；目录页（本次浏览受Cloudflare保护，未以其作关键FACT的唯一依据）",
+      "access_checked": "2026-08-13",
+      "access_result": "目录请求被Cloudflare 403拦截；仓库既有计划文档记录其馆藏范围，待人工复核图页/权利行",
+      "bibliography": "Library of Congress, Da Ming yu di tu, item 2002626776",
+      "license": "待直接核验馆藏页的权利/信用行；当前 research_only",
+      "allowed_use": "待人工复核的历史地图目录线索",
+      "redistribution": "禁止在权利行核验前复制或描边"
+    },
+    {
+      "id": "SRC-LOC-GUANGYUTU",
+      "title": "广舆图（1579）",
+      "type": "library_catalog",
+      "url": "https://www.loc.gov/item/2021666327/",
+      "locator": "Library of Congress item 2021666327；本次浏览受Cloudflare保护",
+      "access_checked": "2026-08-13",
+      "access_result": "目录请求被Cloudflare 403拦截；不得用作本账本已闭合FACT",
+      "bibliography": "Library of Congress, Guang yu tu, 1579, item 2021666327",
+      "license": "待直接核验；research_only",
+      "allowed_use": "历史地名/道路对照线索",
+      "redistribution": "禁止复制图像或描边"
+    },
+    {
+      "id": "SRC-LOC-HUANGMINGZHIFANG",
+      "title": "皇明职方地图（1636）",
+      "type": "library_catalog",
+      "url": "https://www.loc.gov/item/2021668270/",
+      "locator": "Library of Congress item 2021668270；本次浏览受Cloudflare保护；年代晚于1629七年",
+      "access_checked": "2026-08-13",
+      "access_result": "目录请求被Cloudflare 403拦截；只能作为待复核的年代邻近地图线索",
+      "bibliography": "Library of Congress, Huang Ming zhi fang di tu, 1636, item 2021668270",
+      "license": "待直接核验；research_only",
+      "allowed_use": "年代邻近的地名/道路对照线索",
+      "redistribution": "禁止复制图像或描边"
+    },
+    {
+      "id": "SRC-FUDAN-CHGIS-LICENSE",
+      "title": "中国历史地理信息系统（CHGIS）版权声明",
+      "type": "university_dataset_license",
+      "url": "https://yugong.fudan.edu.cn/CHGIS/bqsm.htm",
+      "locator": "复旦大学中国历史地理研究所 CHGIS V2.0 用户协议第(3)(4)(7)条",
+      "access_checked": "2026-08-13",
+      "access_result": "页面可读；明确非商业学术/教育限制及不得无书面同意再发布整库",
+      "bibliography": "复旦大学历史地理研究中心，《中国历史地理信息系统2.0版（CHGIS V2.0）用户协议》",
+      "license": "研究参考；非商业学术/教育用途限制；中国境内使用需许可；不得整库再发布",
+      "allowed_use": "许可边界审计；不导入游戏资产",
+      "redistribution": "禁止把CHGIS原始或修改几何打包进游戏"
+    }
+  ],
+  "claims": [
+    {
+      "id": "FACT-1629-DATE-SCOPE",
+      "status": "INFERENCE",
+      "claim": "本垂直切片暂以1629-01-01作为统一引擎标签；它是制作边界，不宣称1629全年政治和军事状态不变。",
+      "valid_from": "1629-01-01",
+      "valid_to": "1629-01-01",
+      "date_original": "场景快照标签；相关史料保留崇祯/天启年号",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI", "SRC-LN-DONGJINGCITY"],
+      "source_locator": "CText《毛帅东江》按年记事；辽宁官方页按天命六年/十年记事",
+      "confidence": "high",
+      "map_allowed": "暂时不画为全年静态政治边界；只显示日期标签和状态有效期",
+      "notes": "每一条史料日期仍需逐条换算；未换算事件不得被当作快照日事实。"
+    },
+    {
+      "id": "FACT-GUANNINGJIN-NETWORK",
+      "status": "FACT",
+      "claim": "《锦宁战守》记载宁远、前屯、锦州、山海关门等节点分别驻守或互为援应，并记载三路哨探远出锦右；这支持“关宁锦是城关—堡寨—哨探网络”的语义，不支持连续精确边界。",
+      "valid_from": "1626-01-01",
+      "valid_to": "1629-01-01",
+      "date_original": "天启六年《锦宁战守》相关段；账本快照取其对1629切片的结构参考",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI"],
+      "source_locator": "CText条目《锦宁战守》：‘甯远关门要害’；‘门以东则满桂西则左辅门以南则祖大寿北则朱梅’；‘三路哨探远出锦右’；以及‘赵率教则驻前屯’‘满桂则驻甯远’段",
+      "confidence": "high",
+      "map_allowed": "走廊；山海关、宁远、锦州可作为节点，宁远—锦州—关门只画示意拓扑/近似走廊",
+      "notes": "驻守安排来自天启六年上下文，不能无条件宣称1629-01-01当日编制、人数和边线相同。"
+    },
+    {
+      "id": "FACT-NINGYUAN-TRANSIT",
+      "status": "FACT",
+      "claim": "原始史料记载崇祯二年三月曾议在宁远设置东江饷司，并令东江自觉华岛转饷；同段记载登莱商舶和毛文龙赴登州请饷。",
+      "valid_from": "1629-03-01",
+      "valid_to": "1629-06-30",
+      "date_original": "崇祯二年三月、五月、六月",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI"],
+      "source_locator": "CText《毛帅东江》对应崇祯二年条：‘二年春三月…设东江饷司于甯远令东江自觉华岛转饷’；‘五月…至登州请饷’；‘六月…双岛’",
+      "confidence": "high",
+      "map_allowed": "走廊（仅作为事件后饷运关系）；觉华岛、登州、宁远可作近似节点；不表示1629-01-01已执行该方案",
+      "notes": "该断言明确晚于快照日，必须作为事件/OPEN时间层，不能回填年初状态。"
+    },
+    {
+      "id": "FACT-NINGYUAN-FRONTIER",
+      "status": "FACT",
+      "claim": "《锦宁战守》记载天启六年建州兵大举攻宁远，宁远守军凭城拒却；同一条目称宁远至山海一线可通转输，并将宁远描述为辽西前线节点。",
+      "valid_from": "1626-01-01",
+      "valid_to": "1626-12-31",
+      "date_original": "天启六年春正月及其后议论",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI"],
+      "source_locator": "CText《锦宁战守》：‘六年春正月建州兵大举攻甯远’；‘甯远关门要害’；‘甯远至山海一线可通转输易足’",
+      "confidence": "high",
+      "map_allowed": "精确点或近似点（宁远历史节点）；宁远—山海关走廊；不画围绕宁远的精确控制面",
+      "notes": "城址/战事/转输关系明确，但古城中心坐标、城墙轮廓、道路宽度与1629当日驻军仍OPEN。"
+    },
+    {
+      "id": "FACT-JINZHOU-FRONTIER",
+      "status": "FACT",
+      "claim": "《锦宁战守》在关宁锦军事编制与战事叙述中多次把锦州与宁远、前屯、松山、山海关并列为防守/援应节点；这支持锦州作为前沿节点，不支持把其周边补成完整明军省界。",
+      "valid_from": "1626-01-01",
+      "valid_to": "1629-01-01",
+      "date_original": "天启六年至相关后续条目；用于结构性参考",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI"],
+      "source_locator": "CText《锦宁战守》：‘锦州’与‘甯远’、‘前屯’、‘山海关’驻守和援应段；以及建州攻锦州、援锦州段",
+      "confidence": "high",
+      "map_allowed": "精确点或近似点；宁远—锦州—松山方向走廊（示意）；不画精确控制面",
+      "notes": "锦州历史城址与1629快照坐标需独立城址/地图来源闭合；当前证据只闭合节点语义。"
+    },
+    {
+      "id": "FACT-SHANHAIGUAN-GATE",
+      "status": "FACT",
+      "claim": "《锦宁战守》将山海关称为关门要害并记载其与宁远、前屯、锦州的守援安排；因此山海关可表达为关口/节点，而不是现代省界。",
+      "valid_from": "1626-01-01",
+      "valid_to": "1629-01-01",
+      "date_original": "天启六年至相关后续条目",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI"],
+      "source_locator": "CText《锦宁战守》‘甯远关门要害’及驻山海关、前屯、宁远、锦州的编制/援应段",
+      "confidence": "high",
+      "map_allowed": "精确点或近似点；山海关—宁远走廊；不画以山海关为端点的行政面",
+      "notes": "具体关城遗址中心、明代城墙范围和可复用图像许可仍需单独闭合。"
+    },
+    {
+      "id": "FACT-DENGZHOU-LIAODONG-LINK",
+      "status": "FACT",
+      "claim": "《毛帅东江》记载毛文龙崇祯元年八月因风泊登州，并在崇祯二年五月赴登州请饷；同书还把登莱、旅顺和朝鲜海上联系写入军务语境。",
+      "valid_from": "1628-08-01",
+      "valid_to": "1629-06-30",
+      "date_original": "崇祯元年八月、崇祯二年五月",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI"],
+      "source_locator": "CText《毛帅东江》：‘八月毛文龙…泊登州’；‘二年…五月…至登州请饷’；登莱/旅顺关系段",
+      "confidence": "high",
+      "map_allowed": "近似港口点；登州—辽南/东江方向淡色海运影响线或候选走廊；不画直达航线、时长、运力",
+      "notes": "登州古城/港区精确位置、具体航线中继与季节能力尚未闭合。"
+    },
+    {
+      "id": "FACT-DONGJIANG-NODES",
+      "status": "FACT",
+      "claim": "在崇祯二年六月前，《毛帅东江》明确出现毛文龙、皮岛/须弥岛、双岛、觉华岛、旅顺、登州、金州、复州、海州以及与朝鲜相连的海上军事网络；这能证明东江镇至少有岛屿、港口和辽南沿岸节点，不能证明其稳定控制整个辽南陆地。",
+      "valid_from": "1629-01-01",
+      "valid_to": "1629-06-30",
+      "date_original": "崇祯二年三月至六月相关条目；部分节点的前史在天启年间",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI"],
+      "source_locator": "CText《毛帅东江》崇祯二年条与前文海岛/登莱/旅顺段：‘东江…潜踪海岛’‘自觉华岛转饷’‘双岛’‘皮岛’‘旅顺’‘登州’；以及《锦宁战守》东江舟师抵觉华岛段",
+      "confidence": "high",
+      "map_allowed": "精确点/近似点（岛屿和港口）；岛屿—登莱—辽南淡色影响区/网络；不画连续陆地控制面",
+      "notes": "‘东江镇’是军政网络语义，不等于现代省份；毛文龙六月被杀后组织状态必须按事件切换。"
+    },
+    {
+      "id": "FACT-LIAOSHEN-LATER-QING-CORE",
+      "status": "FACT",
+      "claim": "辽宁省文旅厅官方遗址说明记载后金天命六年（1621）攻下辽阳、建东京城，天命十年（1625）三月迁都沈阳；这支持1629年辽沈腹地不能被表现为明军稳定实际控制。",
+      "valid_from": "1625-03-01",
+      "valid_to": "1629-01-01",
+      "date_original": "后金天命六年、天命十年三月；页面发布时间2020-08-27",
+      "source_ids": ["SRC-LN-DONGJINGCITY"],
+      "source_locator": "辽宁官方页正文：东京城建于天命六年；天命十年三月迁都沈阳；东京城设章京守护",
+      "confidence": "high",
+      "map_allowed": "淡色或有限核心影响区；东京城遗址可作近似点；辽阳—沈阳精确控制外沿暂时不画",
+      "notes": "来源直接支持都城/遗址和迁都，不直接给出1629行政边界、驻军密度或女真各群体边界。"
+    },
+    {
+      "id": "FACT-TOKYO-CITY-SITE",
+      "status": "FACT",
+      "claim": "官方遗址说明给出东京城位于今辽阳市文圣区新城村台地，并描述城垣菱形、八门及遗址保存情况；可证明历史遗址节点存在，但不能把现代村界或网页示意替代1629地图几何。",
+      "valid_from": "1621-01-01",
+      "valid_to": "1629-01-01",
+      "date_original": "遗址说明涉及天命六年建城及后续遗存；现代页面2020-08-27",
+      "source_ids": ["SRC-LN-DONGJINGCITY"],
+      "source_locator": "官方页‘位于辽阳市文圣区新城街道新城村’、‘城垣平面呈菱形’、八门和遗址段",
+      "confidence": "high",
+      "map_allowed": "近似点；不画城墙精确多边形，除非另有测绘/许可闭合",
+      "notes": "这里的现代地名只用于定位，不是1629行政边界。"
+    },
+    {
+      "id": "INFERENCE-GUANNINGJIN-CORRIDOR",
+      "status": "INFERENCE",
+      "claim": "将北京—通州—山海关—宁远—锦州作为P0陆路交通/军事拓扑，是由晚明边防节点和宁远—山海关转输叙述归纳出的游戏走廊；不是史料给出的单一测绘线路。",
+      "valid_from": "1629-01-01",
+      "valid_to": "1629-01-01",
+      "date_original": "P0设计层标签",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI", "SRC-LOC-GUANGYUTU", "SRC-LOC-HUANGMINGZHIFANG"],
+      "source_locator": "CText《锦宁战守》的守援/转输段；LOC两张待复核馆藏目录作为地图对照线索",
+      "confidence": "medium",
+      "map_allowed": "走廊；只表现拓扑，不显示精确里程/时长/容量",
+      "notes": "北京—通州的具体漕运仓储、宁远—锦州中间点和路线几何仍OPEN。"
+    },
+    {
+      "id": "INFERENCE-POSTJIN-LIAOSHEN-CORE",
+      "status": "INFERENCE",
+      "claim": "P0可把东京城—辽阳—沈阳方向表达为后金辽沈核心的淡色/有限核心影响区，但不能依据一处都城遗址自动生成精确面。",
+      "valid_from": "1629-01-01",
+      "valid_to": "1629-01-01",
+      "date_original": "P0制图归纳",
+      "source_ids": ["FACT-LIAOSHEN-LATER-QING-CORE", "FACT-TOKYO-CITY-SITE"],
+      "source_locator": "由辽宁官方页所载1621攻辽阳、1625迁沈阳和东京城遗址事实归纳",
+      "confidence": "medium",
+      "map_allowed": "淡色影响区；东京城/辽阳/沈阳仅近似点；外沿暂时不画",
+      "notes": "Hartwell 1391行政几何不得用来补齐此核心的1629边界。"
+    },
+    {
+      "id": "OPEN-HISTORIC-SITE-COORDINATES",
+      "status": "OPEN",
+      "claim": "山海关、宁远、锦州、登州四座历史城址的1629城墙中心、古城范围、坐标误差和逐对象可再分发许可仍未全部由同一套可访问权威城址资料闭合。",
+      "valid_from": "1629-01-01",
+      "valid_to": "1629-01-01",
+      "date_original": "研究任务",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI", "SRC-LOC-DAMINGYUDITU", "SRC-LOC-GUANGYUTU", "SRC-LOC-HUANGMINGZHIFANG"],
+      "source_locator": "CText支持节点/关系但不提供现代GPS古城墙测绘；LOC目录本次受Cloudflare阻挡；需逐城址官方/大学考古或馆藏图页",
+      "confidence": "low",
+      "map_allowed": "目前仅允许近似点（若使用项目已有现代锚点必须显示anchor_only）；禁止精确城墙多边形",
+      "notes": "下一步关闭条件：逐城至少一条可访问官方/大学遗址或考古来源、坐标方法、图号/页码和许可记录。"
+    },
+    {
+      "id": "OPEN-ROUTE-GEOMETRY",
+      "status": "OPEN",
+      "claim": "北京—通州—山海关—宁远—锦州陆路线和登州—辽南海运线的精确路径、里程、时长、运力、航季、风险和中继点尚未闭合。",
+      "valid_from": "1629-01-01",
+      "valid_to": "1629-01-01",
+      "date_original": "研究任务",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI", "SRC-LOC-GUANGYUTU", "SRC-LOC-HUANGMINGZHIFANG"],
+      "source_locator": "CText只支持部分守援/转输/登莱海上关系；待复核古地图图页与港口/道路研究",
+      "confidence": "low",
+      "map_allowed": "只允许示意走廊或淡色候选影响线；禁止显示史实精确天数/容量",
+      "notes": "路线对象应由Simulation另行定义数值，不得从本账本推导。"
+    },
+    {
+      "id": "OPEN-CONTROL-BOUNDARIES",
+      "status": "OPEN",
+      "claim": "关宁锦外沿、后金辽沈核心外沿、东江镇对辽南陆地的持续控制范围，以及双方争夺区的精确宽度和日期切换仍未闭合。",
+      "valid_from": "1629-01-01",
+      "valid_to": "1629-01-01",
+      "date_original": "研究任务",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI", "SRC-LN-DONGJINGCITY", "SRC-FUDAN-CHGIS-LICENSE"],
+      "source_locator": "CText记载的是据点、战事和军政关系；辽宁页是都城遗址；CHGIS仅能作为许可边界参考，不能直接导入几何",
+      "confidence": "low",
+      "map_allowed": "斜纹争议区/淡色影响区仅在另有几何说明时使用；当前正式控制面暂时不画",
+      "notes": "禁止用现代省界补洞，禁止把Hartwell 1391行政几何称为1629实际控制。"
+    },
+    {
+      "id": "OPEN-DATE-CONVERSION",
+      "status": "OPEN",
+      "claim": "崇祯二年三月、五月、六月等原始日期与统一ISO快照的逐条换算、事件前后状态切换规则尚未完成。",
+      "valid_from": "1629-01-01",
+      "valid_to": "1629-12-31",
+      "date_original": "原始年号/月/季日期",
+      "source_ids": ["SRC-CTEXT-MAOSHUAIDONGJI"],
+      "source_locator": "CText按年/月记事；本账本保留原始日期，不擅自换算",
+      "confidence": "low",
+      "map_allowed": "事件节点/日期区间；禁止把六月以后东江状态回填到年初",
+      "notes": "关闭条件：确定历法换算方案，保留date_original/date_normalized/date_precision并用样例复核。"
+    },
+    {
+      "id": "OPEN-CHGIS-REUSE",
+      "status": "OPEN",
+      "claim": "CHGIS数据可能帮助研究历史地点，但当前许可页面明确限制用途和再发布；是否取得书面许可未知。",
+      "valid_from": "2026-08-13",
+      "valid_to": null,
+      "date_original": "现代许可状态",
+      "source_ids": ["SRC-FUDAN-CHGIS-LICENSE"],
+      "source_locator": "CHGIS协议第(3)(4)(7)条",
+      "confidence": "high",
+      "map_allowed": "暂时不画CHGIS几何；只保留许可审计记录",
+      "notes": "在许可闭合前不得复制、修改后打包或通过网络再发布CHGIS几何。"
+    }
+  ],
+  "p0_map_admission": [
+    {
+      "id": "P0-NODE-SHANHAIGUAN",
+      "source_claim_ids": ["FACT-SHANHAIGUAN-GATE"],
+      "semantic": "关口节点",
+      "allowed_representation": "精确点或近似点",
+      "condition": "坐标只作为现代锚点；不画古城墙多边形"
+    },
+    {
+      "id": "P0-NODE-NINGYUAN",
+      "source_claim_ids": ["FACT-NINGYUAN-FRONTIER", "FACT-GUANNINGJIN-NETWORK"],
+      "semantic": "前线城镇/急饷目标节点",
+      "allowed_representation": "精确点或近似点",
+      "condition": "不把场景目标、库存、驻军或城墙范围当FACT"
+    },
+    {
+      "id": "P0-NODE-JINZHOU",
+      "source_claim_ids": ["FACT-JINZHOU-FRONTIER"],
+      "semantic": "前沿防守/情报节点",
+      "allowed_representation": "精确点或近似点",
+      "condition": "周边控制面暂不画"
+    },
+    {
+      "id": "P0-NODE-DENGZHOU",
+      "source_claim_ids": ["FACT-DENGZHOU-LIAODONG-LINK"],
+      "semantic": "登莱海运/饷运候选港口节点",
+      "allowed_representation": "近似点",
+      "condition": "港区范围、航路、运力和季节均OPEN"
+    },
+    {
+      "id": "P0-NODE-DONGJIANG-NETWORK",
+      "source_claim_ids": ["FACT-DONGJIANG-NODES"],
+      "semantic": "东江镇海岛—辽南沿岸节点网络",
+      "allowed_representation": "精确点/近似点 + 淡色影响区",
+      "condition": "不得涂成连续陆地行政面"
+    },
+    {
+      "id": "P0-NODE-LIAOSHEN-CORE",
+      "source_claim_ids": ["FACT-LIAOSHEN-LATER-QING-CORE", "FACT-TOKYO-CITY-SITE", "INFERENCE-POSTJIN-LIAOSHEN-CORE"],
+      "semantic": "后金辽沈核心的有限表达",
+      "allowed_representation": "东京城/辽阳/沈阳近似点 + 淡色影响区",
+      "condition": "外沿不画；不使用Hartwell 1391行政几何补面"
+    },
+    {
+      "id": "P0-ROUTE-GUANNINGJIN",
+      "source_claim_ids": ["FACT-GUANNINGJIN-NETWORK", "INFERENCE-GUANNINGJIN-CORRIDOR"],
+      "semantic": "关宁锦城关—堡寨—转输拓扑",
+      "allowed_representation": "示意走廊",
+      "condition": "不显示精确里程、时长、容量或宽度"
+    }
+  ],
+  "forbidden_to_draw": [
+    {
+      "id": "FORBID-MODERN-PROVINCES",
+      "reason": "现代省界不能补齐1629行政或实际控制；禁止用Natural Earth Admin-1/GADM/geoBoundaries作晚明边界。"
+    },
+    {
+      "id": "FORBID-HARTWELL-1391-CONTROL",
+      "reason": "Hartwell 1391是研究基线，不能称为1629实际控制或精确边界。"
+    },
+    {
+      "id": "FORBID-CONTINUOUS-DONGJIANG-LAND",
+      "reason": "东江镇证据支持海岛、港口、沿岸节点网络，不支持稳定控制整个辽南陆地。"
+    },
+    {
+      "id": "FORBID-EXACT-ROUTES",
+      "reason": "登州—宁远海运中继、航季、时长、运力和风险OPEN；关宁锦线也没有逐段测绘闭合。"
+    },
+    {
+      "id": "FORBID-EXACT-CONTROL-FACES",
+      "reason": "关宁锦外沿、辽沈核心外沿、争夺区和双方持续控制范围OPEN；禁止画精确政治面。"
+    },
+    {
+      "id": "FORBID-CHGIS-BUNDLE",
+      "reason": "CHGIS许可明确限制非商业学术使用并禁止未经书面同意整库/修改后再发布；当前不得打包几何。"
+    },
+    {
+      "id": "FORBID-LOC-UNVERIFIED-COPY",
+      "reason": "LOC关键目录本次被Cloudflare阻挡，图页和权利行尚未人工复核；不得复制或描边。"
+    }
+  ],
+  "validation_expectations": {
+    "all_fact_claims_have_source_ids": true,
+    "all_fact_sources_access_checked": true,
+    "open_claims_are_not_p0_exact_geometry": true,
+    "modern_admin_boundaries_not_evidence": true,
+    "hartwell_1391_not_1629_control": true
+  }
+}
