@@ -47,6 +47,24 @@ public static class RealtimeStateHasher
             Append(builder, "stock", $"{stock.ResourceType}:{stock.Quantity}:{stock.Reserved}");
         }
 
+        foreach (var stockpile in state.Logistics.Stockpiles.Values.OrderBy(item => item.Id.Value, StringComparer.Ordinal))
+        {
+            Append(builder, "stockpile", $"{stockpile.Id.Value}:{stockpile.LocationId.Value}:{stockpile.Capacity}:{stockpile.GrainQuantity}");
+        }
+
+        foreach (var route in state.Logistics.Routes.Values.OrderBy(item => item.Id.Value, StringComparer.Ordinal))
+        {
+            Append(builder, "route", $"{route.Id.Value}:{route.FromStockpileId.Value}:{route.ToStockpileId.Value}:{route.Capacity}:{route.TravelHours}:{route.LossPerThousand}");
+        }
+
+        foreach (var shipment in state.Logistics.Shipments.Values.OrderBy(item => item.Id.Value, StringComparer.Ordinal))
+        {
+            Append(builder, "shipment", string.Join(":", shipment.Id.Value, shipment.RouteId.Value,
+                shipment.GrainQuantity, shipment.Status, shipment.PlannedAt.Value.Ticks,
+                shipment.DepartedAt?.Value.Ticks, shipment.ArrivedAt?.Value.Ticks,
+                shipment.DeliveredGrain, shipment.LossGrain));
+        }
+
         foreach (var facility in state.Industry.Facilities.Values.OrderBy(item => item.Id.Value, StringComparer.Ordinal))
         {
             Append(builder, "facility", string.Join(

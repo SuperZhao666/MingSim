@@ -41,3 +41,21 @@ public readonly record struct FacilityId(string Value)
 {
     public override string ToString() => Value;
 }
+
+/// <summary>粮食库存点的稳定编号。</summary>
+public readonly record struct StockpileId(string Value)
+{
+    public override string ToString() => Value;
+}
+
+/// <summary>运输路线的稳定编号。</summary>
+public readonly record struct RouteId(string Value)
+{
+    public override string ToString() => Value;
+}
+
+/// <summary>一次粮食运输的稳定编号。</summary>
+public readonly record struct ShipmentId(string Value)
+{
+    public override string ToString() => Value;
+}

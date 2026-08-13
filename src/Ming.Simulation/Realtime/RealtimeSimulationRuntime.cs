@@ -4,6 +4,7 @@ using MingSim.Domain.Common;
 using MingSim.Domain.Errors;
 using MingSim.Domain.Events;
 using MingSim.Domain.Military;
+using MingSim.Domain.Economy;
 using MingSim.Domain.Realtime;
 
 namespace MingSim.Simulation.Realtime;
@@ -22,6 +23,16 @@ public sealed record MoveArmyCommand(
     ProvinceId DestinationId,
     DateTime RequestedAt,
     int TravelHours = 24)
+    : RealtimeCommand(CommandId, ActorId, RequestedAt);
+
+/// <summary>玩家或 Agent 提交的唯一粮运命令；Simulation 才能真正扣库存和推进运输。</summary>
+public sealed record CreateShipmentCommand(
+    string CommandId,
+    CharacterId ActorId,
+    ShipmentId ShipmentId,
+    RouteId RouteId,
+    long GrainQuantity,
+    DateTime RequestedAt)
     : RealtimeCommand(CommandId, ActorId, RequestedAt);
 
 /// <summary>调度器内部保存的一个未来事件。</summary>
@@ -154,6 +165,34 @@ public sealed class RealtimeSimulationRuntime
     }
 
     /// <summary>
+    /// 记录一批粮运计划。计划阶段立即从起点库存移入 Shipment 账本，随后由同一调度器处理出发和抵达。
+    /// </summary>
+    public RealtimeCommandResult EnqueueCreateShipment(CreateShipmentCommand command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        var fingerprint = Fingerprint(command);
+
+        if (_commandOutcomes.TryGetValue(command.CommandId, out var previous))
+        {
+            if (previous.Fingerprint != fingerprint)
+            {
+                return Reject(command.CommandId, "同一命令编号不能携带不同的命令内容。", "IDEMPOTENCY_CONFLICT");
+            }
+
+            return previous.Result;
+        }
+
+        var result = ValidateAndPlanShipment(command);
+        if (result.Accepted)
+        {
+            State.CommitRealtime($"command-{command.CommandId}");
+        }
+
+        _commandOutcomes.Add(command.CommandId, (fingerprint, result));
+        return result;
+    }
+
+    /// <summary>
     /// 确定性地推进到目标游戏时刻。
     /// </summary>
     public RealtimeAdvanceResult AdvanceTo(GameTime targetGameTime)
@@ -267,6 +306,79 @@ public sealed class RealtimeSimulationRuntime
         return new RealtimeCommandResult(true, command.CommandId, "行军命令已进入实时调度器。", []);
     }
 
+    private RealtimeCommandResult ValidateAndPlanShipment(CreateShipmentCommand command)
+    {
+        if (command.GrainQuantity <= 0)
+        {
+            return Reject(command.CommandId, "运输粮食数量必须为正数。", "INVALID_GRAIN_QUANTITY");
+        }
+
+        if (State.Logistics.Shipments.ContainsKey(command.ShipmentId))
+        {
+            return Reject(command.CommandId, $"运输单 {command.ShipmentId} 已经存在。", "SHIPMENT_EXISTS");
+        }
+
+        if (!State.Logistics.Routes.TryGetValue(command.RouteId, out var route))
+        {
+            return Reject(command.CommandId, $"路线 {command.RouteId} 不存在。", "ROUTE_NOT_FOUND");
+        }
+
+        var authorization = _authorizer.Check(
+            State,
+            command.ActorId,
+            GameCapability.PlanLogistics,
+            command.RouteId.Value);
+        if (!authorization.Allowed)
+        {
+            return Reject(command.CommandId, authorization.Reason, "TOOL_SCOPE_DENIED");
+        }
+
+        var source = State.Logistics.Stockpiles[route.FromStockpileId];
+        var destination = State.Logistics.Stockpiles[route.ToStockpileId];
+        if (!GrainLogisticsRules.HasEnoughSourceGrain(source, command.GrainQuantity))
+        {
+            return Reject(command.CommandId, "起点库存粮食不足。", "INSUFFICIENT_GRAIN");
+        }
+
+        if (!GrainLogisticsRules.FitsRouteCapacity(State.Logistics, route, command.GrainQuantity))
+        {
+            return Reject(command.CommandId, "路线在途容量不足。", "ROUTE_CAPACITY_EXCEEDED");
+        }
+
+        if (!GrainLogisticsRules.FitsDestinationCapacity(State.Logistics, destination, command.GrainQuantity))
+        {
+            return Reject(command.CommandId, "终点库存容量不足。", "DESTINATION_CAPACITY_EXCEEDED");
+        }
+
+        if (!source.TryTakeGrain(command.GrainQuantity))
+        {
+            return Reject(command.CommandId, "起点库存扣减失败。", "INSUFFICIENT_GRAIN");
+        }
+
+        var shipment = new ShipmentState(
+            command.ShipmentId,
+            route.Id,
+            command.GrainQuantity,
+            State.GameTime);
+        State.Logistics.AddShipment(shipment);
+        Schedule(
+            $"shipment-departure-{shipment.Id.Value}",
+            State.GameTime,
+            phase: 0,
+            priority: 1,
+            "ShipmentDeparture",
+            new Dictionary<string, string> { ["shipment_id"] = shipment.Id.Value });
+        _eventBuffer.Add(CreateEvent(
+            command.CommandId,
+            "ShipmentPlanned",
+            $"粮运 {shipment.Id} 已计划：{source.Id} -> {destination.Id}，数量 {command.GrainQuantity}。",
+            ("shipment_id", shipment.Id.Value),
+            ("route_id", route.Id.Value),
+            ("grain", command.GrainQuantity.ToString())));
+
+        return new RealtimeCommandResult(true, command.CommandId, "粮运计划已记录，等待调度出发。", []);
+    }
+
     private int ProcessDueEvents()
     {
         var processed = 0;
@@ -291,6 +403,18 @@ public sealed class RealtimeSimulationRuntime
                 $"世界完成 {State.CurrentTime:yyyy-MM-dd} 的日常推进。",
                 ("tick", "daily")));
             ScheduleDailyHeartbeat();
+            return;
+        }
+
+        if (scheduled.EventType == "ShipmentDeparture")
+        {
+            ApplyShipmentDeparture(scheduled);
+            return;
+        }
+
+        if (scheduled.EventType == "ShipmentArrival")
+        {
+            ApplyShipmentArrival(scheduled);
             return;
         }
 
@@ -325,6 +449,82 @@ public sealed class RealtimeSimulationRuntime
             ("army_id", armyId.Value),
             ("from", previousLocation.Value),
             ("to", destination.Value)));
+    }
+
+    private void ApplyShipmentDeparture(ScheduledSimulationEvent scheduled)
+    {
+        var shipmentId = new ShipmentId(scheduled.Data["shipment_id"]);
+        if (!State.Logistics.Shipments.TryGetValue(shipmentId, out var shipment) ||
+            !State.Logistics.Routes.TryGetValue(shipment.RouteId, out var route))
+        {
+            _eventBuffer.Add(CreateEvent(
+                scheduled.EventId,
+                "ShipmentDepartureCancelled",
+                $"粮运 {shipmentId} 缺少运输单或路线，出发已取消。",
+                ("shipment_id", shipmentId.Value)));
+            return;
+        }
+
+        shipment.MarkInTransit(State.GameTime);
+        var arrivalAt = State.GameTime.Add(TimeSpan.FromHours(route.TravelHours));
+        Schedule(
+            $"shipment-arrival-{shipment.Id.Value}",
+            arrivalAt,
+            phase: 1,
+            priority: 1,
+            "ShipmentArrival",
+            new Dictionary<string, string> { ["shipment_id"] = shipment.Id.Value });
+        _eventBuffer.Add(CreateEvent(
+            scheduled.EventId,
+            "ShipmentDeparted",
+            $"粮运 {shipment.Id} 已出发，预计 {arrivalAt.Value:yyyy-MM-dd HH:mm} 抵达。",
+            ("shipment_id", shipment.Id.Value),
+            ("due_at", arrivalAt.ToString())));
+    }
+
+    private void ApplyShipmentArrival(ScheduledSimulationEvent scheduled)
+    {
+        var shipmentId = new ShipmentId(scheduled.Data["shipment_id"]);
+        if (!State.Logistics.Shipments.TryGetValue(shipmentId, out var shipment) ||
+            !State.Logistics.Routes.TryGetValue(shipment.RouteId, out var route))
+        {
+            _eventBuffer.Add(CreateEvent(
+                scheduled.EventId,
+                "ShipmentArrivalCancelled",
+                $"粮运 {shipmentId} 缺少运输单或路线，抵达已取消。",
+                ("shipment_id", shipmentId.Value)));
+            return;
+        }
+
+        var destination = State.Logistics.Stockpiles[route.ToStockpileId];
+        var (delivered, loss) = GrainLogisticsRules.CalculateArrival(route, shipment.GrainQuantity);
+        if (!destination.TryStoreGrain(delivered))
+        {
+            _eventBuffer.Add(CreateEvent(
+                scheduled.EventId,
+                "ShipmentArrivalBlocked",
+                $"粮运 {shipment.Id} 抵达时终点容量不足，货物仍保持在途。",
+                ("shipment_id", shipment.Id.Value),
+                ("destination_id", destination.Id.Value)));
+            Schedule(
+                $"shipment-arrival-retry-{shipment.Id.Value}-{State.GameTime.Value.Ticks}",
+                State.GameTime.Add(TimeSpan.FromHours(1)),
+                phase: 1,
+                priority: 1,
+                "ShipmentArrival",
+                new Dictionary<string, string> { ["shipment_id"] = shipment.Id.Value });
+            return;
+        }
+
+        shipment.MarkArrived(State.GameTime, delivered, loss);
+        _eventBuffer.Add(CreateEvent(
+            scheduled.EventId,
+            "ShipmentArrived",
+            $"粮运 {shipment.Id} 已抵达 {destination.Id}：交付 {delivered}，损耗 {loss}。",
+            ("shipment_id", shipment.Id.Value),
+            ("destination_id", destination.Id.Value),
+            ("delivered_grain", delivered.ToString()),
+            ("loss_grain", loss.ToString())));
     }
 
     private void ScheduleDailyHeartbeat()
@@ -397,6 +597,15 @@ public sealed class RealtimeSimulationRuntime
             command.ArmyId.Value,
             command.DestinationId.Value,
             command.TravelHours,
+            command.RequestedAt.ToUniversalTime().Ticks);
+
+    private static string Fingerprint(CreateShipmentCommand command) =>
+        string.Join(
+            "|",
+            command.ActorId.Value,
+            command.ShipmentId.Value,
+            command.RouteId.Value,
+            command.GrainQuantity,
             command.RequestedAt.ToUniversalTime().Ticks);
 
     private static RealtimeCommandResult Reject(

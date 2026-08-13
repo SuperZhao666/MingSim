@@ -39,6 +39,12 @@ internal static class Program
             ShouldKeepSameTimeEventsInCreationOrder();
             ShouldKeepHashIndependentOfAdvanceFrameSplitting();
             ShouldApplyDuplicateCommandOnlyOnce();
+            ShouldCompleteGrainShipmentAndKeepLedgerBalanced();
+            ShouldRejectGrainShipmentWhenSourceInventoryIsInsufficient();
+            ShouldRejectGrainShipmentWhenRouteCapacityIsInsufficient();
+            ShouldRejectGrainShipmentWhenDestinationCapacityIsInsufficient();
+            ShouldRejectGrainShipmentWithoutLogisticsPermission();
+            ShouldReplayGrainShipmentToTheSameHash();
             Console.WriteLine("MingSim 冒烟测试全部通过。");
             return 0;
         }
@@ -259,6 +265,117 @@ internal static class Program
         Require(result.Events.Count(domainEvent => domainEvent.EventType == "ArmyArrived") == 1, "重复命令不能重复生效");
     }
 
+    private static void ShouldCompleteGrainShipmentAndKeepLedgerBalanced()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        var beforeLedger = runtime.State.Logistics.GrainLedgerTotal();
+        var command = CreateShipmentCommand(runtime, "grain-normal", 300);
+
+        var accepted = runtime.EnqueueCreateShipment(command);
+        Require(accepted.Accepted, "正常粮运命令应该被接受");
+        Require(runtime.State.Logistics.Stockpiles[new StockpileId("capital-granary")].Quantity == 700,
+            "计划粮运时应该先从起点库存扣除粮食");
+        Require(runtime.State.Logistics.Shipments[new ShipmentId("shipment-grain-normal")].Status == ShipmentStatus.Planned,
+            "命令接受后运输单应该先处于计划状态");
+
+        var inTransit = runtime.AdvanceTo(new GameTime(runtime.State.CurrentTime.AddHours(1)));
+        var shipment = runtime.State.Logistics.Shipments[new ShipmentId("shipment-grain-normal")];
+        Require(shipment.Status == ShipmentStatus.InTransit, "到达前运输单应该处于在途状态");
+        Require(runtime.State.Logistics.Stockpiles[new StockpileId("capital-granary")].Quantity == 700,
+            "在途时起点库存不能回流");
+        Require(runtime.State.Logistics.Stockpiles[new StockpileId("ningyuan-granary")].Quantity == 0,
+            "在途时终点不能提前收到粮食");
+        Require(runtime.State.Logistics.GrainLedgerTotal() == beforeLedger, "在途阶段必须守恒");
+        Require(inTransit.Events.Any(domainEvent => domainEvent.EventType == "ShipmentDeparted"),
+            "在途阶段应该产生玩家可读的出发结果");
+
+        var arrived = runtime.AdvanceTo(new GameTime(runtime.State.CurrentTime.AddHours(1)));
+        shipment = runtime.State.Logistics.Shipments[new ShipmentId("shipment-grain-normal")];
+        Require(shipment.Status == ShipmentStatus.Arrived, "行程结束后运输单应该抵达");
+        Require(shipment.DeliveredGrain == 270 && shipment.LossGrain == 30,
+            "300 粮食按 100‰ 损耗后应交付 270、损耗 30");
+        Require(runtime.State.Logistics.Stockpiles[new StockpileId("ningyuan-granary")].Quantity == 270,
+            "抵达后终点库存应该增加实际交付量");
+        Require(runtime.State.Logistics.GrainLedgerTotal() == beforeLedger, "抵达损耗也必须守恒");
+        Require(arrived.Events.Any(domainEvent => domainEvent.EventType == "ShipmentArrived" &&
+                                                   domainEvent.Data["delivered_grain"] == "270" &&
+                                                   domainEvent.Data["loss_grain"] == "30"),
+            "抵达结果必须向玩家报告交付量和损耗量");
+    }
+
+    private static void ShouldRejectGrainShipmentWhenSourceInventoryIsInsufficient()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        var before = runtime.State.Logistics.GrainLedgerTotal();
+        var result = runtime.EnqueueCreateShipment(CreateShipmentCommand(runtime, "grain-short", 1_001));
+
+        Require(!result.Accepted, "库存不足的粮运不能被接受");
+        Require(result.Errors.Any(error => error.Code == "INSUFFICIENT_GRAIN"), "库存不足应返回结构化错误");
+        Require(runtime.State.Logistics.Shipments.Count == 0, "库存不足不能生成运输单");
+        Require(runtime.State.Logistics.GrainLedgerTotal() == before, "库存不足不能破坏守恒");
+    }
+
+    private static void ShouldRejectGrainShipmentWhenRouteCapacityIsInsufficient()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        var result = runtime.EnqueueCreateShipment(CreateShipmentCommand(runtime, "grain-capacity", 501));
+
+        Require(!result.Accepted, "超过路线容量的粮运不能被接受");
+        Require(result.Errors.Any(error => error.Code == "ROUTE_CAPACITY_EXCEEDED"), "容量不足应返回结构化错误");
+        Require(runtime.State.Logistics.Stockpiles[new StockpileId("capital-granary")].Quantity == 1_000,
+            "容量拒绝不能扣减起点库存");
+    }
+
+    private static void ShouldRejectGrainShipmentWhenDestinationCapacityIsInsufficient()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld(destinationCapacity: 100));
+        var before = runtime.State.Logistics.GrainLedgerTotal();
+        var result = runtime.EnqueueCreateShipment(CreateShipmentCommand(runtime, "grain-destination-capacity", 300));
+
+        Require(!result.Accepted, "超过终点库存容量的粮运不能被接受");
+        Require(result.Errors.Any(error => error.Code == "DESTINATION_CAPACITY_EXCEEDED"),
+            "终点容量不足应返回结构化错误");
+        Require(runtime.State.Logistics.Shipments.Count == 0, "终点容量不足不能生成运输单");
+        Require(runtime.State.Logistics.GrainLedgerTotal() == before, "终点容量拒绝不能破坏守恒");
+    }
+
+    private static void ShouldRejectGrainShipmentWithoutLogisticsPermission()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        var result = runtime.EnqueueCreateShipment(CreateShipmentCommand(
+            runtime,
+            "grain-denied",
+            100,
+            actorId: new CharacterId("war")));
+
+        Require(!result.Accepted, "没有物流权限的角色不能创建粮运");
+        Require(result.Errors.Any(error => error.Code == "TOOL_SCOPE_DENIED"), "无权限应返回权限错误");
+        Require(runtime.State.Logistics.Shipments.Count == 0, "无权限不能生成运输单");
+    }
+
+    private static void ShouldReplayGrainShipmentToTheSameHash()
+    {
+        var first = new RealtimeSimulationRuntime(CreateWorld());
+        var replay = new RealtimeSimulationRuntime(CreateWorld());
+        var firstCommand = CreateShipmentCommand(first, "grain-replay", 200);
+        var replayCommand = CreateShipmentCommand(replay, "grain-replay", 200);
+
+        Require(first.EnqueueCreateShipment(firstCommand).Accepted, "第一次重放命令应该被接受");
+        Require(replay.EnqueueCreateShipment(replayCommand).Accepted, "重放命令应该被接受");
+        var duplicate = first.EnqueueCreateShipment(firstCommand);
+        Require(duplicate == first.EnqueueCreateShipment(firstCommand), "相同 CommandId 重试应该返回同一结果");
+        var conflict = first.EnqueueCreateShipment(firstCommand with { GrainQuantity = 201 });
+        Require(!conflict.Accepted && conflict.Errors.Any(error => error.Code == "IDEMPOTENCY_CONFLICT"),
+            "相同 CommandId 携带不同内容必须被拒绝");
+
+        var target = new GameTime(first.State.CurrentTime.AddHours(2));
+        first.AdvanceTo(target);
+        replay.AdvanceTo(new GameTime(replay.State.CurrentTime.AddHours(1)));
+        replay.AdvanceTo(new GameTime(replay.State.CurrentTime.AddHours(1)));
+
+        Require(first.StateHash == replay.StateHash, "相同命令和调度结果的 Replay 哈希必须一致");
+    }
+
     private static MoveArmyCommand CreateMoveCommand(
         RealtimeSimulationRuntime runtime,
         string commandId,
@@ -277,7 +394,7 @@ internal static class Program
             runtime.EnqueueMoveArmy(CreateMoveCommand(runtime, commandId, "capital", travelHours: 2)).Accepted,
             "标准行军命令应该被接纳");
 
-    private static WorldState CreateWorld()
+    private static WorldState CreateWorld(long destinationCapacity = 1_000)
     {
         var map = new MapDefinition(
             "smoke-map",
@@ -310,6 +427,26 @@ internal static class Program
             GameCapability.MoveArmy,
             "army-1"));
         world.Economy.Inventory.GetOrCreate("flintlock").Add(10_000);
+        world.Logistics.AddStockpile(new StockpileState(
+            new StockpileId("capital-granary"),
+            new ProvinceId("capital"),
+            capacity: 2_000,
+            grainQuantity: 1_000));
+        world.Logistics.AddStockpile(new StockpileState(
+            new StockpileId("ningyuan-granary"),
+            new ProvinceId("liaodong"),
+            capacity: destinationCapacity));
+        world.Logistics.AddRoute(new RouteState(
+            new RouteId("capital-ningyuan-grain"),
+            new StockpileId("capital-granary"),
+            new StockpileId("ningyuan-granary"),
+            capacity: 500,
+            travelHours: 2,
+            lossPerThousand: 100));
+        world.GrantCapability(new CapabilityGrant(
+            new CharacterId("works"),
+            GameCapability.PlanLogistics,
+            "capital-ningyuan-grain"));
         world.Military.Add(new ArmyState(
             new ArmyId("army-1"),
             "测试军",
@@ -318,6 +455,19 @@ internal static class Program
             lineInfantry: 3_000));
         return world;
     }
+
+    private static CreateShipmentCommand CreateShipmentCommand(
+        RealtimeSimulationRuntime runtime,
+        string commandId,
+        long grainQuantity,
+        CharacterId? actorId = null) =>
+        new(
+            commandId,
+            actorId ?? new CharacterId("works"),
+            new ShipmentId($"shipment-{commandId}"),
+            new RouteId("capital-ningyuan-grain"),
+            grainQuantity,
+            runtime.State.CurrentTime);
 
     private static void Require(bool condition, string message)
     {
