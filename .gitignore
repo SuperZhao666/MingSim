@@ -4,7 +4,6 @@ obj/
 
 # Godot 编辑器生成的本地文件
 .godot/
-*.godot/
 *.import
 *.translation
 

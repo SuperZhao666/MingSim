@@ -23,9 +23,9 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import struct
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
@@ -230,7 +230,14 @@ def sha256_file(path: Path) -> str:
 
 
 def sha256_canonical_text_file(path: Path) -> str:
-    """Hash UTF-8 text as the LF bytes produced by the repository checkout contract."""
+    """Hash UTF-8 text as the LF bytes produced by the repository checkout contract.
+
+    Git may check text files out as CRLF on Windows (core.autocrlf=true), so
+    treating that platform detail as source content would make build-report.json
+    differ after a clean local rebuild even though the Git blob was unchanged.
+    The canonical form also strips a UTF-8 BOM and folds lone CR to LF, matching
+    the .gitattributes text eol=lf contract for every text source.
+    """
     raw = path.read_bytes()
     text = raw.decode("utf-8-sig", errors="strict")
     canonical = text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
@@ -241,6 +248,23 @@ def sha256_input_file(path: Path) -> str:
     if path.suffix.lower() in {".csv", ".geojson", ".json", ".md", ".py", ".txt"}:
         return sha256_canonical_text_file(path)
     return sha256_file(path)
+
+
+def unique_temp_dir(parent: Path, prefix: str) -> Path:
+    """Create a process-unique temporary directory with pathlib.
+
+    tempfile.mkdtemp 在本环境（Windows 文件沙箱）下会先以 O_CREAT 建文件探测、
+    删除后再 mkdir，结果目录被置为只读，目录内无法写入任何产物。pathlib 直接
+    建目录则读写与清理正常，行为与 mkdtemp 等价；构建与契约负例共用此实现。
+    """
+    for attempt in range(100):
+        candidate = parent / f"{prefix}-{os.getpid()}-{attempt}"
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            continue
+    raise BuildError(f"无法创建临时目录（{prefix}）")
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -1803,8 +1827,8 @@ def build(config_path: Path) -> dict[str, Any]:
         "build_report": "build-report.json",
     }
 
-    with tempfile.TemporaryDirectory(prefix=".ming-map-build-", dir=output_dir.parent) as temporary:
-        temporary_dir = Path(temporary)
+    temporary_dir = unique_temp_dir(output_dir.parent, ".ming-map-build")
+    try:
         physical_path = temporary_dir / output_names["physical_base"]
         history_path = temporary_dir / output_names["history_overlay"]
         debug_path = temporary_dir / output_names["debug_map"]
@@ -2012,6 +2036,8 @@ def build(config_path: Path) -> dict[str, Any]:
         output_dir.mkdir(parents=True, exist_ok=True)
         for key, filename in output_names.items():
             os.replace(temporary_dir / filename, target_paths[key])
+    finally:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
 
     return {
         "output_dir": relative_path(repo_root, output_dir),
@@ -2122,10 +2148,13 @@ def run_contract_negative_tests(repo_root: Path) -> None:
     def mutated_evidence(mutator: Any) -> None:
         document = copy.deepcopy(evidence)
         mutator(document)
-        with tempfile.TemporaryDirectory(prefix=".ming-map-negative-", dir=repo_root) as temporary:
-            candidate = Path(temporary) / "evidence.json"
+        temporary = unique_temp_dir(repo_root, ".ming-map-negative")
+        try:
+            candidate = temporary / "evidence.json"
             write_json(candidate, document)
             load_evidence_ledger(candidate, source_ledger, snapshot_date)
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
 
     expect_failure(
         "unknown_source_claim",
@@ -2144,8 +2173,8 @@ def run_contract_negative_tests(repo_root: Path) -> None:
         lambda: mutated_evidence(lambda document: next(claim for claim in document["claims"] if claim["id"] == "INFERENCE-P0-NINGYUAN-ANCHOR").update({"valid_from": "1626-01-01"})),
     )
 
-    with tempfile.TemporaryDirectory(prefix=".ming-map-negative-", dir=repo_root) as temporary:
-        temporary_dir = Path(temporary)
+    temporary_dir = unique_temp_dir(repo_root, ".ming-map-negative")
+    try:
         bad_csv = temporary_dir / "bad.csv"
         bad_csv.write_bytes(b"source_id,title\nDRAFT,???\n")
         expect_failure("csv_question_mark_damage", lambda: load_source_ledger(bad_csv))
@@ -2164,6 +2193,8 @@ def run_contract_negative_tests(repo_root: Path) -> None:
             not (temporary_dir / "failed-output" / "build-report.json").exists(),
             "失败构建不应产生 build-report.json。",
         )
+    finally:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
 
     require(len(checks) == 17, f"负例数量不完整：{checks}")
 

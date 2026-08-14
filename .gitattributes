@@ -1,3 +1,11 @@
+# 确定性构建器统一输出 LF：
+# - 地图构建器（tools/maps/build_east_asia_map.py）产物与源文本
+# - UI 资产账本（tools/ui/ming_ui_assets.py snapshot-ledger）产物
+# 若未钉 eol=lf，Windows 全局 core.autocrlf=true 会让检出文本变 CRLF，
+# 重建后字节翻转导致 git status 不干净，破坏字节复现验证。
+assets/maps/generated/**/*.json text eol=lf
+assets/maps/generated/**/*.geojson text eol=lf
+assets/ui/generated/**/*.json text eol=lf
 docs/地图与UI制作/02-1629辽东辽西史实态势证据账本.md text eol=lf
 content/scenarios/ming_1629/evidence/liaodong-1629-evidence.json text eol=lf
 content/scenarios/ming_1629/map/places.json text eol=lf
