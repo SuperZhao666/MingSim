@@ -1347,6 +1347,221 @@ internal static class Program
             .GetProperty("OutboxEvents", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(snapshot)!;
 
+    /// <summary>
+    /// 测试夹具：把当前 v2 载荷（MSNAP 快照 / MSWLD 状态）按 git 历史（#28 之前的
+    /// SnapshotCodec v1 格式）降级为 v1 载荷——v1 与 v2 的唯一差别是 WorldState 末尾没有
+    /// AppointmentState 段且格式版本字节为 1。用与 SnapshotCodec.WriteWorldState 完全一致的
+    /// 布局规则扫描到任命段起点后截断，避免为测试在生产代码里重复实现 v1 编码器
+    /// （契约："只实现 v1→v2 一条迁移路径"）。
+    /// 注意：夹具只改字节布局；StateHash/PayloadChecksum 是内容字段（与字节布局无关，
+    /// 由 RealtimeSimulationRuntime 按快照内容计算），原样保留，迁移后仍可通过权威校验。
+    /// </summary>
+    internal static byte[] DowngradePayloadToV1(byte[] payload, byte[] magic)
+    {
+        using var reader = new BinaryReader(new MemoryStream(payload, writable: false));
+        var magicBytes = reader.ReadBytes(magic.Length);
+        Require(magicBytes.SequenceEqual(magic), "夹具必须来自本适配器写入的载荷（魔数不匹配）");
+        var versionPosition = (int)reader.BaseStream.Position;
+        Require(reader.ReadByte() == 2, "夹具必须来自当前 v2 格式载荷");
+        if (magicBytes.SequenceEqual("MSNAP"u8.ToArray()))
+        {
+            SkipInt32(reader); // MSNAP 快照载荷在 WorldState 前有 RealtimeSnapshot.SchemaVersion（内容字段）
+        }
+        // MSWLD 世界载荷没有该字段，WorldState 紧随版本字节之后；两者其余布局一致。
+        SkipWorldStateToAppointments(reader); // 停在任命段 count 起点（v2 独有）
+        var appointmentStart = (int)reader.BaseStream.Position;
+        var appointmentCount = reader.ReadInt32();
+        for (var i = 0; i < appointmentCount; i++)
+        {
+            SkipString(reader);
+            SkipString(reader);
+            SkipNullableString(reader);
+            SkipNullableInt64(reader);
+            Skip(reader, 8);        // effectiveFrom ticks
+            SkipNullableInt64(reader); // effectiveTo
+        }
+
+        var appointmentEnd = (int)reader.BaseStream.Position;
+        var v1 = new byte[appointmentStart + (payload.Length - appointmentEnd)];
+        Array.Copy(payload, v1, appointmentStart);                       // 任命段之前
+        Array.Copy(payload, appointmentEnd, v1, appointmentStart, payload.Length - appointmentEnd); // 任命段之后
+        v1[versionPosition] = 1; // 格式版本 1
+        return v1;
+    }
+
+    /// <summary>跳过 WorldState 段到任命段起点（v2 独有），布局与 SnapshotCodec.WriteWorldState 一致。</summary>
+    private static void SkipWorldStateToAppointments(BinaryReader reader)
+    {
+        SkipString(reader);                 // world id
+        Skip(reader, 4 + 8 + 8);            // turn + gameTime + worldVersion
+        SkipString(reader);                 // commit id
+        Skip(reader, 8);                    // treasury silver
+        var stockCount = ReadInt32(reader);
+        for (var i = 0; i < stockCount; i++)
+        {
+            SkipString(reader);
+            Skip(reader, 8 + 8);            // quantity + reserved
+        }
+
+        SkipString(reader);                 // map id
+        var provinceCount = ReadInt32(reader);
+        for (var i = 0; i < provinceCount; i++)
+        {
+            SkipString(reader);
+            SkipString(reader);
+            SkipStringList(reader);
+        }
+
+        var characterCount = ReadInt32(reader);
+        for (var i = 0; i < characterCount; i++)
+        {
+            SkipString(reader);
+            SkipString(reader);
+            Skip(reader, 20);               // attributes（5×int32）
+            Skip(reader, 4);                // personality（4×bool）
+            SkipNullableString(reader);     // office id
+            SkipString(reader);             // location id
+            Skip(reader, 8);                // loyalty + stress
+            var memoryCount = ReadInt32(reader);
+            for (var m = 0; m < memoryCount; m++)
+            {
+                Skip(reader, 4);
+                SkipString(reader);
+                SkipString(reader);
+                Skip(reader, 1);
+            }
+        }
+
+        var institutionCount = ReadInt32(reader);
+        for (var i = 0; i < institutionCount; i++)
+        {
+            SkipString(reader);
+            SkipString(reader);
+            SkipStringList(reader);
+            SkipStringList(reader);
+        }
+
+        var grantCount = ReadInt32(reader);
+        for (var i = 0; i < grantCount; i++)
+        {
+            SkipString(reader);
+            SkipString(reader);
+            SkipNullableString(reader);
+            SkipNullableInt32(reader);
+        }
+
+        var facilityCount = ReadInt32(reader);
+        for (var i = 0; i < facilityCount; i++)
+        {
+            SkipString(reader);
+            SkipString(reader);
+            SkipString(reader);
+            SkipString(reader);
+            Skip(reader, 8 + 4 + 4 + 4 + 8);
+        }
+
+        var armyCount = ReadInt32(reader);
+        for (var i = 0; i < armyCount; i++)
+        {
+            SkipString(reader);
+            SkipString(reader);
+            SkipString(reader);
+            Skip(reader, 8 + 8 + 4);
+        }
+
+        var stockpileCount = ReadInt32(reader);
+        for (var i = 0; i < stockpileCount; i++)
+        {
+            SkipString(reader);
+            SkipString(reader);
+            Skip(reader, 8 + 8);
+        }
+
+        var routeCount = ReadInt32(reader);
+        for (var i = 0; i < routeCount; i++)
+        {
+            SkipString(reader);
+            SkipString(reader);
+            SkipString(reader);
+            Skip(reader, 8 + 4 + 4);
+        }
+
+        var shipmentCount = ReadInt32(reader);
+        for (var i = 0; i < shipmentCount; i++)
+        {
+            SkipString(reader);
+            SkipString(reader);
+            Skip(reader, 8);                // grain quantity
+            SkipString(reader);             // status
+            Skip(reader, 8);                // planned ticks
+            SkipNullableInt64(reader);      // departed
+            SkipNullableInt64(reader);      // arrived
+            Skip(reader, 8 + 8);            // delivered + loss
+        }
+
+        var movementCount = ReadInt32(reader);
+        for (var i = 0; i < movementCount; i++)
+        {
+            SkipString(reader);
+            SkipString(reader);
+            SkipString(reader);
+            SkipString(reader);
+            Skip(reader, 8);                // due ticks
+            SkipString(reader);             // route fingerprint
+        }
+        // 此刻正位于任命段 count 起点（v2 独有）；调用方按 v1 布局跳过任命段并移除之。
+    }
+
+    private static void Skip(BinaryReader reader, int count) => reader.BaseStream.Position += count;
+
+    private static int ReadInt32(BinaryReader reader) => reader.ReadInt32();
+
+    private static void SkipInt32(BinaryReader reader) => reader.BaseStream.Position += 4;
+
+    private static void SkipString(BinaryReader reader)
+    {
+        var length = reader.ReadInt32();
+        if (length < 0)
+        {
+            throw new InvalidDataException("夹具扫描遇到负长度字符串，载荷不是本适配器布局。");
+        }
+
+        reader.BaseStream.Position += length;
+    }
+
+    private static void SkipNullableString(BinaryReader reader)
+    {
+        if (reader.ReadBoolean())
+        {
+            SkipString(reader);
+        }
+    }
+
+    private static void SkipNullableInt32(BinaryReader reader)
+    {
+        if (reader.ReadBoolean())
+        {
+            Skip(reader, 4);
+        }
+    }
+
+    private static void SkipNullableInt64(BinaryReader reader)
+    {
+        if (reader.ReadBoolean())
+        {
+            Skip(reader, 8);
+        }
+    }
+
+    private static void SkipStringList(BinaryReader reader)
+    {
+        var count = reader.ReadInt32();
+        for (var i = 0; i < count; i++)
+        {
+            SkipString(reader);
+        }
+    }
+
     /// <summary>只用于测试：模拟调用方错误地投递了内核不认识的命令子类型。
     /// 必须是 record 才能继承抽象的 RealtimeCommand record；不声明自己的位置参数，
     /// 避免与基类的 CommandId/ActorId 等属性重名产生隐藏警告。</summary>
@@ -1791,9 +2006,11 @@ internal static class Program
     /// <summary>
     /// I2 终验收：真实 world.json 世界跑完 90 日垂直切片并产出六维终局报告。
     /// 策略按纸面推演的陆海并行批次（docs/玩法验证）：陆 2×5000 石走三段、海 2×7000 石走两段；
-    /// 段间日历留足"天气延误最多 +3 日"余量，全部批次加护卫（400 两/批，不超 20000 两场景银预算），
-    /// 保证任何确定性抽取下都不缺粮断链。终局分档本身是平衡输出（DESIGN），
-    /// 本验收只钉住切片完整性与报告结构，不钉具体档位。
+    /// 段间日历留足"天气延误最多 +3 日"余量，全部批次加护卫（400 两/批，不超 20000 两场景银预算）。
+    /// 注释对齐（BugHunt P2）：受世界总存粮与固定损耗（陆 8%/段×3、海 5%/段×2 + 固定袭粮）约束，
+    /// 宁远仓必然出现断粮日——本策略的确定性输出是欠饷 1446 石、末尾连续断粮 4 日；目标是
+    /// 任何确定性抽取下连续断粮日数都低于硬失败阈值 7 日，而不是"不缺粮断链"。
+    /// 终局分档本身是平衡输出（DESIGN），本验收只钉住切片完整性与报告结构，不钉具体档位。
     /// </summary>
     private static void ShouldCompleteNinetyDayNingyuanScenarioWithEndgameReport()
     {
@@ -1889,6 +2106,12 @@ internal static class Program
             .Single(item => item.Id == new StockpileId("sp-ningyuan")).GrainQuantity;
         Require(evaluation.AvailableGrainDays == frontGrain / runtime.ReadModel.Scenario.DailyGrainDemand,
             "终局报告维度 1 必须与前线仓末日存粮一致");
+        // AvailableGrainDays 非恒真断言（BugHunt P2 补）：维度 1 必须与末日存粮的真实数值绑定，
+        // 不允许"0 石 / 日需 = 0 日"的恒真恒等式通过。本策略的确定性输出是末日总存粮与前线仓存粮
+        // 同时耗尽（finalTotalGrain == frontGrain == 0，欠饷 1446 石、末尾连续断粮 4 日）——
+        // 断言这条确定性关系：运输断链导致存粮滞留源头、或评估器伪造可用天数，都会使二者失配而被捕获。
+        Require(finalTotalGrain == frontGrain,
+            $"末日存粮关系必须成立（确定性 DESIGN 输出）：finalTotalGrain={finalTotalGrain}，frontGrain={frontGrain}");
         Require(evaluation.Explanation.Contains("宁远可用粮", StringComparison.Ordinal) &&
                 evaluation.Explanation.Contains("前线战备", StringComparison.Ordinal) &&
                 evaluation.Explanation.Contains("中央财政", StringComparison.Ordinal) &&

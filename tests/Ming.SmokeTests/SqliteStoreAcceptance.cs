@@ -24,6 +24,9 @@ internal static class SqliteStoreAcceptance
         SqliteRestoreIsIdempotent();
         SqliteRepeatedCommitIsIdempotent();
         SqliteVersionRegressionIsRejected();
+        SqliteV1ArchiveMigratesAndRestoresSameWorld();
+        SqliteCorruptedNewSnapshotFallsBackToPreviousReady();
+        SqliteMigrationFailureFailsClosed();
     }
 
     private static void SqliteCommitPersistsStateJournalAndSnapshotAtomically()
@@ -288,6 +291,153 @@ internal static class SqliteStoreAcceptance
         {
             DeleteDbFiles(dbPath);
         }
+    }
+
+    /// <summary>
+    /// v1 档成功迁移到 v2 并恢复同一世界：把已提交存档的快照行降级为 v1 格式
+    /// （从 git 历史手工构造的最小样例，见 Program.DowngradePayloadToV1），
+    /// RestoreLatest 先迁移再恢复，得到与迁移前完全相同的世界。
+    /// </summary>
+    private static void SqliteV1ArchiveMigratesAndRestoresSameWorld()
+    {
+        var worldId = new WorldId("ningyuan-1629");
+        var dbPath = CreateDbPath();
+        try
+        {
+            var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
+            Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "sqlite-v1migrate", 5_000)).Queued,
+                "迁移测试命令应该进入收件箱");
+            runtime.AdvanceTo(runtime.ReadModel.GameTime);
+            var snapshot = runtime.CaptureSnapshot();
+            using (var store = new SqliteCommitStore(dbPath, worldId))
+            {
+                StageAndCommit(store, worldId, snapshot);
+            }
+
+            // 把最新快照行的载荷降级为 v1（snapshot_blob 不在整库校验和覆盖列内，
+            // 列校验仍通过；内容由迁移/恢复路径校验）。
+            var v1Payload = Program.DowngradePayloadToV1(SnapshotCodec.Serialize(snapshot), "MSNAP"u8.ToArray());
+            ReplaceSnapshotBlob(dbPath, worldId, LatestSnapshotSeq(dbPath, worldId), v1Payload);
+
+            var restored = RealtimeSimulationRuntime.Restore(SqliteCommitStore.RestoreLatest(dbPath, worldId));
+            Program.Require(restored.StateHash == runtime.StateHash,
+                "v1 档迁移到 v2 后恢复，canonical hash 必须与迁移前一致（同一世界）");
+            Program.Require(restored.ReadModel.WorldVersion == runtime.ReadModel.WorldVersion &&
+                            restored.ReadModel.GameTime == runtime.ReadModel.GameTime &&
+                            restored.ReadModel.CommitId == runtime.ReadModel.CommitId,
+                "v1 档迁移恢复后 WorldVersion/GameTime/CommitId 必须一致");
+            Program.Require(restored.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
+                "v1 档迁移恢复后必须回到同一在途运输状态");
+        }
+        finally
+        {
+            DeleteDbFiles(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// 快照失败回退回归样本 snapshot_failure_falls_back（SQLite 全量路径）：
+    /// 提交 A、提交 B 后损坏最新快照 B 的载荷，RestoreLatest 按 doc 08 §15 回退到
+    /// 上一个 READY 快照 A——旧 READY 仍可加载出同一历史世界。
+    /// </summary>
+    private static void SqliteCorruptedNewSnapshotFallsBackToPreviousReady()
+    {
+        var worldId = new WorldId("ningyuan-1629");
+        var dbPath = CreateDbPath();
+        try
+        {
+            var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
+            Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "sqlite-fallback-a", 5_000)).Queued,
+                "回退样本首批命令应该进入收件箱");
+            runtime.AdvanceTo(runtime.ReadModel.GameTime);
+            using (var store = new SqliteCommitStore(dbPath, worldId))
+            {
+                StageAndCommit(store, worldId, runtime.CaptureSnapshot());
+            }
+
+            var restoredA = RealtimeSimulationRuntime.Restore(SqliteCommitStore.RestoreLatest(dbPath, worldId));
+            var hashA = restoredA.StateHash;
+            var versionA = restoredA.ReadModel.WorldVersion;
+            Program.Require(restoredA.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
+                "提交 A 后应处于在途状态");
+
+            // 第二次提交（版本 +1）后，损坏最新快照 B 的载荷（snapshot_blob 不在校验和覆盖列内）。
+            runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddHours(1)));
+            using (var store = new SqliteCommitStore(dbPath, worldId))
+            {
+                StageAndCommit(store, worldId, runtime.CaptureSnapshot());
+            }
+
+            var latestSeq = LatestSnapshotSeq(dbPath, worldId);
+            ReplaceSnapshotBlob(dbPath, worldId, latestSeq, [0x00, 0x01, 0x02, 0x03, 0x04]);
+
+            // 旧 READY 仍可加载：回退到快照 A（世界版本落后于 B，但同一历史世界可恢复）
+            var fellBack = RealtimeSimulationRuntime.Restore(SqliteCommitStore.RestoreLatest(dbPath, worldId));
+            Program.Require(fellBack.StateHash == hashA,
+                "最新快照损坏后必须回退到上一个 READY 快照 A（同 hash）");
+            Program.Require(fellBack.ReadModel.WorldVersion == versionA,
+                "回退恢复的世界版本必须是旧 READY 快照 A 的版本");
+            Program.Require(fellBack.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
+                "回退恢复后必须处于 A 的可用在途状态");
+        }
+        finally
+        {
+            DeleteDbFiles(dbPath);
+        }
+    }
+
+    /// <summary>迁移失败 fail-closed：损坏的 v1 载荷必须让恢复抛异常，绝不返回半迁移结果或半状态。</summary>
+    private static void SqliteMigrationFailureFailsClosed()
+    {
+        var worldId = new WorldId("ningyuan-1629");
+        var dbPath = CreateDbPath();
+        try
+        {
+            var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
+            Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "sqlite-v1corrupt", 5_000)).Queued,
+                "迁移失败测试命令应该进入收件箱");
+            runtime.AdvanceTo(runtime.ReadModel.GameTime);
+            var snapshot = runtime.CaptureSnapshot();
+            using (var store = new SqliteCommitStore(dbPath, worldId))
+            {
+                StageAndCommit(store, worldId, snapshot);
+            }
+
+            var v1Payload = Program.DowngradePayloadToV1(SnapshotCodec.Serialize(snapshot), "MSNAP"u8.ToArray());
+            var truncatedV1 = v1Payload[..(v1Payload.Length / 2)];
+            ReplaceSnapshotBlob(dbPath, worldId, LatestSnapshotSeq(dbPath, worldId), truncatedV1);
+
+            Program.RequireThrowsAny(() => SqliteCommitStore.RestoreLatest(dbPath, worldId));
+        }
+        finally
+        {
+            DeleteDbFiles(dbPath);
+        }
+    }
+
+    private static long LatestSnapshotSeq(string dbPath, WorldId worldId)
+    {
+        using var connection = new SqliteConnection($"Data Source={dbPath};Pooling=false");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT MAX(snapshot_seq) FROM snapshots WHERE world_id = $world;";
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        return Convert.ToInt64(command.ExecuteScalar());
+    }
+
+    private static void ReplaceSnapshotBlob(string dbPath, WorldId worldId, long snapshotSeq, byte[] blob)
+    {
+        // 直接改库中快照行载荷：snapshot_blob 不在 ComputeTotalChecksum 覆盖列内，
+        // 列校验和仍通过；内容损坏由迁移/解码路径按各自语义处理。
+        using var connection = new SqliteConnection($"Data Source={dbPath};Pooling=false");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE snapshots SET snapshot_blob = $blob WHERE world_id = $world AND snapshot_seq = $seq;";
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        command.Parameters.AddWithValue("$seq", snapshotSeq);
+        command.Parameters.AddWithValue("$blob", blob);
+        command.ExecuteNonQuery();
+        connection.Close();
     }
 
     private static void StageAndCommit(SqliteCommitStore store, WorldId worldId, RealtimeSnapshot snapshot)

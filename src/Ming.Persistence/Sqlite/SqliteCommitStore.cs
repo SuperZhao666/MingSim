@@ -261,9 +261,18 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
 
     /// <summary>
     /// 崩溃恢复：只读打开库，重算覆盖全部内容行的校验和，校验事件日志连续性，
-    /// 返回最新已提交快照。任何字节篡改都会抛异常，绝不返回半状态。
+    /// 返回最新已提交快照。任何字节篡改都会抛异常，绝不发布半状态。
     /// 返回的快照仍需交给 <see cref="RealtimeSimulationRuntime.Restore"/> 做权威校验后才能使用。
     /// </summary>
+    /// <remarks>
+    /// 快照回退（doc 08 §15）：meta 指向的当前快照若不可读（迁移或解码失败），
+    /// 按快照序列降序回退到上一个 READY 快照并返回它，绝不发布半状态；
+    /// 全部快照都不可读时抛异常（fail-closed，迁移失败也不例外——不可读的旧档
+    /// 绝不会被静默当作成功恢复）。v1 旧档先迁移到 v2 再读取（迁移只做 v1→v2 一条路径）。
+    /// 注：回退后的世界版本落后于 meta.current_world_version，可加载/恢复/检查，
+    /// 但下一次提交会因"版本回退"守卫被拒——完整续玩需要显式修复存档指针，超出本方法职责
+    /// （恢复必须只读，绝不覆盖原档）。
+    /// </remarks>
     public static RealtimeSnapshot RestoreLatest(string databasePath, WorldId worldId)
     {
         if (!File.Exists(databasePath))
@@ -301,9 +310,36 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             }
 
             VerifyJournalContinuity(connection, worldId);
-            var snapshot = SnapshotCodec.Deserialize(payload);
-            VerifyJournalMatchesSnapshot(connection, worldId, snapshot);
+            var (snapshot, fellBack) = ReadSnapshotWithFallback(connection, worldId, currentSnapshotSeq, payload);
+            VerifyJournalMatchesSnapshot(connection, worldId, snapshot, allowJournalLongerThanOutbox: fellBack);
             return snapshot;
+        }
+    }
+
+    /// <summary>
+    /// 读取当前快照；损坏时按序列降序回退到上一个 READY 快照（doc 08 §15：Current 损坏
+    /// → 选择最新 READY Snapshot）。候选的 v1 旧档先迁移到 v2；迁移失败与解码失败同等对待——
+    /// 都意味着该快照不可读，尝试更早的 READY。全部候选都不可读时最后抛出（fail-closed，
+    /// 绝不发布半状态、绝不把不可读的存档静默当作成功恢复）。
+    /// </summary>
+    private static (RealtimeSnapshot Snapshot, bool FellBack) ReadSnapshotWithFallback(
+        SqliteConnection connection, WorldId worldId, long currentSnapshotSeq, byte[] currentPayload)
+    {
+        var seq = currentSnapshotSeq;
+        var payload = currentPayload;
+        while (true)
+        {
+            try
+            {
+                var snapshot = SnapshotCodec.Deserialize(SnapshotCodec.MigrateV1ToV2(payload));
+                return (snapshot, seq < currentSnapshotSeq);
+            }
+            catch (Exception exception) when (exception is InvalidDataException or EndOfStreamException && seq > 0)
+            {
+                // 当前（或回退候选）快照载荷损坏：尝试上一个 READY 快照；绝不发布半状态。
+                seq--;
+                payload = ReadSnapshotPayload(connection, worldId, seq);
+            }
         }
     }
 
@@ -778,7 +814,8 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
         }
     }
 
-    private static void VerifyJournalMatchesSnapshot(SqliteConnection connection, WorldId worldId, RealtimeSnapshot snapshot)
+    private static void VerifyJournalMatchesSnapshot(
+        SqliteConnection connection, WorldId worldId, RealtimeSnapshot snapshot, bool allowJournalLongerThanOutbox)
     {
         var outbox = SnapshotReflection.GetOutboxEvents(snapshot);
         if (outbox.Count == 0)
@@ -790,7 +827,16 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
         command.CommandText = "SELECT COUNT(*) FROM event_journal WHERE world_id = $world;";
         command.Parameters.AddWithValue("$world", worldId.Value);
         var count = Convert.ToInt64(command.ExecuteScalar());
-        if (count != outbox.Count)
+        if (allowJournalLongerThanOutbox)
+        {
+            // 回退路径：恢复的是旧 READY 快照，事件日志允许比其 outbox 更长
+            //（快照之后提交的、快照已损坏的事件仍在审计日志中）；outbox 必须是日志前缀。
+            if (count < outbox.Count)
+            {
+                throw new InvalidDataException("事件日志比回退快照的 outbox 还短，存档损坏。");
+            }
+        }
+        else if (count != outbox.Count)
         {
             throw new InvalidDataException("事件日志与快照 outbox 数量不一致，存档损坏。");
         }
