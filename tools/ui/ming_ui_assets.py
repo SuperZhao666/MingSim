@@ -376,8 +376,12 @@ def write_ledger_snapshot(path: Path) -> int:
             f"snapshot-ledger may only write the canonical ledger: {DEFAULT_LEDGER}"
         )
     payload = snapshot_ledger_payload()
+    # 显式 newline="\n"：Windows 文本模式默认把 \n 写成 \r\n，会让账本字节
+    # 随平台漂移；与 .gitattributes 的 text eol=lf 一起保证重建后工作树字节稳定。
     path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
     )
     return len(payload["assets"])
 
