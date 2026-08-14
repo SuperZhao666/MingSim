@@ -1,5 +1,6 @@
 using MingSim.Domain;
 using MingSim.Domain.Common;
+using MingSim.Domain.Economy;
 using MingSim.Domain.Intents;
 
 namespace MingSim.Agents.Runtime;
@@ -15,7 +16,14 @@ public sealed record AgentRegistration(
     CharacterId ActorId,
     IAgentDecisionSource DecisionSource);
 
-/// <summary>从权威世界状态编译有限的代理上下文。</summary>
+/// <summary>
+/// 从权威世界状态编译有限的代理上下文（P1-AGENT-01/02）。
+/// </summary>
+/// <remarks>
+/// 候选集规则：路线只保留"可行动"候选（起点有粮、目的地有余量、路线在途未满），
+/// 军队携带当前位置与地图邻接合法目的地。模型与规则都只能从这些候选里选，
+/// 因此不会把完整 WorldState 塞给模型，也不会让代理发明不存在的路线/军队/目的地。
+/// </remarks>
 public sealed class AgentContextCompiler
 {
     public AgentContext Compile(WorldState world, CharacterId actorId)
@@ -24,10 +32,18 @@ public sealed class AgentContextCompiler
             .Select(army => new ArmyObservation(
                 army.Id,
                 army.Name,
+                army.LocationId,
                 army.Auxiliaries,
                 army.LineInfantry,
-                army.TrainingDays))
+                army.TrainingDays,
+                AdjacentDestinations(world, army.LocationId)))
             .OrderBy(army => army.ArmyId.Value, StringComparer.Ordinal)
+            .ToArray();
+
+        var routes = world.Logistics.Routes.Values
+            .Select(route => BuildRouteObservation(world, route))
+            .Where(route => route.IsActionable)
+            .OrderBy(route => route.RouteId.Value, StringComparer.Ordinal)
             .ToArray();
 
         var capabilities = world.CapabilityGrants
@@ -42,9 +58,41 @@ public sealed class AgentContextCompiler
             world.Economy.Treasury.Silver,
             world.Industry.Facilities.Count,
             armies,
+            routes,
             capabilities,
             world.WorldVersion,
             world.GameTime);
+    }
+
+    /// <summary>军队当前位置出发、地图上邻接的合法目的地（排序保证确定性）。</summary>
+    private static IReadOnlyList<ProvinceId> AdjacentDestinations(WorldState world, ProvinceId locationId) =>
+        world.Map.Provinces.Keys
+            .Where(province => world.Map.IsAdjacent(locationId, province))
+            .OrderBy(province => province.Value, StringComparer.Ordinal)
+            .ToArray();
+
+    /// <summary>把权威 RouteState 裁剪成最小路线候选观察。</summary>
+    private static RouteObservation BuildRouteObservation(WorldState world, RouteState route)
+    {
+        var source = world.Logistics.Stockpiles[route.FromStockpileId];
+        var destination = world.Logistics.Stockpiles[route.ToStockpileId];
+        var reserved = world.Logistics.ReservedIncomingGrain(destination.Id);
+        var headroom = destination.Capacity - destination.GrainQuantity - reserved;
+        if (headroom < 0)
+        {
+            headroom = 0;
+        }
+
+        return new RouteObservation(
+            route.Id,
+            source.LocationId,
+            destination.LocationId,
+            source.GrainQuantity,
+            headroom,
+            route.Capacity,
+            world.Logistics.InTransitGrain(route.Id),
+            route.TravelHours,
+            route.LossPerThousand);
     }
 }
 

@@ -43,7 +43,7 @@ internal static partial class Program
         var results = entry.Submit(world, intents);
         Require(results.Count == 1 && results[0].Accepted,
             "授权规则代理的粮运意图必须通过入口预检并进入收件箱");
-        Require(results[0].CommandId == $"logistics-ningyuan-300-{world.WorldVersion}",
+        Require(results[0].CommandId == $"logistics-capital-ningyuan-grain-300-{world.WorldVersion}",
             "入口必须把意图的幂等键作为稳定命令编号");
 
         var advanced = runtime.AdvanceTo(before.GameTime);
@@ -54,7 +54,7 @@ internal static partial class Program
         // 受理命令 +1（CommandAccepted 提交），同一安全点内 ShipmentDeparture 事件再 +1。
         Require(advanced.ReadModel.WorldVersion == before.WorldVersion + 2,
             "受理粮运必须产生命令与出发两个原子提交");
-        Require(advanced.ReadModel.Shipments.Any(shipment => shipment.Id.Value == $"shipment-logistics-ningyuan-300-{world.WorldVersion}"),
+        Require(advanced.ReadModel.Shipments.Any(shipment => shipment.Id.Value == $"shipment-logistics-capital-ningyuan-grain-300-{world.WorldVersion}"),
             "内核必须创建对应运输单");
     }
 
@@ -321,18 +321,18 @@ internal static partial class Program
         Require(request.IsExpired(now.Add(TimeSpan.FromHours(2))), "截止之后到达必须过期");
         Require(result.Source == DecisionSource.Rules, "过期模型结果必须被丢弃并回退规则路径");
         var ruleIntent = result.Intents.Single();
-        Require(ruleIntent is PlanLogisticsIntent && ruleIntent.IdempotencyKey == $"logistics-ningyuan-300-{world.WorldVersion}",
+        Require(ruleIntent is PlanLogisticsIntent && ruleIntent.IdempotencyKey == $"logistics-capital-ningyuan-grain-300-{world.WorldVersion}",
             "回退必须采用规则（Utility AI）路径的意图");
 
         var submit = entry.Submit(world, result.Intents).Single();
-        Require(submit.Accepted && submit.CommandId == $"logistics-ningyuan-300-{world.WorldVersion}",
+        Require(submit.Accepted && submit.CommandId == $"logistics-capital-ningyuan-grain-300-{world.WorldVersion}",
             "规则回退意图必须经入口提交");
         var advanced = runtime.AdvanceTo(before.GameTime);
-        Require(advanced.CommandResults.Single().CommandId == $"logistics-ningyuan-300-{world.WorldVersion}" &&
+        Require(advanced.CommandResults.Single().CommandId == $"logistics-capital-ningyuan-grain-300-{world.WorldVersion}" &&
                 advanced.CommandResults.Single().Accepted,
             "被采纳的命令只能是规则回退意图，过期模型意图不得出现");
         Require(advanced.ReadModel.Shipments.Count == 1 &&
-                advanced.ReadModel.Shipments.Single().Id.Value == $"shipment-logistics-ningyuan-300-{world.WorldVersion}",
+                advanced.ReadModel.Shipments.Single().Id.Value == $"shipment-logistics-capital-ningyuan-grain-300-{world.WorldVersion}",
             "过期模型结果不能产生任何运输单副作用");
     }
 
@@ -353,13 +353,13 @@ internal static partial class Program
 
         var invalidJson = plannerResult(new FakeModelProvider("这不是 JSON"), request, context, now);
         Require(invalidJson.Source == DecisionSource.Rules, "非法 JSON 必须回退规则路径");
-        Require(invalidJson.Intents.Single().IdempotencyKey == $"logistics-ningyuan-300-{world.WorldVersion}",
+        Require(invalidJson.Intents.Single().IdempotencyKey == $"logistics-capital-ningyuan-grain-300-{world.WorldVersion}",
             "非法 JSON 回退必须采用规则意图");
         var invalidSubmit = entry.Submit(world, invalidJson.Intents).Single();
         Require(invalidSubmit.Accepted, "规则回退意图必须可提交");
         var invalidAdvanced = runtime.AdvanceTo(now);
         Require(invalidAdvanced.ReadModel.Shipments.Count == 1 &&
-                invalidAdvanced.ReadModel.Shipments.Single().Id.Value == $"shipment-logistics-ningyuan-300-{world.WorldVersion}",
+                invalidAdvanced.ReadModel.Shipments.Single().Id.Value == $"shipment-logistics-capital-ningyuan-grain-300-{world.WorldVersion}",
             "模型文本不能改变世界，只有规则回退意图生效");
 
         var unknownIntent = plannerResult(
@@ -506,7 +506,7 @@ internal static partial class Program
         Require(result.Source == DecisionSource.Rules && result.FallbackReason == ModelFallbackReason.ProviderFailed,
             "Provider 抛异常必须回退 Utility 并明确失败原因");
         var ruleIntent = result.Intents.Single();
-        Require(ruleIntent is PlanLogisticsIntent && ruleIntent.IdempotencyKey == $"logistics-ningyuan-300-{world.WorldVersion}",
+        Require(ruleIntent is PlanLogisticsIntent && ruleIntent.IdempotencyKey == $"logistics-capital-ningyuan-grain-300-{world.WorldVersion}",
             "回退必须产出 Utility 的结构化意图");
 
         var submit = entry.Submit(world, result.Intents).Single();
@@ -759,6 +759,17 @@ internal static partial class Program
                 new CapabilityGrant(new CharacterId("works"), GameCapability.BuildIndustry),
                 new CapabilityGrant(new CharacterId("works"), GameCapability.ConvertArmy),
                 new CapabilityGrant(new CharacterId("works"), GameCapability.PlanLogistics, "capital-ningyuan-grain"),
+            ],
+            stockpiles:
+            [
+                new StockpileState(new StockpileId("capital-granary"), new ProvinceId("capital"), 2_000, 1_000),
+                new StockpileState(new StockpileId("ningyuan-granary"), new ProvinceId("liaodong"), 1_000, 0),
+            ],
+            routes:
+            [
+                new RouteState(new RouteId("capital-ningyuan-grain"),
+                    new StockpileId("capital-granary"), new StockpileId("ningyuan-granary"),
+                    500, 2, 100),
             ],
             armies:
             [
