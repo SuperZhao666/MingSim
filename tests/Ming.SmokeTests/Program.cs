@@ -1356,6 +1356,75 @@ internal static class Program
     /// 注意：夹具只改字节布局；StateHash/PayloadChecksum 是内容字段（与字节布局无关，
     /// 由 RealtimeSimulationRuntime 按快照内容计算），原样保留，迁移后仍可通过权威校验。
     /// </summary>
+    /// <summary>
+    /// 真实 v1 档的 schema4 权威 StateHash（独立审查 P1 回归样本用）：
+    /// 由 v1 时代 CanonicalStateHasher（SchemaVersion=4、无 AppointmentState 段，取自 #28 之前
+    /// 的 git 历史 4b035ab）对"确定性夹具世界"计算——夹具世界 = CreateNingyuanWorld() +
+    /// 创建 5000 石运输（commandId "v1-real-fixture"）+ AdvanceTo(当前时刻) 后的快照内容。
+    /// 已验证当前 hasher（schema5）对该内容输出不同哈希（HASHES DIFFER=True）。
+    /// 若夹具世界或夹具步骤变化，须用同法重新计算本常量。
+    /// </summary>
+    internal const string RealV1StateHash = "228BC8F78B4FEE6AAD25E183B47BAD4229F848FE3E1475C9CD4E291D60BB3CED";
+
+    /// <summary>
+    /// 测试夹具：构造"真实 v1 档"样本——v1 字节布局（无任命段 + 版本字节 1）+
+    /// schema4 时代的权威 StateHash（见 <see cref="RealV1StateHash"/>）与配套 payload checksum
+    /// （对旧哈希重算，与 v1 时代校验语义一致）。当前 hasher 无法在夹具内容上复现这对校验字段，
+    /// 迁移必须 re-seal（用当前规则重算）才能通过 RealtimeSimulationRuntime.Restore 权威校验；
+    /// 若迁移原样保留这对字段，Restore 必然失败（独立审查 P1 回归点）。
+    /// </summary>
+    internal static byte[] BuildRealV1Fixture(RealtimeSnapshot snapshot, byte[] magic, string currentStateHash, string currentChecksum)
+    {
+        var v1 = DowngradePayloadToV1(SnapshotCodec.Serialize(snapshot), magic);
+        var staleChecksum = RealtimeSnapshotHash.ComputePayloadChecksum(snapshot, RealV1StateHash);
+        var withStaleHash = ReplaceLastAscii(v1, currentStateHash, RealV1StateHash);
+        return ReplaceLastAscii(withStaleHash, currentChecksum, staleChecksum);
+    }
+
+    /// <summary>把载荷中最后一个 needle 字节序列替换为等长 replacement（校验字段在载荷末尾附近）。</summary>
+    private static byte[] ReplaceLastAscii(byte[] payload, string needle, string replacement)
+    {
+        var needleBytes = System.Text.Encoding.ASCII.GetBytes(needle);
+        var replacementBytes = System.Text.Encoding.ASCII.GetBytes(replacement);
+        Require(needleBytes.Length == replacementBytes.Length, "校验字段替换必须等长");
+        var index = LastIndexOf(payload, needleBytes);
+        Require(index >= 0, "夹具必须能在载荷中找到当前校验字段字节（用于替换为 v1 时代哈希）");
+        var result = new byte[payload.Length];
+        Array.Copy(payload, result, index);
+        Array.Copy(replacementBytes, 0, result, index, replacementBytes.Length);
+        Array.Copy(payload, index + needleBytes.Length, result, index + replacementBytes.Length,
+            payload.Length - index - needleBytes.Length);
+        return result;
+    }
+
+    private static int LastIndexOf(byte[] haystack, byte[] needle)
+    {
+        if (needle.Length == 0 || haystack.Length < needle.Length)
+        {
+            return -1;
+        }
+
+        for (var start = haystack.Length - needle.Length; start >= 0; start--)
+        {
+            var matched = true;
+            for (var offset = 0; offset < needle.Length; offset++)
+            {
+                if (haystack[start + offset] != needle[offset])
+                {
+                    matched = false;
+                    break;
+                }
+            }
+
+            if (matched)
+            {
+                return start;
+            }
+        }
+
+        return -1;
+    }
+
     internal static byte[] DowngradePayloadToV1(byte[] payload, byte[] magic)
     {
         using var reader = new BinaryReader(new MemoryStream(payload, writable: false));

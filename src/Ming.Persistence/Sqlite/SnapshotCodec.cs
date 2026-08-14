@@ -143,8 +143,10 @@ public static class SnapshotCodec
     /// - v1 载荷：按 v1 布局读取全部段（WorldState 无任命段，任命为空），再用当前格式重新序列化；
     /// - 已是 v2 的载荷原样返回（幂等，调用方无需先探版本）；
     /// - 未知更高版本抛异常（fail-closed），绝不把旧档按新格式静默误读。
-    /// StateHash/PayloadChecksum 是内容字段（由 Runtime 按快照内容计算，与字节布局无关），
-    /// 迁移原样保留；v1 世界没有任命，迁移后任命为空，与 v1 时代的权威哈希语义一致。
+    /// re-seal（独立审查 P1）：v1 时代载荷携带的 StateHash/PayloadChecksum 由旧哈希规则
+    /// （CanonicalStateHasher schema4、无任命段）计算，当前运行时按 schema5 重算必然失配；
+    /// 迁移后必须用当前规则对重建的快照内容重算二者（<see cref="RealtimeSnapshotHash"/>），
+    /// 才能通过 <see cref="RealtimeSimulationRuntime.Restore"/> 的权威校验并恢复同一世界。
     /// </remarks>
     public static byte[] MigrateV1ToV2(byte[] payload)
     {
@@ -167,7 +169,11 @@ public static class SnapshotCodec
             throw new InvalidDataException($"不支持快照载荷格式版本 {formatVersion}（当前支持 {FormatVersion}）。");
         }
 
-        return Serialize(ReadV1Snapshot(reader));
+        // re-seal：v1 载荷的 StateHash/PayloadChecksum 由旧哈希规则计算，当前运行时无法复现；
+        // 读 v1 段 → 用当前规则重算 → 写 v2 段。任何一步失败都会抛出（fail-closed）。
+        var migrated = ReadV1Snapshot(reader);
+        var (stateHash, payloadChecksum) = RealtimeSnapshotHash.ComputeHashes(migrated);
+        return Serialize(SnapshotReflection.Reseal(migrated, stateHash, payloadChecksum));
     }
 
     /// <summary>按 v1 布局读取 v1 快照载荷的剩余段（WorldState 无任命段，任命为空）。</summary>

@@ -25,6 +25,7 @@ internal static class SqliteStoreAcceptance
         SqliteRepeatedCommitIsIdempotent();
         SqliteVersionRegressionIsRejected();
         SqliteV1ArchiveMigratesAndRestoresSameWorld();
+        SqliteV1ArchiveWithRealV1HashMigratesAndRestores();
         SqliteCorruptedNewSnapshotFallsBackToPreviousReady();
         SqliteMigrationFailureFailsClosed();
     }
@@ -328,6 +329,47 @@ internal static class SqliteStoreAcceptance
                 "v1 档迁移恢复后 WorldVersion/GameTime/CommitId 必须一致");
             Program.Require(restored.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
                 "v1 档迁移恢复后必须回到同一在途运输状态");
+        }
+        finally
+        {
+            DeleteDbFiles(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// P1 回归样本（SQLite 全量路径）：带真实 v1 哈希（schema4）的 v1 档迁移后必须通过
+    /// 权威恢复并得到同一世界（旧实现保留 v1 哈希时 RestoreLatest 恢复出的快照会在
+    /// Runtime.Restore 的 canonical hash 校验失败）。详见
+    /// SnapshotCodecAcceptance.CodecMigratesRealV1HashSampleAndRestoresSameWorld。
+    /// </summary>
+    private static void SqliteV1ArchiveWithRealV1HashMigratesAndRestores()
+    {
+        var worldId = new WorldId("ningyuan-1629");
+        var dbPath = CreateDbPath();
+        try
+        {
+            var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
+            Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "v1-real-fixture", 5_000)).Queued,
+                "真实 v1 档命令应该进入收件箱");
+            runtime.AdvanceTo(runtime.ReadModel.GameTime);
+            var snapshot = runtime.CaptureSnapshot();
+            using (var store = new SqliteCommitStore(dbPath, worldId))
+            {
+                StageAndCommit(store, worldId, snapshot);
+            }
+
+            // 把最新快照行替换为"真实 v1 档"（schema4 哈希 + v1 布局；snapshot_blob 不在整库校验和覆盖列内）。
+            var realV1 = Program.BuildRealV1Fixture(snapshot, "MSNAP"u8.ToArray(), snapshot.StateHash, snapshot.PayloadChecksum);
+            ReplaceSnapshotBlob(dbPath, worldId, LatestSnapshotSeq(dbPath, worldId), realV1);
+
+            var restored = RealtimeSimulationRuntime.Restore(SqliteCommitStore.RestoreLatest(dbPath, worldId));
+            Program.Require(restored.StateHash == runtime.StateHash,
+                "真实 v1 哈希档迁移后，权威恢复必须成功且 canonical hash 与原始世界一致（P1 re-seal）");
+            Program.Require(restored.ReadModel.WorldVersion == runtime.ReadModel.WorldVersion &&
+                            restored.ReadModel.GameTime == runtime.ReadModel.GameTime,
+                "真实 v1 哈希档迁移恢复后 WorldVersion/GameTime 必须一致");
+            Program.Require(restored.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
+                "真实 v1 哈希档迁移恢复后必须回到同一在途运输状态");
         }
         finally
         {

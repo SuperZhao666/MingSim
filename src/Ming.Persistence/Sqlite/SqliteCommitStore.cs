@@ -848,6 +848,43 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
                 throw new InvalidDataException("事件日志与快照 outbox 序号不一致，存档损坏。");
             }
         }
+
+        // 真正的日志/outbox 交叉校验（独立审查 P2-1）：按 EventSequence 读回日志中与 outbox
+        // 同序号的每条事件，逐条与快照 outbox 比对 EventId 与世界版本——仅 count + 序号连续
+        // 校验不足以证明 outbox 确实是日志前缀，事件内容被替换/错位必须在这里暴露。
+        using (var crossCommand = connection.CreateCommand())
+        {
+            crossCommand.CommandText = """
+                SELECT event_blob, event_sequence
+                FROM event_journal
+                WHERE world_id = $world AND event_sequence < $count
+                ORDER BY event_sequence;
+                """;
+            crossCommand.Parameters.AddWithValue("$world", worldId.Value);
+            crossCommand.Parameters.AddWithValue("$count", outbox.Count);
+            using var crossReader = crossCommand.ExecuteReader();
+            var index = 0;
+            while (crossReader.Read())
+            {
+                var journalSequence = crossReader.GetInt64(1);
+                var journalEvent = SnapshotCodec.DeserializeEvent(crossReader.GetFieldValue<byte[]>(0));
+                if (journalSequence != index ||
+                    !StringComparer.Ordinal.Equals(journalEvent.EventId, outbox[index].EventId) ||
+                    journalEvent.WorldVersion != outbox[index].WorldVersion ||
+                    journalEvent.EventSequence != index)
+                {
+                    throw new InvalidDataException(
+                        $"事件日志与快照 outbox 在第 {index} 条事件处不一致（序号/EventId/WorldVersion），存档损坏。");
+                }
+
+                index++;
+            }
+
+            if (index != outbox.Count)
+            {
+                throw new InvalidDataException("事件日志与快照 outbox 数量不一致，存档损坏。");
+            }
+        }
     }
 
     private sealed record MetaRow(long CurrentWorldVersion, string CurrentCommitId, long CurrentSnapshotSeq);

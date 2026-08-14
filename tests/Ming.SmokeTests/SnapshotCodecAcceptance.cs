@@ -23,6 +23,7 @@ internal static class SnapshotCodecAcceptance
         CodecRestoredInstanceContinuesDeterministically();
         CodecRoundTripsPendingInboxCommands();
         CodecMigratesV1PayloadToV2AndRestoresSameWorld();
+        CodecMigratesRealV1HashSampleAndRestoresSameWorld();
         CodecMigrationFailureFailsClosed();
         CodecFallsBackFromCorruptedNewSnapshotToPreviousReady();
         CodecReadsV1WorldAndEventPayloads();
@@ -176,6 +177,40 @@ internal static class SnapshotCodecAcceptance
         Program.Require(restored.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit &&
                         restored.ReadModel.Shipments.Single().GrainQuantity == 5_000,
             "迁移恢复后必须回到同一在途运输状态");
+    }
+
+    /// <summary>
+    /// P1 回归样本：带真实 v1 哈希（schema4、无任命段，见 Program.RealV1StateHash）的载荷
+    /// 迁移后必须通过 RealtimeSimulationRuntime.Restore 权威校验且 hash 一致。
+    /// 旧实现（迁移原样保留 v1 哈希字段）在此必然失败：当前运行时按 schema5 重算无法复现
+    /// schema4 哈希（已实证 HASHES DIFFER=True），因此 Restore 会抛"canonical state hash 校验失败"。
+    /// </summary>
+    private static void CodecMigratesRealV1HashSampleAndRestoresSameWorld()
+    {
+        // 夹具世界必须与 Program.RealV1StateHash 计算时完全一致（见常量出处注释）。
+        var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
+        Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "v1-real-fixture", 5_000)).Queued,
+            "真实 v1 样本命令应该进入收件箱");
+        runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        var snapshot = runtime.CaptureSnapshot();
+        var fixture = Program.BuildRealV1Fixture(snapshot, "MSNAP"u8.ToArray(), snapshot.StateHash, snapshot.PayloadChecksum);
+
+        // 夹具前提：载荷携带的 StateHash 是 schema4 旧哈希，当前 hasher 无法复现（非自证式样本）。
+        var migratedSnapshot = SnapshotCodec.Deserialize(SnapshotCodec.MigrateV1ToV2(fixture));
+        Program.Require(!StringComparer.Ordinal.Equals(migratedSnapshot.StateHash, Program.RealV1StateHash),
+            "迁移必须 re-seal：重新计算的 StateHash 不能再是 v1 时代哈希");
+        Program.Require(StringComparer.Ordinal.Equals(migratedSnapshot.StateHash, runtime.StateHash),
+            "re-seal 后 StateHash 必须等于当前 hasher 对同一世界的计算结果");
+
+        // 权威恢复必须成功且 hash 一致（保留旧哈希的旧实现在这里失败——P1 回归点）。
+        var restored = RealtimeSimulationRuntime.Restore(migratedSnapshot);
+        Program.Require(restored.StateHash == runtime.StateHash,
+            "真实 v1 哈希样本迁移后，权威恢复必须成功且 canonical hash 与原始世界一致");
+        Program.Require(restored.ReadModel.WorldVersion == runtime.ReadModel.WorldVersion &&
+                        restored.ReadModel.GameTime == runtime.ReadModel.GameTime,
+            "真实 v1 哈希样本迁移恢复后 WorldVersion/GameTime 必须一致");
+        Program.Require(restored.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
+            "真实 v1 哈希样本迁移恢复后必须回到同一在途运输状态");
     }
 
     /// <summary>迁移失败 fail-closed：损坏/截断/未知版本的 v1 载荷必须抛异常，绝不返回半迁移结果。</summary>
