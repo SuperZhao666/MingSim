@@ -1,0 +1,788 @@
+{
+  "schema_version": "0.1",
+  "research_only": true,
+  "snapshot_scope": {
+    "scenario": "1629宁远急饷垂直切片",
+    "primary_snapshot": "1629-01-01",
+    "research_window": "天启六年至崇祯二年（1626—1629），必要时延伸至崇祯二年六月以后用于记录状态切换",
+    "date_policy": "保留史料年号、月份和事件顺序；未完成历法逐日换算，不把月名强行换成公历日。"
+  },
+  "sources": [
+    {
+      "id": "SRC-CTEXT-MSBY-1629",
+      "source_type": "primary_transcription",
+      "url": "https://ctext.org/wiki.pl?if=gb&chapter=867360&remap=gb",
+      "bibliography": "《明史纪事本末补遗》卷四《毛帅东江》、卷五《锦宁战守》；中国哲学书电子化计划网页转录本。",
+      "locator": "页面分节《毛帅东江》（卷四）《锦宁战守》（卷五）；崇祯二年三月、五月、六月条；页面检索词“宁远”“饷”。",
+      "short_quote_or_locator": "“设东江饷司于甯远”“令东江自觉华岛转饷”“时诣登州请饷”。",
+      "accessed_at": "2026-08-14",
+      "access_condition": "网页可访问；页面自称依据影印本 OCR，明确提示为初稿，异体字和 OCR 错字需以卷次/上下文复核。",
+      "license_or_citation_ruling": "只作短引和定位；按页面要求引用时保留原页链接；不复制整页、不把 OCR 转录当作无误校勘本。",
+      "notes": "同一页面还含天启年间及崇祯后续条目，所有断言必须标出原始年号和适用范围。"
+    },
+    {
+      "id": "SRC-CTEXT-MINGSHI-PEOPLE",
+      "source_type": "official_history_transcription",
+      "url": "https://ctext.org/wiki.pl?if=gb&chapter=88096&remap=gb",
+      "bibliography": "（清）张廷玉等，《明史》列传第一百四十七，收杨镐、熊廷弼、王化贞、袁崇焕、毛文龙等传；中国哲学书电子化计划网页转录本。",
+      "locator": "《明史》列传第一百四十七；袁崇焕、毛文龙传；相关段落含宁远、东江、饷司和崇祯二年事件。",
+      "short_quote_or_locator": "“以兵部尚书兼副都御史督师蓟辽登津”“宁远至山海一线可通转输易足”。",
+      "accessed_at": "2026-08-14",
+      "access_condition": "网页可访问；页面说明文本经字符识别并与底本关联，适合定位和短引，仍需防 OCR 误字。",
+      "license_or_citation_ruling": "只作短引、书目和卷次定位；不复制整传；遵守页面引用链接要求。",
+      "notes": "官修史书成书较晚，人物传记用于核对任职和事件叙述，不自动等于当日完整档案。"
+    },
+    {
+      "id": "SRC-CTEXT-MINGSHI-SUN",
+      "source_type": "official_history_transcription",
+      "url": "https://ctext.org/wiki.pl?if=gb&chapter=212294&remap=gb",
+      "bibliography": "（清）张廷玉等，《明史》列传第一百三十八《孙承宗传》；中国哲学书电子化计划网页转录本。",
+      "locator": "孙承宗传：天启年间督师关外、宁远军储与关宁部署；崇祯二年十月奉召守通州段。",
+      "short_quote_or_locator": "“请帑金八十万以行”“赞画善继、则古治军储”“崇祯二年十月……兼兵部尚书守通州”。",
+      "accessed_at": "2026-08-14",
+      "access_condition": "网页可访问；字符识别转录，使用时保留卷/传定位和年代边界。",
+      "license_or_citation_ruling": "只作短引、书目和定位；不复制整传；不将天启年间任事回填为崇祯二年正月现任。",
+      "notes": "用于说明制度和前后任事关系；1629-01-01 是否仍在任另列 OPEN。"
+    },
+    {
+      "id": "SRC-CTEXT-MINGSHI-OFFICIAL",
+      "source_type": "official_history_institutional_transcription",
+      "url": "https://ctext.org/wiki.pl?if=gb&chapter=739638&remap=gb",
+      "bibliography": "（清）张廷玉等，《明史》志第四十八《职官一》；中国哲学书电子化计划网页转录本。",
+      "locator": "户部条、十三司分掌条、四科条、总督仓场条；含边镇粮饷、起运、军储出纳和督辽饷设置说明。",
+      "short_quote_or_locator": "“边镇粮饷”“度支，主会计……起运”“仓科，主漕运、军储出纳料粮”。",
+      "accessed_at": "2026-08-14",
+      "access_condition": "网页可访问；字符识别转录，官制条文是制度层概述，不等于每一笔 1629 实际执行记录。",
+      "license_or_citation_ruling": "只作短引、书目和定位；不复制整志；制度 FACT 与个案执行分开记录。",
+      "notes": "条目明确记载崇祯间有督辽饷等差遣，但没有给出本切片每一时点的具体承办人。"
+    },
+    {
+      "id": "SRC-CTEXT-MINGSHI-FINANCE",
+      "source_type": "official_history_finance_transcription",
+      "url": "https://ctext.org/wiki.pl?if=gb&chapter=544252&remap=gb",
+      "bibliography": "（清）张廷玉等，《明史》志第五十三《食货一》；中国哲学书电子化计划网页转录本。",
+      "locator": "志53《食货一》户口、田制、屯田条；漕运仓储属志55《食货三》、俸饷会计属志58《食货六》；本页仅作制度背景核对，不载宁远饷运数量。",
+      "short_quote_or_locator": "与户部制度条交叉核对财政、起运和仓储语境；本账本不摘录长段。",
+      "accessed_at": "2026-08-14",
+      "access_condition": "网页可访问；字符识别转录，作为制度背景和冲突检查来源。",
+      "license_or_citation_ruling": "只作短引、书目和定位；不复制整志；具体数量仍须另找同时期奏疏或档案。",
+      "notes": "本轮只用作制度背景，不用它单独证明宁远某日库存或运抵数量。"
+    },
+    {
+      "id": "SRC-CTEXT-MINGSHI-MILITARY",
+      "source_type": "official_history_institutional_transcription",
+      "url": "https://ctext.org/wiki.pl?if=gb&chapter=942453&remap=gb",
+      "bibliography": "（清）张廷玉等，《明史》志第六十五《兵一》；中国哲学书电子化计划网页转录本。",
+      "locator": "兵部总述和京营、征调相关条目；本账本保留此页作排除核对，不用它证明“徵调隶于兵部”。",
+      "short_quote_or_locator": "本账本不使用此页证明“徵调隶于兵部”。",
+      "accessed_at": "2026-08-14",
+      "access_condition": "网页可访问；字符识别转录，条文为制度概述，不替代1629个案文书。",
+      "license_or_citation_ruling": "只作来源排除记录；不把本页没有核实到的句子挂作证据，不复制整志。",
+      "notes": "CLAIM-BINGBU-DUTIES 改引《明史·职官一》实际页面；本来源不再作为该 claim 的 source_id。"
+    }
+  ],
+  "claims": [
+    {
+      "id": "CLAIM-EMPEROR-ORDERS",
+      "status": "FACT",
+      "statement": "相关史料以“诏”“命”“上从之”“下部议”等形式直接记录皇帝对督师任命、东江饷司方案、军饷和军事部署的确认或转交议覆。",
+      "valid_from": "崇祯元年至崇祯二年",
+      "valid_to": "崇祯二年十二月",
+      "date_original": "崇祯元年、崇祯二年相关条",
+      "date_precision": "reign_year_and_event_order",
+      "scope": "明廷中枢；任命、诏令、部议和奖赏层面",
+      "source_ids": ["SRC-CTEXT-MSBY-1629", "SRC-CTEXT-MINGSHI-PEOPLE"],
+      "source_locator": "《明史纪事本末补遗》崇祯元年至二年条；《明史》列传第一百四十七袁崇焕传。",
+      "short_quote": "“上从之”；“命……督师”。",
+      "evidence_note": "来源支持批准和下令这一层，不支持皇帝亲自筹集、起运或验收每批军饷。",
+      "game_admission": "research_only; 可供后续文书权限研究参考，不得直接写入游戏角色能力数值。"
+    },
+    {
+      "id": "CLAIM-YUAN-APPOINTMENT-FEB",
+      "status": "FACT",
+      "statement": "《明史纪事本末补遗》记崇祯元年二月罢督师王之臣，命袁崇焕以兵部尚书兼副都御史督师蓟辽登津，移驻关门。",
+      "valid_from": "崇祯元年二月",
+      "valid_to": "崇祯元年二月",
+      "date_original": "崇祯元年二月",
+      "date_precision": "reign_month",
+      "scope": "蓟辽登津军务与关门驻地",
+      "source_ids": ["SRC-CTEXT-MSBY-1629"],
+      "source_locator": "《明史纪事本末补遗》卷五《锦宁战守》崇祯元年二月条。",
+      "short_quote": "“命𡊮崇焕以兵部尚书𠔥副都御史督师蓟辽登津移驻闗门”。",
+      "evidence_note": "这是该来源所载的二月任命日期；与《明史》列传所载四月日期并列保存，不任选其一作为唯一日期。",
+      "game_admission": "research_only; 可供任命与督师差遣时间研究，不写忠诚、能力或权限数值。"
+    },
+    {
+      "id": "CLAIM-YUAN-APPOINTMENT-APR",
+      "status": "FACT",
+      "statement": "《明史》列传第一百四十七记崇祯元年四月命袁崇焕以兵部尚书兼右副都御史，督师蓟辽、兼督登莱天津军务。",
+      "valid_from": "崇祯元年四月",
+      "valid_to": "崇祯元年四月",
+      "date_original": "崇祯元年四月",
+      "date_precision": "reign_month",
+      "scope": "蓟辽、登莱、天津军务",
+      "source_ids": ["SRC-CTEXT-MINGSHI-PEOPLE"],
+      "source_locator": "《明史》列传第一百四十七袁崇焕传，崇祯元年四月段。",
+      "short_quote": "“崇祯元年四月，命以兵部尚书兼右副都御史，督师蓟辽、兼督登莱、天津军务”。",
+      "evidence_note": "这是该来源所载的四月任命日期；与《明史纪事本末补遗》所载二月日期并列保存。该传还记载户部转军饷、兵部调兵选将，但未闭合每批饷运执行。",
+      "game_admission": "research_only; 可供任命与督师差遣时间研究，不写忠诚、能力或权限数值。"
+    },
+    {
+      "id": "CLAIM-YUAN-DUSHI",
+      "status": "OPEN",
+      "statement": "现有两种来源分别把袁崇焕的崇祯元年任命记为二月和四月；任命内容均涉及兵部尚书、督师及蓟辽/登津军务，但不能任选一月作为唯一日期。",
+      "valid_from": "崇祯元年二月至四月",
+      "valid_to": "崇祯二年十二月朔",
+      "date_original": "《明史纪事本末补遗》记二月；《明史》列传记四月；另有崇祯二年十一月入援、十二月下狱",
+      "date_precision": "source_conflict_and_later_events",
+      "scope": "蓟、辽、登、津军务与山海关驻地",
+      "source_ids": ["SRC-CTEXT-MSBY-1629", "SRC-CTEXT-MINGSHI-PEOPLE"],
+      "basis_claim_ids": ["CLAIM-YUAN-APPOINTMENT-FEB", "CLAIM-YUAN-APPOINTMENT-APR", "CLAIM-YUAN-RELIEF-NOV", "CLAIM-YUAN-IMPRISONED-DEC"],
+      "source_locator": "日期冲突见 CLAIM-YUAN-APPOINTMENT-FEB 与 CLAIM-YUAN-APPOINTMENT-APR；后续事件见 CLAIM-YUAN-RELIEF-NOV、CLAIM-YUAN-IMPRISONED-DEC。",
+      "short_quote": "无；任命月份冲突见来源分别记录的 FACT。",
+      "evidence_note": "本条只记录来源冲突和后续时间缺口；不把任命错误地截断在崇祯二年六月，也不直接证明他能独立批准中央户部预算或亲自验收仓粮。",
+      "game_admission": "research_only; 可供后续人物、督催和文书关系参考；禁止写忠诚、能力、腐败等数值。"
+    },
+    {
+      "id": "CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE",
+      "status": "FACT",
+      "statement": "崇祯二年三月，史料记袁崇焕奏设东江饷司于宁远，并令东江自觉华岛转饷。",
+      "valid_from": "崇祯二年三月",
+      "valid_to": "崇祯二年三月",
+      "date_original": "崇祯二年春三月",
+      "date_precision": "reign_month",
+      "scope": "宁远、觉华岛、东江饷运方案",
+      "source_ids": ["SRC-CTEXT-MSBY-1629"],
+      "source_locator": "《明史纪事本末补遗》卷四《毛帅东江》崇祯二年三月条。",
+      "short_quote": "“设东江饷司于甯远，令东江自觉华岛转饷”。",
+      "evidence_note": "来源证明“曾奏议/曾下令”的文书事实，不足以证明方案已持续执行、每日运力或实际到粮。",
+      "game_admission": "research_only; 可供路线节点和文书提案参考；不能作为已完成运输事实。"
+    },
+    {
+      "id": "CLAIM-MAO-REQUESTED-GRAIN",
+      "status": "FACT",
+      "statement": "毛文龙作为平辽将军/东江军政主将，在崇祯二年五月曾赴登州请饷；其请饷行为与东江海岛军政网络有关，但不等于他有中央预算批准权。",
+      "valid_from": "崇祯二年五月",
+      "valid_to": "崇祯二年五月",
+      "date_original": "崇祯二年五月",
+      "date_precision": "reign_month",
+      "scope": "东江镇、登州、登莱海防关系",
+      "source_ids": ["SRC-CTEXT-MSBY-1629"],
+      "source_locator": "《明史纪事本末补遗》卷四《毛帅东江》崇祯二年五月条。",
+      "short_quote": "“时诣登州请饷”。",
+      "evidence_note": "直接支持请饷和移动到登州这一事件；未闭合请饷后的批准、拨付、装船、接收链。",
+      "game_admission": "research_only; 可供“提出需求”关系参考；不得写成中央拨款或实际到账。"
+    },
+    {
+      "id": "CLAIM-YUAN-RELIEF-NOV",
+      "status": "FACT",
+      "statement": "崇祯二年十一月，袁崇焕自宁远趋山海关，闻警急趋榛子岭并调援。",
+      "valid_from": "崇祯二年十一月",
+      "valid_to": "崇祯二年十一月",
+      "date_original": "崇祯二年冬十一月壬午朔至相关入援条",
+      "date_precision": "reign_month_and_event_order",
+      "scope": "宁远、山海关、榛子岭及京畿入援",
+      "source_ids": ["SRC-CTEXT-MSBY-1629"],
+      "source_locator": "《明史纪事本末补遗》卷六《东兵入口》崇祯二年冬十一月条。",
+      "short_quote": "“督师𡊮崇焕自甯远趋山海闗，闻警急趋榛子岭调援”。",
+      "evidence_note": "该事件证明袁崇焕在崇祯二年十一月仍以督师身份入援，不能把其任期截断在六月。",
+      "game_admission": "research_only; 仅供时间序列和文书关系研究，不写能力或永久职位数值。"
+    },
+    {
+      "id": "CLAIM-YUAN-IMPRISONED-DEC",
+      "status": "FACT",
+      "statement": "崇祯二年十二月朔，袁崇焕复被召至平台，因先前杀毛文龙及入援逗遛之问不能答，遂下锦衣狱。",
+      "valid_from": "崇祯二年十二月朔",
+      "valid_to": "崇祯二年十二月朔",
+      "date_original": "崇祯二年十二月朔",
+      "date_precision": "reign_day_in_source",
+      "scope": "平台召见、锦衣狱与督师任事终止问题",
+      "source_ids": ["SRC-CTEXT-MSBY-1629"],
+      "source_locator": "《明史纪事本末补遗》卷六《东兵入口》崇祯二年十二月朔条。",
+      "short_quote": "“十二月朔复召崇焕等于平台……遂下锦衣狱”。",
+      "evidence_note": "该事件确认十二月朔仍有召见和下狱记载；本账本不据此单独重建完整任期终点。",
+      "game_admission": "research_only; 仅供时间序列和文书关系研究，不写忠诚、能力或司法数值。"
+    },
+    {
+      "id": "CLAIM-NINGYUAN-REWARD-TAIQI-SIX",
+      "status": "FACT",
+      "statement": "《明史纪事本末补遗》记天启六年宁远战守后，朝廷下敕奖厉将士并发帑十万犒赏；该事件属于天启六年，不能倒灌为崇祯二年或1629正月事实。",
+      "valid_from": "天启六年",
+      "valid_to": "天启六年",
+      "date_original": "天启六年春正月宁远战守后",
+      "date_precision": "reign_year_and_event_order",
+      "scope": "宁远战守后的朝廷奖赏",
+      "source_ids": ["SRC-CTEXT-MSBY-1629"],
+      "source_locator": "《明史纪事本末补遗》卷五《锦宁战守》天启六年春正月宁远战守条。",
+      "short_quote": "“乃下勅奖厉将士发帑十万犒赏焉”。",
+      "evidence_note": "直接证明天启六年战后奖赏事件；不证明崇祯二年宁远急饷的拨付、起运或验收。",
+      "game_admission": "research_only; 可供跨年份事件顺序参考，不得写入1629开局库存或玩法数值。"
+    },
+    {
+      "id": "CLAIM-MAO-DEATH-JUNE-MSBY",
+      "status": "FACT",
+      "statement": "《明史纪事本末补遗》记崇祯二年六月，督师袁崇焕诱杀平辽将军毛文龙于双岛；同书五月条仅记毛文龙赴登州请饷。",
+      "valid_from": "崇祯二年六月",
+      "valid_to": "崇祯二年六月",
+      "date_original": "崇祯二年六月",
+      "date_precision": "reign_month",
+      "scope": "双岛、袁崇焕与毛文龙",
+      "source_ids": ["SRC-CTEXT-MSBY-1629"],
+      "source_locator": "《明史纪事本末补遗》卷四《毛帅东江》崇祯二年六月条。",
+      "short_quote": "“六月督师袁崇焕诱杀平辽将军毛文龙于双岛”。",
+      "evidence_note": "这是该来源的日期记录（仅记月份，未记具体日）；与《明史》列传所载六月五日一致。",
+      "game_admission": "research_only; 仅记录来源日期，不写角色评价或数值。"
+    },
+    {
+      "id": "CLAIM-MAO-DEATH-JUNE-MINGSHI",
+      "status": "FACT",
+      "statement": "《明史》列传第一百四十七记袁崇焕于崇祯二年六月五日邀毛文龙观射并将其斩于帐前。",
+      "valid_from": "崇祯二年六月五日",
+      "valid_to": "崇祯二年六月五日",
+      "date_original": "崇祯二年六月五日",
+      "date_precision": "reign_day_in_source",
+      "scope": "双岛、袁崇焕与毛文龙",
+      "source_ids": ["SRC-CTEXT-MINGSHI-PEOPLE"],
+      "source_locator": "《明史》列传第一百四十七毛文龙传第70—71段，崇祯二年六月五日段。",
+      "short_quote": "“以六月五日邀文龙观将士射”……“遂取尚方剑斩之帐前”。",
+      "evidence_note": "这是该来源的日期记录（六月五日）；与《明史纪事本末补遗》所载六月一致，两来源无月份冲突。",
+      "game_admission": "research_only; 仅记录来源日期，不写角色评价或数值。"
+    },
+    {
+      "id": "CLAIM-MAO-STATUS-CHANGE",
+      "status": "OPEN",
+      "statement": "毛文龙于崇祯二年六月被杀后，东江镇接任者、印信交接、兵民统属转换和饷运停续的逐项文书链尚未闭合；后续组织状态不能回填到1629年初。",
+      "valid_from": "崇祯二年六月",
+      "valid_to": "崇祯二年六月以后",
+      "date_original": "崇祯二年六月（死亡事件后）",
+      "date_precision": "reign_month",
+      "scope": "毛文龙本人、东江镇、督师与宁远饷运关系",
+      "source_ids": ["SRC-CTEXT-MSBY-1629", "SRC-CTEXT-MINGSHI-PEOPLE"],
+      "basis_claim_ids": ["CLAIM-MAO-DEATH-JUNE-MSBY", "CLAIM-MAO-DEATH-JUNE-MINGSHI"],
+      "source_locator": "死亡日期见 CLAIM-MAO-DEATH-JUNE-MSBY 与 CLAIM-MAO-DEATH-JUNE-MINGSHI（两来源均记崇祯二年六月）。",
+      "short_quote": "无；接任与统属链尚未由文书闭合。",
+      "evidence_note": "死亡事件两来源一致记于崇祯二年六月；接任者、印信、兵民转隶和饷运停续的逐项文书仍需另证。",
+      "game_admission": "research_only; 只供时间状态切换研究，不写成角色评价或数值。"
+    },
+    {
+      "id": "CLAIM-SUN-LATER-1629-ASSIGNMENT",
+      "status": "FACT",
+      "statement": "《明史》孙承宗传记载崇祯二年十月召其以原官兼兵部尚书守通州，并参与京城内外守御；该任事不证明他在1629年正月仍任前线督师。",
+      "valid_from": "崇祯二年十月",
+      "valid_to": "崇祯二年十二月",
+      "date_original": "崇祯二年十月",
+      "date_precision": "reign_month",
+      "scope": "通州、京城守御、中枢军政",
+      "source_ids": ["SRC-CTEXT-MINGSHI-SUN"],
+      "source_locator": "《明史》列传第一百三十八《孙承宗传》崇祯二年十月段。",
+      "short_quote": "“以原官兼兵部尚书守通州”。",
+      "evidence_note": "是后段任事证据；与天启年间督师关外经历不能混作1629年初任期。",
+      "game_admission": "research_only; 可供后段中枢协调参考；正月快照任职保持 OPEN。"
+    },
+    {
+      "id": "CLAIM-GUANNING-GENERALS",
+      "status": "FACT",
+      "statement": "相关条目直接记满桂、祖大寿等为宁远—关门—锦宁防区的总兵/前锋总兵，并记其守城、援应或入援事件。",
+      "valid_from": "天启六年",
+      "valid_to": "崇祯二年十二月",
+      "date_original": "天启六年宁远战守条；崇祯元年至二年条",
+      "date_precision": "reign_year_and_event_order",
+      "scope": "宁远、山海关、锦州、前屯及其援应关系",
+      "source_ids": ["SRC-CTEXT-MSBY-1629", "SRC-CTEXT-MINGSHI-PEOPLE"],
+      "source_locator": "《明史纪事本末补遗》卷五《锦宁战守》天启六年及崇祯元年至二年条；《明史》列传第一百四十七相关人物段。",
+      "short_quote": "“门以东则满桂……门以南则祖大寿”；“前锋总兵祖大寿”。",
+      "evidence_note": "支持将领和防区协同关系；纸面兵额、当日库存、具体粮仓和接收官仍未闭合。",
+      "game_admission": "research_only; 可供人物与军镇关系参考；不写忠诚、能力或战斗力数值。"
+    },
+    {
+      "id": "CLAIM-HUBU-DUTIES",
+      "status": "FACT",
+      "statement": "《明史·职官志》将户部十三司与边镇粮饷相连，记度支掌会计、夏税秋粮、存留、起运等事项，记仓科掌漕运、军储出纳料粮。",
+      "valid_from": "明代制度概述",
+      "valid_to": "崇祯二年仍适用的制度背景",
+      "date_original": "《明史》职官志制度条",
+      "date_precision": "institutional_period",
+      "scope": "户部、十三清吏司、度支科、仓科、边镇粮饷",
+      "source_ids": ["SRC-CTEXT-MINGSHI-OFFICIAL"],
+      "source_locator": "《明史》志第四十八《职官一》户部、十三司、四科条。",
+      "short_quote": "“边镇粮饷”；“起运”；“军储出纳料粮”。",
+      "evidence_note": "支持法定职责层，不支持某位户部官员在1629某日实际筹得或发出某数量。",
+      "game_admission": "research_only; 可供机构权限边界参考；不得直接变成游戏数值或自动拨款。"
+    },
+    {
+      "id": "CLAIM-HUBU-DULIAO-XIANG",
+      "status": "FACT",
+      "statement": "《明史·职官志》记载万历四十七年增设督饷侍郎，且记崇祯间有督辽饷、寇饷、宣大饷等差遣；本轮未闭合1629正月具体承办人。",
+      "valid_from": "崇祯元年至崇祯二年制度背景",
+      "valid_to": "崇祯二年",
+      "date_original": "《明史》职官志“崇祯间”条",
+      "date_precision": "reign_period",
+      "scope": "户部专项督饷体系、辽饷",
+      "source_ids": ["SRC-CTEXT-MINGSHI-OFFICIAL"],
+      "source_locator": "《明史》志第四十八《职官一》总督仓场条。",
+      "short_quote": "“崇祯间，有督辽饷、寇饷、宣大饷”。",
+      "evidence_note": "职名和制度存在是 FACT；当时姓名、委任文书、与袁崇焕的具体上下级关系是 OPEN。",
+      "game_admission": "research_only; 可供专项督催职位候选参考；禁止把空缺人名或权限写死。"
+    },
+    {
+      "id": "CLAIM-BINGBU-DUTIES",
+      "status": "FACT",
+      "statement": "《明史·职官一》直接记载“徵调隶于兵部”；《明史纪事本末补遗》另记兵部移文、奏议等个案语境。兵部征调职责不替代户部的财粮起运职责。",
+      "valid_from": "明代制度概述",
+      "valid_to": "崇祯二年仍适用的制度背景",
+      "date_original": "《明史》志第四十八《职官一》制度总述；《明史纪事本末补遗》个案条",
+      "date_precision": "institutional_period",
+      "scope": "兵部、职方系统、征调和军务文书",
+      "source_ids": ["SRC-CTEXT-MINGSHI-OFFICIAL", "SRC-CTEXT-MSBY-1629"],
+      "source_locator": "《明史》志第四十八《职官一》总述第1条（“分大都督府为五，而徵调隶于兵部”）；《明史纪事本末补遗》卷四《毛帅东江》天启元年条及崇祯二年五月相关奏议条。",
+      "short_quote": "“而徵调隶于兵部”；“命兵部移文”；“奏入下部议之”。",
+      "evidence_note": "制度边界直接可证；具体由哪一司承办宁远急饷的起运文书仍 OPEN。",
+      "game_admission": "research_only; 可供军令/征调权限参考；不能从制度条文推导某批粮已出发。"
+    },
+    {
+      "id": "CLAIM-NINGYUAN-INTERNAL-ACCOUNTING",
+      "status": "FACT",
+      "statement": "《明史》袁崇焕传记载宁远守军内部通判金启倧“核兵马钱粮”、督城工并处理军民诉讼；该记载不闭合实际收粮验收官或仓库签收链。",
+      "valid_from": "天启六年至崇祯前后制度沿用背景",
+      "valid_to": "未能直接延伸至崇祯二年正月",
+      "date_original": "宁远守城相关段，原文未给本账本所需的1629正月任期",
+      "date_precision": "event_context_not_snapshot_exact",
+      "scope": "宁远卫、前线军镇、通判及军需核账",
+      "source_ids": ["SRC-CTEXT-MINGSHI-PEOPLE"],
+      "source_locator": "《明史》列传第一百四十七袁崇焕传，金启倧小传段。",
+      "short_quote": "“核兵马钱粮，督城工”。",
+      "evidence_note": "支持前线核账职责；收货、过秤、入仓、验收和对外回报的具体职位需找同时期档案。",
+      "game_admission": "research_only; 可供接收/核账角色候选参考；不得直接生成验收成功。"
+    },
+    {
+      "id": "CLAIM-DONGJIANG-DENGLAI-LINK",
+      "status": "INFERENCE",
+      "statement": "《毛帅东江》分别记载崇祯二年三月由觉华岛转饷的宁远饷司方案，以及更早天启二年“登莱接聫旅顺宻迩朝鲜”的海上军务叙述；据此只能提出东江—登莱—旅顺关系可能延续的研究假说，不能把天启二年的句子作为1629 FACT。",
+      "valid_from": "天启二年至崇祯二年三月",
+      "valid_to": "崇祯二年三月",
+      "date_original": "天启二年相关条；崇祯二年三月条",
+      "date_precision": "cross_period_inference",
+      "scope": "东江镇、登莱海防、觉华岛、登州和海上联络",
+      "source_ids": ["SRC-CTEXT-MSBY-1629"],
+      "basis_claim_ids": ["CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE", "CLAIM-DONGLAI-LIAODONG-NETWORK-TAIQI-TWO"],
+      "source_locator": "《明史纪事本末补遗》卷四《毛帅东江》天启二年相关条、崇祯二年三月条。",
+      "short_quote": "“自觉华岛转饷”；天启二年原文“登莱接聫旅顺宻迩朝鲜”。",
+      "evidence_note": "崇祯二年三月方案是直接 FACT；天启二年海上联系与1629的延续未被同一来源逐年证明，因此本条为 INFERENCE，固定航线、稳定控制面和具体运力仍 OPEN。",
+      "game_admission": "research_only; 可供跨年份关系假说参考，不得写入1629固定路线、范围或运力。"
+    },
+    {
+      "id": "CLAIM-DONGLAI-LIAODONG-NETWORK-TAIQI-TWO",
+      "status": "FACT",
+      "statement": "《明史纪事本末补遗》在天启二年毛文龙相关奏议中记“登莱接聫旅顺宻迩朝鲜”，这是天启二年的原事件，不是1629年正月或崇祯二年三月至六月的事实。",
+      "valid_from": "天启二年",
+      "valid_to": "天启二年",
+      "date_original": "天启二年夏五月及其后相关议奏段",
+      "date_precision": "reign_year_and_event_order",
+      "scope": "登莱、旅顺、朝鲜与东江海上军务叙述",
+      "source_ids": ["SRC-CTEXT-MSBY-1629"],
+      "source_locator": "《明史纪事本末补遗》卷四《毛帅东江》天启二年夏五月授毛文龙总兵及相关奏议段。",
+      "short_quote": "“登莱接聫旅顺宻迩朝鲜”。",
+      "evidence_note": "原文日期属于天启二年；本条只保留原事件日期，不证明该联系在1629仍以同样机构、路线或运力延续。",
+      "game_admission": "research_only; 可供历史时间序列参考，禁止作为1629固定关系或地图依据。"
+    },
+    {
+      "id": "INFERENCE-RESPONSIBILITY-CHAIN",
+      "status": "INFERENCE",
+      "statement": "基于现有 FACT，最小可用的研究责任链是：前线将领/督师提出需求，皇帝批准或命部议，户部及督辽饷体系承担制度上的财粮与起运职责，兵部负责征调和军务文书，宁远前线存在核账职位线索；具体接收、保管和各环节文书接缝仍需逐件补证。",
+      "valid_from": "1629研究切片",
+      "valid_to": "1629研究切片",
+      "date_original": "由本账本 FACT 归纳",
+      "date_precision": "research_inference",
+      "scope": "提出、批准、筹集、起运、督催、接收/验收全链条",
+      "source_ids": ["SRC-CTEXT-MSBY-1629", "SRC-CTEXT-MINGSHI-PEOPLE", "SRC-CTEXT-MINGSHI-OFFICIAL"],
+      "basis_claim_ids": ["CLAIM-EMPEROR-ORDERS", "CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE", "CLAIM-HUBU-DUTIES", "CLAIM-HUBU-DULIAO-XIANG", "CLAIM-BINGBU-DUTIES", "CLAIM-NINGYUAN-INTERNAL-ACCOUNTING"],
+      "source_locator": "对应 FACT 的来源定位见各 claim；本条不新增史料原话。",
+      "short_quote": "不作为史料原话；是可替换的研究归纳。",
+      "evidence_note": "只能作为后续人物/机构研究的最小假说，不能直接当作已实现的游戏权限。",
+      "game_admission": "research_only; 可供下一阶段设计讨论，不得直接写入 Simulation。"
+    },
+    {
+      "id": "OPEN-1629-JAN-CURRENT-OFFICERS",
+      "status": "OPEN",
+      "statement": "1629-01-01快照下，户部尚书、督辽饷承办人、兵部具体司官、宁远本地收粮/验收官的姓名、任期和当天文书链尚未全部闭合。",
+      "valid_from": "1629-01-01",
+      "valid_to": "1629-01-01",
+      "date_original": "研究问题",
+      "date_precision": "snapshot_open",
+      "scope": "北京中枢、宁远和关宁军镇",
+      "source_ids": ["SRC-CTEXT-MINGSHI-OFFICIAL", "SRC-CTEXT-MSBY-1629"],
+      "source_locator": "制度志只闭合职位类别；现有事件条未给出完整日点名册和接收文书。",
+      "short_quote": "无；保持 OPEN。",
+      "evidence_note": "不得用后世人物传记或现代机构名册补洞。",
+      "game_admission": "research_only; 禁止写入游戏开局人物/权限定值。"
+    },
+    {
+      "id": "OPEN-RECEIPT-ACCEPTANCE",
+      "status": "OPEN",
+      "statement": "谁在宁远对军饷进行物理接收、清点、验收、入仓和向上回报，现有来源只支持前线核账职位的部分线索，尚不能确认完整职责和授权边界。",
+      "valid_from": "1629-01-01",
+      "valid_to": "1629-12-31",
+      "date_original": "研究问题",
+      "date_precision": "year_open",
+      "scope": "宁远卫、关宁军镇、前线仓储",
+      "source_ids": ["SRC-CTEXT-MINGSHI-PEOPLE"],
+      "basis_claim_ids": ["CLAIM-NINGYUAN-INTERNAL-ACCOUNTING"],
+      "source_locator": "《明史》袁崇焕传仅见“核兵马钱粮、督城工”，未给出本切片完整收货验收链。",
+      "short_quote": "无；保持 OPEN。",
+      "evidence_note": "不能把“核账”扩大解释为“物理验收”，也不能把前线将领自动视作仓官。",
+      "game_admission": "research_only; 禁止在玩法中自动判定入库或验收成功。"
+    },
+    {
+      "id": "OPEN-ROUTE-DISPATCH",
+      "status": "OPEN",
+      "statement": "北京/通州至山海关、宁远以及觉华岛/登州方向的逐段起运文书、承运主体、路线几何、时长、运力和损耗尚未闭合。",
+      "valid_from": "1629-01-01",
+      "valid_to": "1629-12-31",
+      "date_original": "研究问题；不以地图文件补洞",
+      "date_precision": "year_open",
+      "scope": "陆路和海路饷运",
+      "source_ids": ["SRC-CTEXT-MSBY-1629", "SRC-CTEXT-MINGSHI-OFFICIAL"],
+      "basis_claim_ids": ["CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE", "CLAIM-DONGJIANG-DENGLAI-LINK", "CLAIM-HUBU-DUTIES"],
+      "source_locator": "现有来源只证明“起运/转饷/请饷”语境和关系，不提供完整逐段运输记录。",
+      "short_quote": "无；保持 OPEN。",
+      "evidence_note": "不使用现代行政区、地图边界或设计路线作为史实证据。",
+      "game_admission": "research_only; 禁止写入精确路线、容量、时间或损耗。"
+    },
+    {
+      "id": "OPEN-MONEY-GRAIN-AMOUNTS",
+      "status": "OPEN",
+      "statement": "宁远急饷的可核纸面数量、币制、粮制、名义拨付与实收数量、欠饷和时间换算仍需同时期奏疏/档案逐笔闭合。",
+      "valid_from": "1629-01-01",
+      "valid_to": "1629-12-31",
+      "date_original": "研究问题",
+      "date_precision": "year_open",
+      "scope": "中央拨款、军镇军粮和东江饷运",
+      "source_ids": ["SRC-CTEXT-MSBY-1629", "SRC-CTEXT-MINGSHI-FINANCE"],
+      "source_locator": "现有短引不作为本切片数量真源；制度志也不提供宁远当日实收数。",
+      "short_quote": "无；保持 OPEN。",
+      "evidence_note": "禁止把其他年份或纸面总额直接写成1629开局库存、日耗或运输容量。",
+      "game_admission": "research_only; 目前禁止写入任何玩法数值。"
+    }
+  ],
+  "actors": [
+    {
+      "id": "ACTOR-ZHU-YOUJIAN",
+      "name": "朱由检",
+      "aliases": ["崇祯帝", "庄烈帝", "上"],
+      "snapshot_role": "皇帝；中枢批准、任命、诏令和下部议节点",
+      "date_scope": "崇祯元年至崇祯二年",
+      "claim_ids": ["CLAIM-EMPEROR-ORDERS"],
+      "relationship_ids": ["REL-EMPEROR-HUBU", "REL-EMPEROR-BINGBU", "REL-EMPEROR-YUAN"],
+      "admission": "FACT 仅支持正式身份和文书节点；不支持性格、忠诚、能力或腐败数值。"
+    },
+    {
+      "id": "ACTOR-YUAN-CHONGHUAN",
+      "name": "袁崇焕",
+      "aliases": ["袁元素", "督师袁崇焕"],
+      "snapshot_role": "兵部尚书兼右副都御史；督师蓟辽登津（差遣），驻关门；提出东江饷司方案",
+      "date_scope": "崇祯元年二月至四月的任命日期存在来源冲突；崇祯二年三月提出饷司方案，十一月仍见入援，十二月朔下狱",
+      "claim_ids": ["CLAIM-YUAN-APPOINTMENT-FEB", "CLAIM-YUAN-APPOINTMENT-APR", "CLAIM-YUAN-DUSHI", "CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE", "CLAIM-YUAN-RELIEF-NOV", "CLAIM-YUAN-IMPRISONED-DEC", "CLAIM-MAO-STATUS-CHANGE"],
+      "relationship_ids": ["REL-EMPEROR-YUAN", "REL-YUAN-HUBU", "REL-YUAN-BINGBU", "REL-YUAN-NINGYUAN", "REL-YUAN-MAO"],
+      "admission": "正式官衔与督师差遣可研究；预算批准、物理验收和实际运输执行不能由姓名自动推出。"
+    },
+    {
+      "id": "ACTOR-SUN-CHENGZONG",
+      "name": "孙承宗",
+      "aliases": ["孙稚绳"],
+      "snapshot_role": "天启年间关外督师经验；崇祯二年十月后以原官兼兵部尚书守通州的中枢军政候选",
+      "date_scope": "天启年间前线任事；崇祯二年十月至十二月中枢任事；1629-01-01任期 OPEN",
+      "claim_ids": ["CLAIM-SUN-LATER-1629-ASSIGNMENT"],
+      "relationship_ids": ["REL-SUN-GUANNING-HISTORY"],
+      "admission": "只能按时间段使用；不把天启年间权限自动移植到崇祯二年正月。"
+    },
+    {
+      "id": "ACTOR-MAO-WENLONG",
+      "name": "毛文龙",
+      "aliases": ["平辽将军", "东江总兵", "岛帅"],
+      "snapshot_role": "东江军政网络主将；崇祯二年五月赴登州请饷，六月被杀；后续接任与统属链保持 OPEN",
+      "date_scope": "天启元年至崇祯二年六月（被杀）；后续组织切换 OPEN",
+      "claim_ids": ["CLAIM-MAO-REQUESTED-GRAIN", "CLAIM-MAO-STATUS-CHANGE", "CLAIM-DONGJIANG-DENGLAI-LINK", "CLAIM-DONGLAI-LIAODONG-NETWORK-TAIQI-TWO"],
+      "relationship_ids": ["REL-MAO-HUBU", "REL-YUAN-MAO"],
+      "admission": "支持提出需求和东江关系；不支持中央批准、筹款、起运或验收权。"
+    },
+    {
+      "id": "ACTOR-MAN-GUI",
+      "name": "满桂",
+      "aliases": ["总兵满桂"],
+      "snapshot_role": "关宁防区总兵候选；史料记录其与宁远、山海关援应和入援相关",
+      "date_scope": "天启六年至崇祯二年",
+      "claim_ids": ["CLAIM-GUANNING-GENERALS"],
+      "relationship_ids": ["REL-MAN-NINGYUAN", "REL-MAN-ZU-GUANNING"],
+      "admission": "支持军镇守援关系；不支持其掌握中央财粮或仓储验收权。"
+    },
+    {
+      "id": "ACTOR-ZU-DASHOU",
+      "name": "祖大寿",
+      "aliases": ["前锋总兵", "祖总兵"],
+      "snapshot_role": "关宁防区前锋总兵候选；参与宁远、锦州及关门前线守援",
+      "date_scope": "天启六年至崇祯二年十二月",
+      "claim_ids": ["CLAIM-GUANNING-GENERALS"],
+      "relationship_ids": ["REL-ZU-NINGYUAN", "REL-MAN-ZU-GUANNING"],
+      "admission": "支持前线军务和守援关系；具体粮饷接收、核验和回报职责 OPEN。"
+    }
+  ],
+  "offices_or_institutions": [
+    {
+      "id": "OFFICE-EMPEROR-CENTRAL",
+      "name": "皇帝/中枢诏令节点",
+      "kind": "central_authority",
+      "formal_or_assignment": "formal",
+      "date_scope": "崇祯元年至崇祯二年",
+      "claim_ids": ["CLAIM-EMPEROR-ORDERS"],
+      "admission": "正式批准、任命和下令节点；不等于亲自筹粮、起运或验收。"
+    },
+    {
+      "id": "OFFICE-HUBU-GRAIN",
+      "name": "户部及其度支/仓科、边镇粮饷职责",
+      "kind": "ministry_and_suboffices",
+      "formal_or_assignment": "formal",
+      "date_scope": "明代制度背景至崇祯二年",
+      "claim_ids": ["CLAIM-HUBU-DUTIES"],
+      "admission": "制度上负责财粮会计、起运、漕运和军储出纳；具体承办人和每批执行 OPEN。"
+    },
+    {
+      "id": "OFFICE-DULIAO-XIANG",
+      "name": "督辽饷专项职位/差遣",
+      "kind": "special_assignment",
+      "formal_or_assignment": "assignment",
+      "date_scope": "崇祯间制度存在；1629具体承办人 OPEN",
+      "claim_ids": ["CLAIM-HUBU-DULIAO-XIANG"],
+      "admission": "可研究为督催、协调和专项饷务节点；不能虚构具体姓名或完整权限。"
+    },
+    {
+      "id": "OFFICE-BINGBU-ZHIFANG",
+      "name": "兵部/职方与征调军务文书体系",
+      "kind": "ministry_and_military_bureau",
+      "formal_or_assignment": "formal",
+      "date_scope": "明代制度背景至崇祯二年",
+      "claim_ids": ["CLAIM-BINGBU-DUTIES"],
+      "admission": "制度上负责征调和军务文书；不替代户部财粮起运，也不自动证明运输完成。"
+    },
+    {
+      "id": "OFFICE-JILIAO-DUSHI",
+      "name": "蓟辽登津督师/总督军政体系",
+      "kind": "regional_military_command",
+      "formal_or_assignment": "assignment",
+      "date_scope": "崇祯元年二月至四月任命日期冲突；崇祯二年三月方案、十一月入援、十二月下狱均有记载；人员交接 OPEN",
+      "claim_ids": ["CLAIM-YUAN-APPOINTMENT-FEB", "CLAIM-YUAN-APPOINTMENT-APR", "CLAIM-YUAN-DUSHI", "CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE", "CLAIM-YUAN-RELIEF-NOV", "CLAIM-YUAN-IMPRISONED-DEC"],
+      "admission": "是正式官衔叠加的军政差遣体系；可提出、协调和督催，但不能据此推导中央预算批准或前线验收。"
+    },
+    {
+      "id": "OFFICE-GUANNING-NINGYUAN",
+      "name": "关宁军镇/宁远卫前线机构",
+      "kind": "frontier_garrison_and_local_offices",
+      "formal_or_assignment": "formal_with_local_assignments",
+      "date_scope": "天启六年至崇祯二年；具体仓储官和任期 OPEN",
+      "claim_ids": ["CLAIM-GUANNING-GENERALS", "CLAIM-NINGYUAN-INTERNAL-ACCOUNTING"],
+      "admission": "支持守城、军镇协同和内部核账职位；接收、验收、入仓链尚未闭合。"
+    }
+  ],
+  "relationships": [
+    {
+      "id": "REL-EMPEROR-HUBU",
+      "from": "ACTOR-ZHU-YOUJIAN",
+      "to": "OFFICE-HUBU-GRAIN",
+      "type": "approve_or_order",
+      "status": "FACT",
+      "claim_ids": ["CLAIM-EMPEROR-ORDERS", "CLAIM-HUBU-DUTIES"],
+      "description": "皇帝通过诏令、命令和下部议节点让户部承担被批准的财粮/饷务事项；具体某批拨付仍 OPEN。"
+    },
+    {
+      "id": "REL-EMPEROR-BINGBU",
+      "from": "ACTOR-ZHU-YOUJIAN",
+      "to": "OFFICE-BINGBU-ZHIFANG",
+      "type": "approve_or_order",
+      "status": "FACT",
+      "claim_ids": ["CLAIM-EMPEROR-ORDERS", "CLAIM-BINGBU-DUTIES"],
+      "description": "皇帝对兵部任命、奏议和征调事项作最终中枢处理；具体文书链待补。"
+    },
+    {
+      "id": "REL-EMPEROR-YUAN",
+      "from": "ACTOR-ZHU-YOUJIAN",
+      "to": "ACTOR-YUAN-CHONGHUAN",
+      "type": "appoint_and_command",
+      "status": "FACT",
+      "claim_ids": ["CLAIM-EMPEROR-ORDERS", "CLAIM-YUAN-APPOINTMENT-FEB", "CLAIM-YUAN-APPOINTMENT-APR"],
+      "description": "皇帝任命并以诏令确认袁崇焕的督师军政差遣；任命不等于授予户部预算或仓储验收权。"
+    },
+    {
+      "id": "REL-YUAN-HUBU",
+      "from": "ACTOR-YUAN-CHONGHUAN",
+      "to": "OFFICE-HUBU-GRAIN",
+      "type": "propose_and_request_supply",
+      "status": "INFERENCE",
+      "claim_ids": ["CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE", "CLAIM-HUBU-DUTIES"],
+      "basis_claim_ids": ["CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE", "CLAIM-HUBU-DUTIES"],
+      "description": "袁崇焕提出宁远东江饷司/转饷方案，户部是制度上的财粮和起运机构；是否形成逐批执行命令需补证。"
+    },
+    {
+      "id": "REL-YUAN-BINGBU",
+      "from": "ACTOR-YUAN-CHONGHUAN",
+      "to": "OFFICE-BINGBU-ZHIFANG",
+      "type": "military_document_coordination",
+      "status": "INFERENCE",
+      "claim_ids": ["CLAIM-YUAN-APPOINTMENT-FEB", "CLAIM-YUAN-APPOINTMENT-APR", "CLAIM-BINGBU-DUTIES"],
+      "basis_claim_ids": ["CLAIM-YUAN-APPOINTMENT-FEB", "CLAIM-YUAN-APPOINTMENT-APR", "CLAIM-BINGBU-DUTIES"],
+      "description": "袁崇焕兼兵部尚书并以督师差遣处理边务；具体由兵部哪一司转发何种起运文书仍 OPEN。"
+    },
+    {
+      "id": "REL-YUAN-NINGYUAN",
+      "from": "ACTOR-YUAN-CHONGHUAN",
+      "to": "OFFICE-GUANNING-NINGYUAN",
+      "type": "frontier_command_and_proposal",
+      "status": "FACT",
+      "claim_ids": ["CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE"],
+      "description": "宁远是袁崇焕提出东江饷司方案的节点；前线核账和物理收货不可混为同一职责。"
+    },
+    {
+      "id": "REL-YUAN-MAO",
+      "from": "ACTOR-YUAN-CHONGHUAN",
+      "to": "ACTOR-MAO-WENLONG",
+      "type": "command_and_conflict_over_supply",
+      "status": "FACT",
+      "claim_ids": ["CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE", "CLAIM-MAO-REQUESTED-GRAIN", "CLAIM-MAO-DEATH-JUNE-MSBY", "CLAIM-MAO-DEATH-JUNE-MINGSHI"],
+      "description": "双方围绕东江饷司、转饷和请饷存在直接事件关系；毛文龙于崇祯二年六月被杀，后续接任与统属关系状态切换保持 OPEN。"
+    },
+    {
+      "id": "REL-MAO-HUBU",
+      "from": "ACTOR-MAO-WENLONG",
+      "to": "OFFICE-HUBU-GRAIN",
+      "type": "request_supply",
+      "status": "INFERENCE",
+      "claim_ids": ["CLAIM-MAO-REQUESTED-GRAIN", "CLAIM-HUBU-DUTIES"],
+      "basis_claim_ids": ["CLAIM-MAO-REQUESTED-GRAIN", "CLAIM-HUBU-DUTIES"],
+      "description": "毛文龙请饷；户部制度上承担财粮与起运职责，因此可作为“请饷—户部”研究关系，但批复和实付未闭合。"
+    },
+    {
+      "id": "REL-MAN-NINGYUAN",
+      "from": "ACTOR-MAN-GUI",
+      "to": "OFFICE-GUANNING-NINGYUAN",
+      "type": "garrison_and_reinforcement",
+      "status": "FACT",
+      "claim_ids": ["CLAIM-GUANNING-GENERALS"],
+      "description": "满桂与宁远/关门守援关系有史料支持；军饷接收权限没有史料支持。"
+    },
+    {
+      "id": "REL-ZU-NINGYUAN",
+      "from": "ACTOR-ZU-DASHOU",
+      "to": "OFFICE-GUANNING-NINGYUAN",
+      "type": "frontier_command_and_reinforcement",
+      "status": "FACT",
+      "claim_ids": ["CLAIM-GUANNING-GENERALS"],
+      "description": "祖大寿与宁远、锦宁前线守援关系有史料支持；具体收粮和验收职责 OPEN。"
+    },
+    {
+      "id": "REL-MAN-ZU-GUANNING",
+      "from": "ACTOR-MAN-GUI",
+      "to": "ACTOR-ZU-DASHOU",
+      "type": "mutual_frontier_support",
+      "status": "OPEN",
+      "claim_ids": ["CLAIM-GUANNING-GENERALS"],
+      "basis_claim_ids": ["CLAIM-GUANNING-GENERALS"],
+      "description": "现有来源分别记满桂、祖大寿及其防区位置，不能仅凭两条各自事实拼成二人直接互援关系；具体年度协同保持 OPEN。"
+    },
+    {
+      "id": "REL-SUN-GUANNING-HISTORY",
+      "from": "ACTOR-SUN-CHENGZONG",
+      "to": "OFFICE-GUANNING-NINGYUAN",
+      "type": "earlier_frontier_command_context",
+      "status": "OPEN",
+      "claim_ids": ["CLAIM-SUN-LATER-1629-ASSIGNMENT", "CLAIM-GUANNING-GENERALS"],
+      "basis_claim_ids": ["CLAIM-SUN-LATER-1629-ASSIGNMENT", "CLAIM-GUANNING-GENERALS"],
+      "description": "现有来源分别记孙承宗天启年间关外经历、崇祯二年十月守通州和关宁将领事实，不能拼成孙承宗与1629正月宁远机构的直接关系；保持 OPEN。"
+    }
+  ],
+  "authority_matrix": [
+    {
+      "action": "提出需求/方案",
+      "candidate_ids": ["ACTOR-YUAN-CHONGHUAN", "ACTOR-MAO-WENLONG"],
+      "status": "FACT",
+      "basis_claim_ids": ["CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE", "CLAIM-MAO-REQUESTED-GRAIN"],
+      "limit": "提出不等于批准、筹集或实际运抵。"
+    },
+    {
+      "action": "批准/下令进入部议或执行",
+      "candidate_ids": ["OFFICE-EMPEROR-CENTRAL"],
+      "status": "FACT",
+      "basis_claim_ids": ["CLAIM-EMPEROR-ORDERS"],
+      "limit": "史料未证明皇帝亲自办理后续会计、装运或验收。"
+    },
+    {
+      "action": "筹集/会计/拨付与起运",
+      "candidate_ids": ["OFFICE-HUBU-GRAIN", "OFFICE-DULIAO-XIANG"],
+      "status": "FACT",
+      "basis_claim_ids": ["CLAIM-HUBU-DUTIES", "CLAIM-HUBU-DULIAO-XIANG"],
+      "limit": "机构职责可证；1629具体承办人、批次、数额和实际拨付 OPEN。"
+    },
+    {
+      "action": "征调/军务文书协调",
+      "candidate_ids": ["OFFICE-BINGBU-ZHIFANG", "OFFICE-JILIAO-DUSHI"],
+      "status": "INFERENCE",
+      "basis_claim_ids": ["CLAIM-BINGBU-DUTIES", "CLAIM-YUAN-DUSHI"],
+      "limit": "具体司局、承办文书和与户部的逐件交接 OPEN。"
+    },
+    {
+      "action": "督催/要求接济",
+      "candidate_ids": ["ACTOR-YUAN-CHONGHUAN", "OFFICE-DULIAO-XIANG", "ACTOR-MAO-WENLONG"],
+      "status": "INFERENCE",
+      "basis_claim_ids": ["CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE", "CLAIM-MAO-REQUESTED-GRAIN", "CLAIM-HUBU-DULIAO-XIANG"],
+      "limit": "有提案和请饷事实；谁拥有可强制执行的督催权限仍需文书闭合。"
+    },
+    {
+      "action": "接收/清点/验收/入仓/回报",
+      "candidate_ids": ["OFFICE-GUANNING-NINGYUAN"],
+      "status": "OPEN",
+      "basis_claim_ids": ["CLAIM-NINGYUAN-INTERNAL-ACCOUNTING"],
+      "limit": "仅有前线核兵马钱粮的部分证据；物理接收、验收官和签收格式未知。"
+    }
+  ],
+  "open_questions": [
+    {
+      "id": "OPENQ-1629-JAN-NOMINAL-ROLL",
+      "question": "1629-01-01时户部尚书、督辽饷承办人、兵部具体司官和宁远本地军需官的在任名册是什么？",
+      "related_claim_ids": ["OPEN-1629-JAN-CURRENT-OFFICERS"]
+    },
+    {
+      "id": "OPENQ-RECEIPT-DOCUMENT",
+      "question": "宁远军饷从抵达节点到清点、验收、入仓和上报的正式文书链由谁签发和复核？",
+      "related_claim_ids": ["OPEN-RECEIPT-ACCEPTANCE", "CLAIM-NINGYUAN-INTERNAL-ACCOUNTING"]
+    },
+    {
+      "id": "OPENQ-TRANSPORT-CHAIN",
+      "question": "北京/通州、山海关、宁远、觉华岛和登州之间，1629具体批次的承运主体、中继、时长、损耗和接收港是什么？",
+      "related_claim_ids": ["OPEN-ROUTE-DISPATCH", "CLAIM-DONGJIANG-DENGLAI-LINK"]
+    },
+    {
+      "id": "OPENQ-DULIAO-INCUMBENT",
+      "question": "崇祯二年具体的督辽饷姓名、正式委任文书、与户部十三司及督师的上下级关系是什么？",
+      "related_claim_ids": ["CLAIM-HUBU-DULIAO-XIANG", "OPEN-1629-JAN-CURRENT-OFFICERS"]
+    },
+    {
+      "id": "OPENQ-MONEY-GRAIN-METROLOGY",
+      "question": "同时期奏疏或档案中的银、石、军粮和欠饷数额，如何标明币制、单位、名义值/实收值和历法日期？",
+      "related_claim_ids": ["OPEN-MONEY-GRAIN-AMOUNTS"]
+    }
+  ],
+  "admission_notes": {
+    "allowed_for_gameplay_reference": [
+      "人物与机构候选名单、时间范围和关系图谱",
+      "皇帝批准、户部财粮/起运、兵部征调/军务、督师提案协调、宁远前线核账的研究边界",
+      "崇祯二年三月至六月东江饷司/请饷事件作为时间化文书研究样例",
+      "FACT、INFERENCE、OPEN 三层状态标签和来源定位"
+    ],
+    "currently_forbidden_to_write_into_game": [
+      "任何忠诚、能力、腐败、性格或战斗力数值",
+      "1629-01-01具体官员名册、督辽饷承办人或宁远验收官，除非补齐同时期可访问来源",
+      "未经证实的批准、拨付、装运、到达、验收成功状态",
+      "精确路线、里程、时长、运力、损耗、库存、日耗和欠饷数值",
+      "用现代行政区、地图文件或其他年份数据补齐历史机构辖区",
+      "把督师、督辽饷等差遣写成无时间边界的永久官署"
+    ],
+    "scope_note": "本账本仅供研究，不是游戏已接受内容。"
+  }
+}
