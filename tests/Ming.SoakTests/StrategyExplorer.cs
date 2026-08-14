@@ -10,25 +10,28 @@ using MingSim.Simulation.Realtime;
 namespace MingSim.SoakTests;
 
 /// <summary>
-/// M5 三策略 90 日探索（doc 11 §9 质量门"至少三种有意义策略能通关/失败"的运行证据）：
-/// 陆运 / 海运 / 陆海并行 × 各 6 个固定种子 × 90 日，复用 Ningyuan1629InitialWorld 与
-/// SmokeTests 的 convoy 调度思路（首段发运 + 抵达中继 + 全程护卫），策略差异只在启用哪条补给链。
+/// M5 四策略 90 日探索（doc 11 §9 质量门"至少三种有意义策略能通关/失败"的运行证据）：
+/// 陆运 / 海运 / 陆海并行 / 并行+减耗 × 各 6 个固定种子 × 90 日，复用 Ningyuan1629InitialWorld 与
+/// SmokeTests 的 convoy 调度思路（首段发运 + 抵达中继 + 全程护卫），策略差异只在启用哪条补给链
+/// 与是否按纸面推演日历（§3.2）发布减耗令（M5 通关杠杆）。
 /// 调度是"贪心接力"：只要来源仓有粮、路线/目的仓可接纳就发下一批（确定性输入流，重放必一致）；
 /// 风险样本（第 12 日天气延误/第 24 日袭粮/第 30 日报告）仍由 ScheduleScenarioRiskSamples 提供。
 /// 输出每策略终局分档分布表（打印到 stdout，不写文档文件）。只做结构性断言：
-/// 全部种子都进入终局、三种策略至少产生两种不同分档（策略差异可观察）、重放确定性；
-/// 不钉死具体档位——分布本身是 M5 平衡验收的证据，具体档位由总控/独立审查结合本表裁决。
+/// 全部种子都进入终局、策略至少产生两种不同分档（策略差异可观察）、重放确定性、
+/// "并行+减耗"全部种子达到 BarelyMaintained 或更好（减耗令通关证据，不钉死具体档位）；
+/// 具体档位由总控/独立审查结合本表裁决。
 /// </summary>
 internal static class StrategyExplorer
 {
     private enum StrategyMode
     {
-        Land,   // 陆运：只走北京→通州→山海关→宁远
-        Sea,    // 海运：只走登州→觉华岛→宁远
-        Both,   // 陆海并行：两条链同时发运
+        Land,        // 陆运：只走北京→通州→山海关→宁远
+        Sea,         // 海运：只走登州→觉华岛→宁远
+        Both,        // 陆海并行：两条链同时发运
+        BothReduced, // 并行+减耗：两条链同时发运，第 21 日发布减耗令（纸面推演 §3.2 并行日历）
     }
 
-    /// <summary>固定 6 种子清单（DESIGN：可复现；同一编号在三策略间共享，风险样本相同，差异只来自策略）。</summary>
+    /// <summary>固定 6 种子清单（DESIGN：可复现；同一编号在四策略间共享，风险样本相同，差异只来自策略与减耗令）。</summary>
     private static readonly string[] Seeds =
     [
         "explore-1629-01", "explore-1629-02", "explore-1629-03",
@@ -48,9 +51,9 @@ internal static class StrategyExplorer
 
     internal static void RunAll()
     {
-        Console.WriteLine("== 三策略 90 日探索（陆运 / 海运 / 陆海并行 × 6 固定种子；M5 质量门运行证据）==");
+        Console.WriteLine("== 四策略 90 日探索（陆运 / 海运 / 陆海并行 / 并行+减耗 × 6 固定种子；M5 质量门运行证据）==");
         var results = new Dictionary<StrategyMode, List<RunResult>>();
-        foreach (var strategy in new[] { StrategyMode.Land, StrategyMode.Sea, StrategyMode.Both })
+        foreach (var strategy in new[] { StrategyMode.Land, StrategyMode.Sea, StrategyMode.Both, StrategyMode.BothReduced })
         {
             results[strategy] = [];
             foreach (var seed in Seeds)
@@ -63,11 +66,12 @@ internal static class StrategyExplorer
             }
         }
 
-        // 确定性抽查：同一（策略，种子）重放必须得到同一终局与 canonical hash。
-        var spot = RunSeed(StrategyMode.Both, Seeds[0]);
-        var spotReplay = RunSeed(StrategyMode.Both, Seeds[0]);
+        // 确定性抽查：同一（策略，种子）重放必须得到同一终局与 canonical hash；
+        // 用"并行+减耗"抽查，证明减耗令的接纳/生效/日耗变化全程重放确定。
+        var spot = RunSeed(StrategyMode.BothReduced, Seeds[0]);
+        var spotReplay = RunSeed(StrategyMode.BothReduced, Seeds[0]);
         Program.Require(spot.StateHash == spotReplay.StateHash && spot.Outcome == spotReplay.Outcome,
-            $"策略探索重放必须确定：{spot.StateHash} vs {spotReplay.StateHash}");
+            $"策略探索重放必须确定（含减耗令路径）：{spot.StateHash} vs {spotReplay.StateHash}");
 
         PrintDistributionTable(results);
 
@@ -83,7 +87,12 @@ internal static class StrategyExplorer
         // 陆海并行（当前唯一不硬失败的策略）全程不得触发自动暂停：与 AutoPauseAcceptance 互为印证。
         Program.Require(results[StrategyMode.Both].All(item => !item.PausedAtEnd),
             "陆海并行策略不应触发硬失败自动暂停（无硬失败推进不暂停）");
-        Console.WriteLine("  三策略探索器完成：终局分档分布表已打印（M5 质量门运行证据）。");
+        // M5 通关证据（契约验收）：并行+减耗策略（减耗令杠杆）全部种子达到 BarelyMaintained 或更好；
+        // 不钉死具体档位，但减耗令是纸面推演 §3.2 的 M5 通关杠杆，未达勉强维持即说明杠杆失效。
+        Program.Require(results[StrategyMode.BothReduced].All(item =>
+                item.Outcome is EndgameOutcome.BarelyMaintained or EndgameOutcome.Success or EndgameOutcome.Excellent),
+            $"并行+减耗策略全部种子必须达到 BarelyMaintained 或更好（通关证据），实际：{string.Join(",", results[StrategyMode.BothReduced].Select(item => item.Outcome.ToString()))}");
+        Console.WriteLine("  四策略探索器完成：终局分档分布表已打印（M5 质量门运行证据）。");
     }
 
     private static RunResult RunSeed(StrategyMode strategy, string seedId)
@@ -106,6 +115,18 @@ internal static class StrategyExplorer
             if (runtime.IsPaused)
             {
                 break;
+            }
+
+            // 并行+减耗：第 21 日起减耗（纸面推演 §3.2 需求日历）。在推进到第 21 日之前接纳减耗令，
+            // 使当天每日心跳按 240 石/日结算；预先计划（硬失败前发布）不扣大臣信任。
+            if (strategy == StrategyMode.BothReduced && day == 21)
+            {
+                EnqueueRationReductionDecree(runtime, seedId, start);
+                var enacted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+                Program.Require(enacted.Succeeded && enacted.CommandResults.Single().Accepted,
+                    $"{StrategyName(strategy)} {seedId} 第 21 日减耗令必须被接纳：{string.Join(";", enacted.CommandResults.SelectMany(item => item.Errors.Select(error => error.Code)))}");
+                Program.Require(runtime.ReadModel.Scenario.DailyGrainDemand == 240,
+                    $"{StrategyName(strategy)} {seedId} 第 21 日减耗令必须生效 240 石/日");
             }
 
             var result = runtime.AdvanceTo(new GameTime(start.Value.AddDays(day)));
@@ -251,8 +272,25 @@ internal static class StrategyExplorer
     {
         StrategyMode.Land => "陆运",
         StrategyMode.Sea => "海运",
+        StrategyMode.BothReduced => "并行+减耗",
         _ => "陆海并行",
     };
+
+    /// <summary>
+    /// 第 21 日发布减耗令（纸面推演 §3.2 并行方案日历）：承办人=督辽饷槽位（world.json 持 PlanLogistics 任意辖区）。
+    /// 期限设在 90 日窗口内，减耗令记录将在期限时进入 Expired 终态（sim 政令模型无"减耗完成"事件；
+    /// 权威减耗状态在 ScenarioState.RationReductionActive，不受政令记录终态影响），保证终局审计链完整。
+    /// </summary>
+    private static void EnqueueRationReductionDecree(RealtimeSimulationRuntime runtime, string seedId, GameTime start)
+    {
+        var model = runtime.ReadModel;
+        runtime.EnqueueCreateDecree(new CreateDecreeCommand(
+            $"{seedId}-ration-reduction", new CharacterId("zhu-youjian"), new DecreeId($"{seedId}-ration-reduction"),
+            "减耗令：前线日耗 300→240 石/日（纸面推演 §3.2）", new ProvinceId("ningyuan"), 100,
+            new CharacterId("duliaoxiang-slot"), new GameTime(start.Value.AddDays(30)),
+            "", "预先计划减耗", GameCapability.PlanLogistics, null,
+            null, model.GameTime.Value, model.WorldVersion, DecreeKind.RationReduction));
+    }
 
     /// <summary>种子 → 剧本世界变体：只有世界编号不同，其余与 Ningyuan1629InitialWorld.Load() 完全一致。</summary>
     private static WorldState CreateSeedWorld(string seedId, WorldState baseWorld) =>
@@ -278,7 +316,7 @@ internal static class StrategyExplorer
         Console.WriteLine();
         Console.WriteLine("  每策略终局分档分布（种子数 / 占比）：");
         Console.WriteLine("  策略      种子数  HardFailure  Failed  BarelyMaintained  Success  Excellent  通关率");
-        foreach (var strategy in new[] { StrategyMode.Land, StrategyMode.Sea, StrategyMode.Both })
+        foreach (var strategy in new[] { StrategyMode.Land, StrategyMode.Sea, StrategyMode.Both, StrategyMode.BothReduced })
         {
             var list = results[strategy];
             var counts = tiers.ToDictionary(tier => tier, _ => 0);

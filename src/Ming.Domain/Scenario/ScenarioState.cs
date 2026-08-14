@@ -18,6 +18,8 @@ public sealed class ScenarioState
     public const int DesignInitialLocalBurden = 20;            // DESIGN：doc 03 §7.1
     public const int DesignInitialMinisterTrust = 50;          // DESIGN：doc 03 §7.1
     public const int DesignDailyGrainDemand = 300;             // DESIGN：300 石/日（5400 石约 18 日倒计时）
+    public const int DesignReducedGrainDemand = 240;           // DESIGN：减耗令后申报需求（纸面推演 §3.2）
+    public const int DesignUnplannedDecreeTrustPenalty = 2;    // DESIGN：临时改令扣大臣信任 2 点（纸面推演 §3.2"未计划改令×2"）
     public const int DesignSecondHalfFromDay = 45;             // DESIGN：90 日的中点，"后半段"
     public const int DesignBurdenCooperationThreshold = 60;    // DESIGN：后半段负担超过该值降低配合度
     public const long DesignScenarioSilverBudget = 20_000;     // DESIGN：doc 03 §7.1 场景银预算（两）
@@ -52,7 +54,11 @@ public sealed class ScenarioState
 
     public int MinisterTrust { get; private set; }
 
-    public int DailyGrainDemand { get; }
+    public int DailyGrainDemand { get; private set; }
+
+    /// <summary>减耗令是否已生效：生效后日耗 <see cref="DailyGrainDemand"/> 降为 240 石/日，
+    /// 且足额供粮日战备恢复减半（纸面推演 §3.2 减耗政策）。</summary>
+    public bool RationReductionActive { get; private set; }
 
     /// <summary>前线粮仓；null 表示本世界没有启用宁远场景规则。</summary>
     public StockpileId? FrontStockpileId { get; }
@@ -92,6 +98,21 @@ public sealed class ScenarioState
         SpentSilver = checked(SpentSilver + amount);
     }
 
+    /// <summary>
+    /// 减耗令生效：前线日耗 300→240 石/日并置生效标志。幂等：已生效时重复调用不再改变日耗。
+    /// 只允许 Simulation 的唯一命令管线（减耗政令接纳路径）调用。
+    /// </summary>
+    internal void ApplyRationReduction()
+    {
+        if (RationReductionActive)
+        {
+            return;
+        }
+
+        RationReductionActive = true;
+        DailyGrainDemand = DesignReducedGrainDemand;
+    }
+
     internal void SetScenarioStart(GameTime scenarioStart) => ScenarioStartGameTime = scenarioStart;
 
     internal void MarkHardFailureReported() => HardFailureReported = true;
@@ -103,5 +124,6 @@ public sealed class ScenarioState
         SpentSilver = SpentSilver,
         ScenarioStartGameTime = ScenarioStartGameTime,
         HardFailureReported = HardFailureReported,
+        RationReductionActive = RationReductionActive,
     };
 }

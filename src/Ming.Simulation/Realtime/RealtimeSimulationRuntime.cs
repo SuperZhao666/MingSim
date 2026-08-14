@@ -918,6 +918,30 @@ public sealed class RealtimeSimulationRuntime
             ("responsible_actor", command.ResponsibleActorId.Value), ("deadline", command.Deadline.ToString()),
             ("linked_shipment", command.LinkedShipmentId ?? "")));
         candidate.Outbox.Add(events[^1]);
+
+        // 减耗令（M5 通关杠杆，纸面推演 §3.2）：接纳即生效——前线日耗 300→240 石/日。
+        // 信任规则：预先计划（硬失败前发布）不扣大臣信任；硬失败已发生后的临时改令才扣
+        // （"未计划改令×2"，DESIGN）。改令与政令接纳同一提交原子生效，重放确定。
+        if (command.Kind == DecreeKind.RationReduction)
+        {
+            var unplanned = candidate.State.Scenario.HardFailureReported;
+            if (unplanned)
+            {
+                candidate.State.Scenario.ChangeMinisterTrust(-ScenarioState.DesignUnplannedDecreeTrustPenalty);
+            }
+
+            var beforeDemand = candidate.State.Scenario.DailyGrainDemand;
+            candidate.State.Scenario.ApplyRationReduction();
+            if (candidate.State.Scenario.DailyGrainDemand != beforeDemand)
+            {
+                events.Add(CreateEvent(candidate, command.CommandId, "RationReductionEnacted", acceptedAt,
+                    ("decree_id", command.DecreeId.Value),
+                    ("new_demand", candidate.State.Scenario.DailyGrainDemand.ToString()),
+                    ("unplanned", unplanned.ToString())));
+                candidate.Outbox.Add(events[^1]);
+            }
+        }
+
         return Accepted(command.CommandId, "政令已接纳并扣除预算。", ingressSequence, acceptedAt, candidate.State.WorldVersion);
     }
 
@@ -1510,6 +1534,7 @@ public sealed class RealtimeSimulationRuntime
                 WriteFingerprintString(writer, decree.RequiredCapability.ToString());
                 WriteFingerprintString(writer, decree.RequiredResourceId ?? string.Empty);
                 WriteFingerprintString(writer, decree.LinkedShipmentId ?? string.Empty);
+                WriteFingerprintString(writer, decree.Kind.ToString());
                 writer.Write(decree.SubmittedAt.UtcTicks);
                 writer.Write(decree.ExpectedWorldVersion);
                 break;
