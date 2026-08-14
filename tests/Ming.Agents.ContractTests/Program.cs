@@ -31,6 +31,11 @@ internal static class Program
             ShouldRedactTimeoutAndDisposeFailures();
             ShouldSupportConcurrentCalls();
             ShouldRedactTransportExceptionDetails();
+            ShouldIgnoreBaseAddressMutationsAfterConstruction();
+            ShouldHardStopWhenHeadersStall();
+            ShouldHardStopWhenGetStreamStalls();
+            ShouldHardStopWhenBodyReadStalls();
+            ShouldIsolateConcurrentStalledCalls();
 
             Console.WriteLine("Ming.Agents OpenAI-compatible contract tests passed.");
             return 0;
@@ -413,6 +418,157 @@ internal static class Program
         Require(!response.ErrorMessage!.Contains(privateTransportDetail, StringComparison.Ordinal), "transport failure should not echo exception details");
     }
 
+    private static void ShouldIgnoreBaseAddressMutationsAfterConstruction()
+    {
+        // 构造后调用方可以把可变的 HttpClient.BaseAddress 改成带 userinfo 的恶意目标；
+        // 请求必须仍然只到达构造时冻结的安全绝对端点，不泄露 userinfo，也不换 host/path。
+        var capturedUris = new List<Uri>();
+        var handler = new FakeHttpMessageHandler((request, _) =>
+        {
+            lock (capturedUris)
+            {
+                capturedUris.Add(request.RequestUri!);
+            }
+
+            return Task.FromResult(JsonResponse("{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"{}\"}}]}"));
+        });
+        using var client = CreateClient(handler, "https://provider.test/v1/");
+        var provider = new OpenAiCompatibleModelProvider(client, "test-model");
+
+        // 首次 GenerateAsync 之前把 BaseAddress 换成带 userinfo 的恶意 URI。
+        client.BaseAddress = new Uri("https://attacker:secret@evil.test/steal/");
+
+        var userInfoResponse = provider.GenerateAsync(Request).GetAwaiter().GetResult();
+
+        Require(userInfoResponse.Succeeded, "frozen endpoint should still serve valid responses");
+        Require(capturedUris.Count == 1, "exactly one request should be sent");
+        var userInfoCaptured = capturedUris[0];
+        Require(userInfoCaptured == new Uri("https://provider.test/v1/chat/completions"), "request must keep the frozen safe endpoint");
+        Require(string.IsNullOrEmpty(userInfoCaptured.UserInfo), "request must not carry user info");
+        Require(!userInfoCaptured.ToString().Contains("attacker", StringComparison.Ordinal) &&
+                !userInfoCaptured.ToString().Contains("secret", StringComparison.Ordinal),
+            "request must not leak mutated credentials");
+        Require(!userInfoCaptured.ToString().Contains("evil.test", StringComparison.Ordinal), "request must not reach a mutated host");
+
+        // 换成其他 host 和 path 同样无效（HttpClient 首次发送后也会拒绝再改 BaseAddress，这里用全新实例验证）。
+        var hijackUris = new List<Uri>();
+        var hijackHandler = new FakeHttpMessageHandler((request, _) =>
+        {
+            lock (hijackUris)
+            {
+                hijackUris.Add(request.RequestUri!);
+            }
+
+            return Task.FromResult(JsonResponse("{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"{}\"}}]}"));
+        });
+        using var hijackClient = CreateClient(hijackHandler, "https://provider.test/v1/");
+        var hijackProvider = new OpenAiCompatibleModelProvider(hijackClient, "test-model");
+        hijackClient.BaseAddress = new Uri("https://other.test/hijack/");
+
+        var hijackResponse = hijackProvider.GenerateAsync(Request).GetAwaiter().GetResult();
+
+        Require(hijackResponse.Succeeded, "host/path mutation should still use the frozen endpoint");
+        Require(hijackUris.Count == 1, "host/path mutation should still send exactly one request");
+        Require(hijackUris[0] == new Uri("https://provider.test/v1/chat/completions"), "host/path mutation must not redirect the request");
+    }
+
+    private static void ShouldHardStopWhenHeadersStall()
+    {
+        // 不合作 handler：完全忽略取消令牌，SendAsync 永不返回。
+        CancellationToken? capturedToken = null;
+        var handler = new FakeHttpMessageHandler((_, cancellationToken) =>
+        {
+            capturedToken = cancellationToken;
+            return new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously).Task;
+        });
+        using var client = CreateClient(handler);
+        var provider = new OpenAiCompatibleModelProvider(
+            client,
+            "test-model",
+            totalTimeout: TimeSpan.FromMilliseconds(80));
+        var stopwatch = Stopwatch.StartNew();
+
+        var response = provider.GenerateAsync(Request).GetAwaiter().GetResult();
+
+        stopwatch.Stop();
+        Require(!response.Succeeded, "a stalled header response should fail");
+        Require(response.ErrorMessage == "Provider request timed out.", "header stall should use the fixed timeout summary");
+        Require(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"header stall should finish within tolerance (took {stopwatch.Elapsed})");
+        Require(capturedToken is { IsCancellationRequested: true }, "the cooperative token must be signaled at the hard boundary");
+    }
+
+    private static void ShouldHardStopWhenGetStreamStalls()
+    {
+        // 头部立即返回，但取正文流的调用永不完成（HttpContent 不合作）。
+        using var client = CreateClient(new FakeHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StallingGetStreamContent(),
+            })));
+        var provider = new OpenAiCompatibleModelProvider(
+            client,
+            "test-model",
+            totalTimeout: TimeSpan.FromMilliseconds(80));
+        var stopwatch = Stopwatch.StartNew();
+
+        var response = provider.GenerateAsync(Request).GetAwaiter().GetResult();
+
+        stopwatch.Stop();
+        Require(!response.Succeeded, "a stalled GetStream call should fail");
+        Require(response.ErrorMessage == "Provider request timed out.", "GetStream stall should use the fixed timeout summary");
+        Require(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"GetStream stall should finish within tolerance (took {stopwatch.Elapsed})");
+    }
+
+    private static void ShouldHardStopWhenBodyReadStalls()
+    {
+        // 头部立即返回、长度未知，但 ReadAsync 永久等待且合法忽略取消令牌。
+        var content = new NonCooperativeStallingContent(out var stallingStream);
+        using var client = CreateClient(new FakeHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = content,
+            })));
+        var provider = new OpenAiCompatibleModelProvider(
+            client,
+            "test-model",
+            totalTimeout: TimeSpan.FromMilliseconds(80));
+        var stopwatch = Stopwatch.StartNew();
+
+        var response = provider.GenerateAsync(Request).GetAwaiter().GetResult();
+
+        stopwatch.Stop();
+        Require(!response.Succeeded, "a stalled unknown-length body should fail");
+        Require(response.ErrorMessage == "Provider request timed out.", "body stall should use the fixed timeout summary");
+        Require(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"body stall should finish within tolerance (took {stopwatch.Elapsed})");
+        Require(stallingStream.IsDisposed, "the stalled body stream should be disposed after the hard boundary");
+    }
+
+    private static void ShouldIsolateConcurrentStalledCalls()
+    {
+        // headers 停滞与 body 停滞并发：各自独立的总超时互不干扰，且都在容差内结束。
+        var stallingBody = new NonCooperativeStallingContent(out var stallingStream);
+        using var headersClient = CreateClient(new FakeHttpMessageHandler((_, _) =>
+            new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously).Task));
+        using var bodyClient = CreateClient(new FakeHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = stallingBody,
+            })));
+        var headersProvider = new OpenAiCompatibleModelProvider(headersClient, "test-model", totalTimeout: TimeSpan.FromMilliseconds(80));
+        var bodyProvider = new OpenAiCompatibleModelProvider(bodyClient, "test-model", totalTimeout: TimeSpan.FromMilliseconds(80));
+        var stopwatch = Stopwatch.StartNew();
+
+        var responses = Task.WhenAll(
+            headersProvider.GenerateAsync(Request),
+            bodyProvider.GenerateAsync(Request)).GetAwaiter().GetResult();
+
+        stopwatch.Stop();
+        Require(responses.All(response => !response.Succeeded && response.ErrorMessage == "Provider request timed out."),
+            "both stalled calls should time out with the fixed summary");
+        Require(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"concurrent stalls should not extend each other (took {stopwatch.Elapsed})");
+        Require(stallingStream.IsDisposed, "the stalled body stream should be disposed after the hard boundary");
+    }
+
     private static HttpClient CreateClient(
         FakeHttpMessageHandler handler,
         string baseAddress = "https://provider.test/v1/") =>
@@ -538,6 +694,109 @@ internal static class Program
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             return 0;
         }
+    }
+
+    private sealed class StallingGetStreamContent : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            throw new InvalidOperationException("serialization should not be used by the provider");
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override Task<Stream> CreateContentReadStreamAsync() =>
+            new TaskCompletionSource<Stream>(TaskCreationOptions.RunContinuationsAsynchronously).Task;
+    }
+
+    private sealed class NonCooperativeStallingContent : HttpContent
+    {
+        public NonCooperativeStallingContent(out NonCooperativeStallingStream stream)
+        {
+            stream = new NonCooperativeStallingStream();
+            Stream = stream;
+        }
+
+        public NonCooperativeStallingStream Stream { get; }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            throw new InvalidOperationException("serialization should not be used by the provider");
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override Task<Stream> CreateContentReadStreamAsync() =>
+            Task.FromResult<Stream>(Stream);
+    }
+
+    private sealed class NonCooperativeStallingStream : Stream
+    {
+        private int _disposed;
+
+        public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        public override int Read(Span<byte> buffer) => throw new NotSupportedException();
+
+        // 永久等待且完全忽略取消令牌：ReadAsync 返回的任务从不完成。
+        public override Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken = default) =>
+            NeverCompletingRead();
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            new(NeverCompletingRead());
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override void Write(ReadOnlySpan<byte> buffer) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            Interlocked.Exchange(ref _disposed, 1);
+            base.Dispose(disposing);
+        }
+
+        public override ValueTask DisposeAsync()
+        {
+            Interlocked.Exchange(ref _disposed, 1);
+            return base.DisposeAsync();
+        }
+
+        private static Task<int> NeverCompletingRead() =>
+            new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously).Task;
     }
 
     private sealed class UnknownLengthContent : HttpContent
