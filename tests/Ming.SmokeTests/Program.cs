@@ -76,6 +76,7 @@ internal static class Program
             ShouldHalveReadinessRecoveryDuringReduction();
             ShouldKeepRationReductionInHashAndSnapshot();
             ShouldPenalizeTrustForUnplannedRationReduction();
+            ShouldRejectLegacySnapshotSchemaVersion();
             ShouldFailHardAfterSevenZeroGrainDays();
             ShouldEvaluateEndgameTiers();
             ShouldReplayRiskSamplesDeterministically();
@@ -1250,6 +1251,51 @@ internal static class Program
         Require(accepted.Events.Any(domainEvent => domainEvent.EventType == "RationReductionEnacted" &&
                 domainEvent.Data["unplanned"] == "True"),
             "临时改令必须留下可审计的 unplanned 标记");
+
+        // P2③ 回归：减耗已生效后，硬失败状态下再次发布减耗令（无任何状态变化）仍扣信任 2 点
+        // （"未计划改令"按政令次数计，不因幂等状态免罚），但不得重复产生减耗生效事件。
+        var second = CreateDecree(runtime, "decree-late-2", deadlineDays: 10, budget: 100,
+            kind: DecreeKind.RationReduction);
+        Require(runtime.EnqueueCreateDecree(second).Queued, "第二道减耗令应进入收件箱");
+        var secondAccepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(secondAccepted.CommandResults.Single().Accepted, "第二道减耗令必须被接纳");
+        Require(runtime.ReadModel.Scenario.MinisterTrust == 46,
+            "减耗已生效后的临时改令仍扣信任 2 点（信任 48→46）");
+        Require(runtime.ReadModel.Scenario.DailyGrainDemand == 240, "第二道减耗令不能再改变日耗（已 240）");
+        Require(runtime.OutboxEvents.Count(domainEvent => domainEvent.EventType == "RationReductionEnacted") == 1,
+            "第二道减耗令不能重复产生减耗生效事件（状态幂等）");
+    }
+
+    /// <summary>
+    /// P1 回归（独立审查结论）：旧 schema 快照（本 PR 之前的存档，哈希 schema 5）恢复必须被
+    /// 快照版本门禁显式拒绝（"不支持实时快照版本"），而不是哈希校验失配的偶然失败。
+    /// </summary>
+    private static void ShouldRejectLegacySnapshotSchemaVersion()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        Require(runtime.EnqueueCreateDecree(CreateDecree(runtime, "decree-legacy-schema", deadlineDays: 20, budget: 100,
+                kind: DecreeKind.RationReduction)).Queued,
+            "旧 schema 测试减耗令应进入收件箱");
+        runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        var snapshot = runtime.CaptureSnapshot();
+        Require(snapshot.SchemaVersion == RealtimeSnapshotSchema.Version,
+            "捕获快照必须携带当前快照 schema 版本");
+
+        // 把快照的 schema version 篡改为旧版本（Version - 1）：恢复必须因版本门禁被显式拒绝。
+        var backingField = typeof(RealtimeSnapshot).GetField("<SchemaVersion>k__BackingField",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new MissingMemberException(typeof(RealtimeSnapshot).FullName, "SchemaVersion backing field");
+        backingField.SetValue(snapshot, RealtimeSnapshotSchema.Version - 1);
+
+        try
+        {
+            RealtimeSimulationRuntime.Restore(snapshot);
+            throw new InvalidOperationException("旧 schema 快照必须被显式拒绝，不能成功恢复。");
+        }
+        catch (InvalidDataException exception) when (exception.Message.Contains("不支持实时快照版本", StringComparison.Ordinal))
+        {
+            // 期望：版本门禁显式拒绝（fail-closed），而不是哈希失配的偶然失败。
+        }
     }
 
     /// <summary>硬失败：连续 7 日可用粮为 0 → EvaluateEndgame 判 HardFailure 并只报告一次。</summary>

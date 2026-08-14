@@ -57,7 +57,9 @@ public sealed class ScenarioState
     public int DailyGrainDemand { get; private set; }
 
     /// <summary>减耗令是否已生效：生效后日耗 <see cref="DailyGrainDemand"/> 降为 240 石/日，
-    /// 且足额供粮日战备恢复减半（纸面推演 §3.2 减耗政策）。</summary>
+    /// 且足额供粮日战备恢复减半（纸面推演 §3.2 减耗政策）。
+    /// 实现取契约字面"恢复减半"（+10→+5 基点/日，总控已追认）；纸面 §4.3 战备公式
+    /// （60+足额×0.1−减耗×0.1）为减耗日净恢复 0，两者不等价，此处按契约字面执行。</summary>
     public bool RationReductionActive { get; private set; }
 
     /// <summary>前线粮仓；null 表示本世界没有启用宁远场景规则。</summary>
