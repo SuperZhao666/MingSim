@@ -675,7 +675,7 @@ public partial class MainUi : Control
         var endgameButton = AddPaperButton(bar, "终局复盘", new Rect2(1416, 48, 128, 34));
         endgameButton.Name = "OpenEndgameReport";
         endgameButton.Pressed += OpenEndgameReport;
-        var guideButton = AddPaperButton(bar, "新手引导", new Rect2(1460, 10, 130, 34));
+        var guideButton = AddPaperButton(bar, "新手引导", new Rect2(1488, 10, 112, 34));
         guideButton.Name = "OpenGuidePanel";
         guideButton.Pressed += OpenGuidePanel;
 
@@ -696,12 +696,14 @@ public partial class MainUi : Control
     private void OpenDecreePanel()
     {
         _endgameReportPanel.Close();
+        _guidePanel.Close();
         _decreePanel.Open();
     }
 
     private void OpenEndgameReport()
     {
         _decreePanel.Close();
+        _guidePanel.Close();
         _endgameReportPanel.Open();
     }
 
