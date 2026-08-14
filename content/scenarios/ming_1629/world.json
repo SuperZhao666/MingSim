@@ -179,7 +179,8 @@
     "loader_compat": {
       "note": "加载器实际消费字段与 src/Ming.Application/Scenarios/ScenarioLoader.cs 一致（id/startTurn/treasurySilver/map/characters/institutions/capabilityGrants/inventory/armies）。stockpiles/routes/decrees 为前瞻内容段：当前加载器忽略未知字段，后续代码任务接入 WorldState.CreateInitial(stockpiles, routes) 后生效；字段名与 Ming.Domain.Economy.StockpileState/RouteState 构造参数一致。",
       "characters_attributes": "本文件不给史实人物写 Attributes/Personality/Loyalty：证据账本 forbidden_to_write_into_game 明确禁止“忠诚、能力、性格、战斗力数值”。加载器缺省 50/50/50/50/50 与 (honest=true,bold=false,loyalToRuler=true,compassionate=true) 仅为运行时占位，不是内容断言。",
-      "capability_grants": "机构能力与 CapabilityGrant 是 authority_matrix 到 GameCapability 枚举的最小映射（DESIGN）：提出/督催运粮→PlanLogistics；财粮会计拨付→ReadFinance/AllocateFinance；督师军务→PlanLogistics+MoveArmy。皇帝批准/下令、兵部征调文书、宁远接收验收在能力原语中无对应项，保持不授（见 OPEN 条目）。"
+      "office_id_scope": "officeId 是与 1627 模板一致的自由字符串头衔，不要求匹配机构 id；毛文龙 officeId=office-dongjiang-zongbing（东江总兵）对应机构不在本切片机构集（东江不在 6 节点），仅作身份头衔。",
+      "capability_grants": "机构能力与 CapabilityGrant 是 authority_matrix 到 GameCapability 枚举的最小映射（DESIGN）：提出/督催运粮→PlanLogistics；财粮会计拨付→ReadFinance/AllocateFinance；督师军务→PlanLogistics+MoveArmy。皇帝批准/下令、兵部征调文书、宁远接收验收在能力原语中无对应项，保持不授（见 OPEN 条目）。满桂/祖大寿等前线将领的守援与战备是自动结算、不在 P0 命令面，故不授 MoveArmy；毛文龙请饷走 decree-qingshou 文书模板，不授能力。"
     },
     "numbers": [
       { "item": "初始国库银两", "path": "treasurySilver", "value": 20000, "unit": "两", "tag": "DESIGN", "source": "17号账本 NUM-004；03 §7；纸面推演 §3.1", "note": "场景银预算，不是 1629 国库史实余额。" },
