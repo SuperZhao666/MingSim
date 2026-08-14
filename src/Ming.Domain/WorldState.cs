@@ -2,11 +2,13 @@ using System.Collections.ObjectModel;
 using MingSim.Domain.Authorization;
 using MingSim.Domain.Characters;
 using MingSim.Domain.Common;
+using MingSim.Domain.Decrees;
 using MingSim.Domain.Economy;
 using MingSim.Domain.Institutions;
 using MingSim.Domain.Map;
 using MingSim.Domain.Military;
 using MingSim.Domain.Realtime;
+using MingSim.Domain.Scenario;
 
 namespace MingSim.Domain;
 
@@ -23,6 +25,7 @@ public sealed class WorldState
     private readonly Dictionary<InstitutionId, InstitutionState> _institutions = [];
     private readonly List<CapabilityGrant> _capabilityGrants = [];
     private readonly Dictionary<ArmyId, MovementState> _movements = [];
+    private readonly Dictionary<DecreeId, DecreeState> _decrees = [];
 
     internal WorldState(
         WorldId id,
@@ -60,9 +63,14 @@ public sealed class WorldState
         IEnumerable<(string ResourceType, long Quantity)>? inventory = null,
         IEnumerable<ArmyState>? armies = null,
         IEnumerable<StockpileState>? stockpiles = null,
-        IEnumerable<RouteState>? routes = null)
+        IEnumerable<RouteState>? routes = null,
+        ScenarioState? scenario = null)
     {
-        var world = new WorldState(id, turnNumber, treasurySilver, map);
+        var world = new WorldState(id, turnNumber, treasurySilver, map)
+        {
+            Scenario = scenario ?? new ScenarioState(),
+        };
+        world.Scenario.SetScenarioStart(world.GameTime);
         foreach (var character in characters ?? []) world.AddCharacter(character);
         foreach (var institution in institutions ?? []) world.AddInstitution(institution);
         foreach (var grant in capabilityGrants ?? []) world.GrantCapability(grant);
@@ -112,6 +120,16 @@ public sealed class WorldState
     /// <summary>实时物流的权威状态；只能由 Simulation 的命令和到期动作改变。</summary>
     public LogisticsState Logistics { get; } = new();
 
+    /// <summary>场景级状态（地方负担/大臣信任/场景规则参数）；只能由 Simulation 改变。</summary>
+    public ScenarioState Scenario { get; private set; } = new();
+
+    /// <summary>前线战备（P0 最小抽象）；只能由 Simulation 的日耗规则改变。</summary>
+    public ReadinessState Readiness { get; private set; } = new();
+
+    /// <summary>已提交政令；只能由 Simulation 的命令和到期动作改变。</summary>
+    public IReadOnlyDictionary<DecreeId, DecreeState> Decrees =>
+        new ReadOnlyDictionary<DecreeId, DecreeState>(_decrees);
+
     public IReadOnlyDictionary<CharacterId, CharacterState> Characters =>
         new ReadOnlyDictionary<CharacterId, CharacterState>(_characters);
 
@@ -145,6 +163,14 @@ public sealed class WorldState
     }
 
     internal void GrantCapability(CapabilityGrant grant) => _capabilityGrants.Add(grant);
+
+    internal void AddDecree(DecreeState decree)
+    {
+        if (!_decrees.TryAdd(decree.Id, decree))
+        {
+            throw new InvalidOperationException($"政令 {decree.Id} 已经存在。");
+        }
+    }
 
     public bool TryGetCharacter(CharacterId characterId, out CharacterState? character) =>
         _characters.TryGetValue(characterId, out character);
@@ -227,6 +253,13 @@ public sealed class WorldState
         foreach (var (armyId, movement) in _movements)
         {
             clone._movements.Add(armyId, movement);
+        }
+
+        clone.Scenario = Scenario.Clone();
+        clone.Readiness = Readiness.Clone();
+        foreach (var (decreeId, decree) in _decrees)
+        {
+            clone._decrees.Add(decreeId, decree.Clone());
         }
 
         CopyEconomy(clone);

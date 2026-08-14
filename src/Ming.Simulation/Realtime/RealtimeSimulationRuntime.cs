@@ -6,11 +6,13 @@ using System.Text;
 using MingSim.Domain;
 using MingSim.Domain.Authorization;
 using MingSim.Domain.Common;
+using MingSim.Domain.Decrees;
 using MingSim.Domain.Economy;
 using MingSim.Domain.Errors;
 using MingSim.Domain.Events;
 using MingSim.Domain.Military;
 using MingSim.Domain.Realtime;
+using MingSim.Domain.Scenario;
 
 namespace MingSim.Simulation.Realtime;
 
@@ -40,7 +42,8 @@ public sealed record CreateShipmentCommand(
     RouteId RouteId,
     long GrainQuantity,
     DateTimeOffset SubmittedAt,
-    long ExpectedWorldVersion)
+    long ExpectedWorldVersion,
+    bool Escort = false)
     : RealtimeCommand(CommandId, ActorId, SubmittedAt, ExpectedWorldVersion);
 
 public sealed record SetPausedCommand(
@@ -183,6 +186,8 @@ public sealed class RealtimeSimulationRuntime
     // 当前实时垂直切片的权威提交粒度；GameTime 仍由 Scheduler 精确推进到 DueAt。
     private static readonly TimeSpan RealtimeCommitQuantum = TimeSpan.FromHours(1);
     private const int DailyHeartbeatPhase = 2;
+    // 风险与冲突阶段（doc 08 §4.3 Phase 3）：天气/袭粮/报告都在同刻日耗之后结算。
+    private const int RiskSamplePhase = 3;
     private const string RandomState = "schema=1;streams=none";
 
     private readonly CapabilityAuthorizer _authorizer = new();
@@ -332,6 +337,8 @@ public sealed class RealtimeSimulationRuntime
 
     public RealtimeCommandReceipt EnqueueCreateShipment(CreateShipmentCommand command) => Enqueue(command);
 
+    public RealtimeCommandReceipt EnqueueCreateDecree(CreateDecreeCommand command) => Enqueue(command);
+
     public RealtimeCommandReceipt EnqueueSetPaused(SetPausedCommand command) => Enqueue(command);
 
     public RealtimeCommandReceipt EnqueueSetSimulationSpeed(SetSimulationSpeedCommand command) => Enqueue(command);
@@ -361,6 +368,43 @@ public sealed class RealtimeSimulationRuntime
             Enqueue(new SetSimulationSpeedCommand(commandId, new CharacterId("system"), speed,
                 _state.GameTime.Value, _state.WorldVersion));
         }
+    }
+
+    /// <summary>
+    /// 安排 P0 固定风险样本（doc 03 §4）：一次天气延误、一次袭粮、三份差异报告。
+    /// 样本日期与随机种子都是 DESIGN；同一世界同一输入必然得到同一结果（可种子重放）。
+    /// 重复调用是安全的幂等操作：队列里已存在同类样本就直接返回。
+    /// </summary>
+    public void ScheduleScenarioRiskSamples()
+    {
+        lock (_writerGate)
+        {
+            if (_scheduledEvents.Any(item => item.EventType == ScenarioP0Rules.WeatherDelayEvent))
+            {
+                return;
+            }
+
+            ScheduleFixedSample(ScenarioP0Rules.DesignWeatherDelayDay, ScenarioP0Rules.WeatherDelayEvent);
+            ScheduleFixedSample(ScenarioP0Rules.DesignGrainRaidDay, ScenarioP0Rules.GrainRaidEvent);
+            ScheduleFixedSample(ScenarioP0Rules.DesignReportsDay, ScenarioP0Rules.ScenarioReportsEvent);
+        }
+    }
+
+    /// <summary>自动可检查的终局评估（doc 03 §7.2）：先判硬失败，再按 90 日分档并输出六维解释。</summary>
+    public EndgameEvaluation EvaluateEndgame()
+    {
+        lock (_writerGate)
+        {
+            return EndgameEvaluator.Evaluate(_state, _initialGameTime);
+        }
+    }
+
+    private void ScheduleFixedSample(int day, string eventType)
+    {
+        var due = _initialGameTime.Add(TimeSpan.FromDays(day));
+        _scheduledEvents.Add(new ScheduledSimulationEvent(
+            $"{eventType.ToLowerInvariant()}-day-{day}", due, RiskSamplePhase, 0, _nextCreationSequence++,
+            eventType, new Dictionary<string, string>()));
     }
 
     /// <summary>创建一份可校验、可恢复的完整实时快照。</summary>
@@ -616,6 +660,7 @@ public sealed class RealtimeSimulationRuntime
             {
                 MoveArmyCommand move => ApplyMove(candidate, move, ingressSequence, acceptedAt, events),
                 CreateShipmentCommand shipment => ApplyShipment(candidate, shipment, ingressSequence, acceptedAt, events),
+                CreateDecreeCommand decree => ApplyDecree(candidate, decree, ingressSequence, acceptedAt, events),
                 SetPausedCommand pause => ApplyPause(candidate, pause, ingressSequence, acceptedAt),
                 SetSimulationSpeedCommand speed => ApplySpeed(candidate, speed, ingressSequence, acceptedAt),
                 _ => Reject(command.CommandId, "未知实时命令类型。", "UNKNOWN_COMMAND", ingressSequence, acceptedAt, candidate.State.WorldVersion),
@@ -741,6 +786,11 @@ public sealed class RealtimeSimulationRuntime
             return Reject(command.CommandId, authorization.Reason, "TOOL_SCOPE_DENIED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
+        if (command.Escort && candidate.State.Economy.Treasury.Silver < ScenarioState.DesignEscortCostSilver)
+        {
+            return Reject(command.CommandId, "国库银两不足以支付护卫费用。", "ESCORT_BUDGET_INSUFFICIENT", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
         var source = candidate.State.Logistics.Stockpiles[route.FromStockpileId];
         var destination = candidate.State.Logistics.Stockpiles[route.ToStockpileId];
         if (!GrainLogisticsRules.HasEnoughSourceGrain(source, command.GrainQuantity))
@@ -768,7 +818,13 @@ public sealed class RealtimeSimulationRuntime
             return Reject(command.CommandId, "起点库存扣减失败。", "INSUFFICIENT_GRAIN", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
-        candidate.State.Logistics.AddShipment(new ShipmentState(command.ShipmentId, route.Id, command.GrainQuantity, acceptedAt));
+        // 每次调粮都动用地方车马征发：地方负担升高（DESIGN，doc 03 §7.1）；只在场景规则启用时生效。
+        if (candidate.State.Scenario.IsScenarioActive)
+        {
+            candidate.State.Scenario.ChangeLocalBurden(ScenarioState.DesignShipmentBurdenIncrease);
+        }
+
+        candidate.State.Logistics.AddShipment(new ShipmentState(command.ShipmentId, route.Id, command.GrainQuantity, acceptedAt, command.Escort));
         Schedule(candidate, $"shipment-departure-{command.ShipmentId.Value}", acceptedAt, 0, 1, "ShipmentDeparture",
             new Dictionary<string, string>
             {
@@ -779,6 +835,88 @@ public sealed class RealtimeSimulationRuntime
             ("shipment_id", command.ShipmentId.Value), ("route_id", route.Id.Value), ("grain", command.GrainQuantity.ToString())));
         candidate.Outbox.Add(events[^1]);
         return Accepted(command.CommandId, "粮运计划已接纳。", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+    }
+
+    private RealtimeCommandResult ApplyDecree(
+        WorkingCopy candidate,
+        CreateDecreeCommand command,
+        long ingressSequence,
+        GameTime acceptedAt,
+        List<DomainEvent> events)
+    {
+        if (!IsValidId(command.CommandId) || !IsValidId(command.ActorId.Value) ||
+            !IsValidId(command.DecreeId.Value) || !IsValidId(command.ResponsibleActorId.Value))
+        {
+            return Reject(command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
+        if (string.IsNullOrWhiteSpace(command.Goal))
+        {
+            return RejectDecree(candidate, command, "INVALID_DECREE_GOAL", "政令目标不能为空。", ingressSequence, acceptedAt, events);
+        }
+
+        if (candidate.State.Decrees.ContainsKey(command.DecreeId))
+        {
+            return RejectDecree(candidate, command, "DECREE_ALREADY_EXISTS", "政令编号已经存在。", ingressSequence, acceptedAt, events);
+        }
+
+        if (command.Budget <= 0)
+        {
+            return RejectDecree(candidate, command, "INVALID_DECREE_BUDGET", "政令预算必须为正数。", ingressSequence, acceptedAt, events);
+        }
+
+        if (command.Deadline <= acceptedAt)
+        {
+            return RejectDecree(candidate, command, "DECREE_DEADLINE_IN_PAST", "政令期限必须晚于当前时间。", ingressSequence, acceptedAt, events);
+        }
+
+        if (!candidate.State.Characters.ContainsKey(command.ResponsibleActorId))
+        {
+            return RejectDecree(candidate, command, "RESPONSIBLE_ACTOR_NOT_FOUND", "政令承办人不存在。", ingressSequence, acceptedAt, events);
+        }
+
+        // 承办人必须持有对应 CapabilityGrant（doc 03 §4 P0 政令行：承办人须持对应能力）。
+        // 为什么拒绝不改世界：业务拒绝按 doc 08 §5 只原子记录 CommandId 终态 Outcome，
+        // 绝不能在"世界和时间不变"的拒绝路径上偷偷扣预算或改信任。
+        var authorization = _authorizer.Check(candidate.State, command.ResponsibleActorId, command.RequiredCapability, command.RequiredResourceId);
+        if (!authorization.Allowed)
+        {
+            return RejectDecree(candidate, command, "DECREE_RESPONSIBLE_UNAUTHORIZED", authorization.Reason, ingressSequence, acceptedAt, events);
+        }
+
+        if (!candidate.State.Economy.Treasury.TrySpend(command.Budget))
+        {
+            return RejectDecree(candidate, command, "DECREE_BUDGET_EXCEEDS_TREASURY", "国库银两不足以批准该政令预算。", ingressSequence, acceptedAt, events);
+        }
+
+        // 预算在接纳时扣除并计入场景支出：这是"政令可与粮运绑定（预算扣除）"的落地。
+        candidate.State.Scenario.AddSpentSilver(command.Budget);
+        candidate.State.AddDecree(new DecreeState(
+            command.DecreeId, command.ActorId, command.Goal, command.RegionScope, command.Budget,
+            command.ResponsibleActorId, command.Deadline, command.Restrictions, command.Remarks,
+            command.RequiredCapability, command.RequiredResourceId, command.LinkedShipmentId));
+        events.Add(CreateEvent(candidate, command.CommandId, "DecreeAccepted", acceptedAt,
+            ("decree_id", command.DecreeId.Value), ("goal", command.Goal), ("budget", command.Budget.ToString()),
+            ("responsible_actor", command.ResponsibleActorId.Value), ("deadline", command.Deadline.ToString()),
+            ("linked_shipment", command.LinkedShipmentId ?? "")));
+        candidate.Outbox.Add(events[^1]);
+        return Accepted(command.CommandId, "政令已接纳并扣除预算。", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+    }
+
+    private RealtimeCommandResult RejectDecree(
+        WorkingCopy candidate,
+        CreateDecreeCommand command,
+        string code,
+        string message,
+        long ingressSequence,
+        GameTime acceptedAt,
+        List<DomainEvent> events)
+    {
+        // 政令特有的拒绝事件：与通用 CommandRejected 一起构成可审计的 DecreeAccepted/Rejected 事件对。
+        events.Add(CreateEvent(candidate, command.CommandId, "DecreeRejected", acceptedAt,
+            ("decree_id", command.DecreeId.Value), ("code", code), ("reason", message)));
+        candidate.Outbox.Add(events[^1]);
+        return Reject(command.CommandId, message, code, ingressSequence, acceptedAt, candidate.State.WorldVersion);
     }
 
     private RealtimeCommandResult ApplyPause(WorkingCopy candidate, SetPausedCommand command, long ingressSequence, GameTime acceptedAt)
@@ -840,6 +978,7 @@ public sealed class RealtimeSimulationRuntime
         {
             events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "DailySimulationTick", candidate.State.GameTime, ("tick", "daily")));
             candidate.Outbox.Add(events[^1]);
+            ApplyDailyScenarioRules(candidate, events);
             ScheduleDailyHeartbeat(candidate.State, candidate.Scheduled, candidate);
             return;
         }
@@ -884,6 +1023,34 @@ public sealed class RealtimeSimulationRuntime
 
             shipment.MarkInTransit(candidate.State.GameTime);
             var arrivalAt = candidate.State.GameTime.Add(TimeSpan.FromHours(route.TravelHours));
+            // 后半段地方负担过高会降低配合度：到达延迟（DESIGN：负担每超阈值 1 点延迟 1 小时）。
+            var cooperationDelayHours = ScenarioP0Rules.ResolveCooperationDelayHours(candidate.State);
+            if (cooperationDelayHours > 0)
+            {
+                arrivalAt = arrivalAt.Add(TimeSpan.FromHours(cooperationDelayHours));
+                events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "ShipmentCooperationDelay", candidate.State.GameTime,
+                    ("shipment_id", shipment.Id.Value), ("delay_hours", cooperationDelayHours.ToString())));
+                candidate.Outbox.Add(events[^1]);
+            }
+
+            // 护卫结算：每批 +400 两（DESIGN，doc 03 §7.1 护卫行）。国库不足时护卫无法成行但运输继续。
+            if (shipment.Escort)
+            {
+                if (candidate.State.Economy.Treasury.TrySpend(ScenarioState.DesignEscortCostSilver))
+                {
+                    candidate.State.Scenario.AddSpentSilver(ScenarioState.DesignEscortCostSilver);
+                    events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "EscortSettlement", candidate.State.GameTime,
+                        ("shipment_id", shipment.Id.Value), ("cost_silver", ScenarioState.DesignEscortCostSilver.ToString())));
+                    candidate.Outbox.Add(events[^1]);
+                }
+                else
+                {
+                    events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "EscortSettlementFailed", candidate.State.GameTime,
+                        ("shipment_id", shipment.Id.Value), ("reason", "treasury_insufficient")));
+                    candidate.Outbox.Add(events[^1]);
+                }
+            }
+
             Schedule(candidate, $"shipment-arrival-{shipment.Id.Value}", arrivalAt, 1, 1, "ShipmentArrival",
                 new Dictionary<string, string>
                 {
@@ -925,6 +1092,13 @@ public sealed class RealtimeSimulationRuntime
                 throw new InvalidOperationException("运输损耗计算超出安全范围。");
             }
 
+            // 袭粮损失先从实到量扣除并计入损耗：实到 + 损耗 仍等于计划量，粮食守恒不被打破（doc 06 §7.4）。
+            if (shipment.RaidLossGrain > 0)
+            {
+                delivered = Math.Max(0, delivered - shipment.RaidLossGrain);
+                loss = shipment.GrainQuantity - delivered;
+            }
+
             if (!destination.TryStoreGrain(delivered))
             {
                 Schedule(candidate, $"shipment-arrival-retry-{shipment.Id.Value}-{candidate.State.GameTime.Value.UtcTicks}",
@@ -943,12 +1117,164 @@ public sealed class RealtimeSimulationRuntime
             shipment.MarkArrived(candidate.State.GameTime, delivered, loss);
             events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "ShipmentArrived", candidate.State.GameTime,
                 ("shipment_id", shipment.Id.Value), ("destination_id", destination.Id.Value),
-                ("delivered_grain", delivered.ToString()), ("loss_grain", loss.ToString())));
+                ("delivered_grain", delivered.ToString()), ("loss_grain", loss.ToString()),
+                ("raid_loss_grain", shipment.RaidLossGrain.ToString())));
+            candidate.Outbox.Add(events[^1]);
+
+            // 政令绑定：绑定单抵达即视为政令完成（期限约束的另一半）。
+            var linkedDecree = candidate.State.Decrees.Values
+                .Where(decree => decree.LinkedShipmentId == shipment.Id.Value && decree.Status == DecreeStatus.Executing)
+                .OrderBy(decree => decree.Id.Value, StringComparer.Ordinal)
+                .FirstOrDefault();
+            if (linkedDecree is not null)
+            {
+                linkedDecree.Complete();
+                events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "DecreeCompleted", candidate.State.GameTime,
+                    ("decree_id", linkedDecree.Id.Value), ("shipment_id", shipment.Id.Value)));
+                candidate.Outbox.Add(events[^1]);
+            }
+
+            return;
+        }
+
+        if (scheduled.EventType == ScenarioP0Rules.WeatherDelayEvent)
+        {
+            var shipment = SelectMostImminentShipment(candidate);
+            if (shipment is null)
+            {
+                events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "WeatherDelayNoOp", candidate.State.GameTime,
+                    ("reason", "no_in_transit_shipment")));
+                candidate.Outbox.Add(events[^1]);
+                return;
+            }
+
+            var arrival = candidate.Scheduled
+                .Where(item => item.EventType == "ShipmentArrival" && item.Data.GetValueOrDefault("shipment_id") == shipment.Id.Value)
+                .OrderBy(item => item.DueGameTime)
+                .ThenBy(item => item.CreationSequence)
+                .FirstOrDefault();
+            if (arrival is null)
+            {
+                events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "WeatherDelayNoOp", candidate.State.GameTime,
+                    ("reason", "no_scheduled_arrival")));
+                candidate.Outbox.Add(events[^1]);
+                return;
+            }
+
+            // 一次天气延误：运输 +N 日（N 由确定性随机抽取 1..3，DESIGN）。重排到达事件保证"不提前也不重复"。
+            var delayDays = ScenarioP0Rules.ResolveWeatherDelayDays(candidate.State);
+            candidate.Scheduled.Remove(arrival);
+            var newDue = arrival.DueGameTime.Add(TimeSpan.FromDays(delayDays));
+            Schedule(candidate, $"shipment-arrival-{shipment.Id.Value}-delayed", newDue, 1, 1, "ShipmentArrival",
+                arrival.Data, scheduled.CausalCommandId);
+            events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "ShipmentDelayed", candidate.State.GameTime,
+                ("shipment_id", shipment.Id.Value), ("delay_days", delayDays.ToString()),
+                ("original_due", arrival.DueGameTime.ToString()), ("new_due", newDue.ToString())));
             candidate.Outbox.Add(events[^1]);
             return;
         }
 
+        if (scheduled.EventType == ScenarioP0Rules.GrainRaidEvent)
+        {
+            var shipment = SelectMostImminentShipment(candidate);
+            if (shipment is null)
+            {
+                events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "GrainRaidNoOp", candidate.State.GameTime,
+                    ("reason", "no_in_transit_shipment")));
+                candidate.Outbox.Add(events[^1]);
+                return;
+            }
+
+            // 袭粮损失上限由护卫与否决定（DESIGN：无护卫 0..20%，有护卫 0..5%）；损失先进 ShipmentState，
+            // 抵达结算时从实到量扣除，保证粮食守恒。
+            var lossPercent = ScenarioP0Rules.ResolveRaidLossPercent(shipment.Escort, candidate.State);
+            var lossGrain = checked(shipment.GrainQuantity * lossPercent / 100);
+            if (lossGrain > 0)
+            {
+                shipment.ApplyRaidLoss(lossGrain);
+            }
+
+            events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "ShipmentAttacked", candidate.State.GameTime,
+                ("shipment_id", shipment.Id.Value), ("escorted", shipment.Escort.ToString()),
+                ("loss_percent", lossPercent.ToString()), ("loss_grain", lossGrain.ToString())));
+            candidate.Outbox.Add(events[^1]);
+            return;
+        }
+
+        if (scheduled.EventType == ScenarioP0Rules.ScenarioReportsEvent)
+        {
+            // 三份时效/可信度不同的报告（DESIGN）：确定性随机 + 种子生成；信任越低报告越陈旧；
+            // 报告只是已提交观察，进日志不改世界。
+            string[] subjects = ["宁远存粮", "欠饷", "前线战备"];
+            for (var index = 1; index <= subjects.Length; index++)
+            {
+                var (ageDays, credibility) = ScenarioP0Rules.ResolveReportProfile(candidate.State, index);
+                events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "ScenarioReportReceived", candidate.State.GameTime,
+                    ("report_id", $"ningyuan-report-{index}"), ("subject", subjects[index - 1]),
+                    ("age_days", ageDays.ToString()), ("credibility", credibility.ToString()),
+                    ("trust_at_report", candidate.State.Scenario.MinisterTrust.ToString())));
+                candidate.Outbox.Add(events[^1]);
+            }
+
+            return;
+        }
+
         throw new InvalidOperationException($"未知调度事件类型 {scheduled.EventType}。");
+    }
+
+    /// <summary>每日场景规则：前线日耗/战备、政令期限甩责、硬失败报告（只在相应状态存在时生效）。</summary>
+    private static void ApplyDailyScenarioRules(WorkingCopy candidate, List<DomainEvent> events)
+    {
+        var ration = ScenarioP0Rules.ApplyDailyRation(candidate.State);
+        if (ration.Kind != RationKind.None)
+        {
+            events.Add(CreateEvent(candidate, null, "FrontierDailyRation", candidate.State.GameTime,
+                ("kind", ration.Kind.ToString()),
+                ("available_before", ration.AvailableBefore.ToString()),
+                ("consumed_grain", ration.ConsumedGrain.ToString()),
+                ("shortfall_grain", ration.ShortfallGrain.ToString()),
+                ("readiness_bps", candidate.State.Readiness.ValueBasisPoints.ToString()),
+                ("arrears_grain", candidate.State.Readiness.ArrearsGrain.ToString()),
+                ("consecutive_zero_days", candidate.State.Readiness.ConsecutiveZeroGrainDays.ToString())));
+            candidate.Outbox.Add(events[^1]);
+        }
+
+        // 政令期限：到期未完成即甩责（大臣信任 -5）。事件按政令编号排序，避免字典枚举顺序影响确定性。
+        var overdue = ScenarioP0Rules.ExpireOverdueDecrees(candidate.State);
+        foreach (var decree in overdue.OrderBy(item => item.Id.Value, StringComparer.Ordinal))
+        {
+            events.Add(CreateEvent(candidate, null, "DecreeDeadlineExpired", candidate.State.GameTime,
+                ("decree_id", decree.Id.Value), ("responsible_actor", decree.ResponsibleActorId.Value),
+                ("deadline", decree.Deadline.ToString()), ("trust", candidate.State.Scenario.MinisterTrust.ToString())));
+            candidate.Outbox.Add(events[^1]);
+        }
+
+        // 硬失败（doc 03 §7.2）只报告一次，避免每日刷屏；评估函数本身随时可再查。
+        var failureReason = ScenarioP0Rules.DetectHardFailure(candidate.State);
+        if (failureReason is not null && !candidate.State.Scenario.HardFailureReported)
+        {
+            candidate.State.Scenario.MarkHardFailureReported();
+            events.Add(CreateEvent(candidate, null, "ScenarioHardFailure", candidate.State.GameTime, ("reason", failureReason)));
+            candidate.Outbox.Add(events[^1]);
+        }
+    }
+
+    /// <summary>选出最临近到达的在途运输单（天气延误/袭粮的目标）；排序稳定保证确定性。</summary>
+    private static ShipmentState? SelectMostImminentShipment(WorkingCopy candidate)
+    {
+        var arrival = candidate.Scheduled
+            .Where(item => item.EventType == "ShipmentArrival")
+            .OrderBy(item => item.DueGameTime)
+            .ThenBy(item => item.CreationSequence)
+            .FirstOrDefault();
+        if (arrival is null)
+        {
+            return null;
+        }
+
+        return candidate.State.Logistics.Shipments.TryGetValue(new ShipmentId(arrival.Data["shipment_id"]), out var shipment)
+            ? shipment
+            : null;
     }
 
     private void CommitTimeOnly(GameTime target, List<DomainEvent> events)
@@ -1123,8 +1449,27 @@ public sealed class RealtimeSimulationRuntime
                 WriteFingerprintString(writer, shipment.ShipmentId.Value);
                 WriteFingerprintString(writer, shipment.RouteId.Value);
                 writer.Write(shipment.GrainQuantity);
+                writer.Write(shipment.Escort);
                 writer.Write(shipment.SubmittedAt.UtcTicks);
                 writer.Write(shipment.ExpectedWorldVersion);
+                break;
+            case CreateDecreeCommand decree:
+                WriteFingerprintString(writer, "decree");
+                WriteFingerprintString(writer, decree.CommandId);
+                WriteFingerprintString(writer, decree.ActorId.Value);
+                WriteFingerprintString(writer, decree.DecreeId.Value);
+                WriteFingerprintString(writer, decree.Goal);
+                WriteFingerprintString(writer, decree.RegionScope.Value);
+                writer.Write(decree.Budget);
+                WriteFingerprintString(writer, decree.ResponsibleActorId.Value);
+                writer.Write(decree.Deadline.Value.UtcTicks);
+                WriteFingerprintString(writer, decree.Restrictions);
+                WriteFingerprintString(writer, decree.Remarks);
+                WriteFingerprintString(writer, decree.RequiredCapability.ToString());
+                WriteFingerprintString(writer, decree.RequiredResourceId ?? string.Empty);
+                WriteFingerprintString(writer, decree.LinkedShipmentId ?? string.Empty);
+                writer.Write(decree.SubmittedAt.UtcTicks);
+                writer.Write(decree.ExpectedWorldVersion);
                 break;
             case SetPausedCommand pause:
                 WriteFingerprintString(writer, "pause");
@@ -1200,5 +1545,5 @@ public sealed class RealtimeSimulationRuntime
 
 public static class RealtimeSnapshotSchema
 {
-    public const int Version = 5;
+    public const int Version = 6;
 }

@@ -4,11 +4,13 @@ using MingSim.Domain;
 using MingSim.Domain.Authorization;
 using MingSim.Domain.Characters;
 using MingSim.Domain.Common;
+using MingSim.Domain.Decrees;
 using MingSim.Domain.Economy;
 using MingSim.Domain.Events;
 using MingSim.Domain.Map;
 using MingSim.Domain.Military;
 using MingSim.Domain.Realtime;
+using MingSim.Domain.Scenario;
 using MingSim.Persistence.InMemory;
 using MingSim.Simulation.Realtime;
 
@@ -62,6 +64,16 @@ internal static class Program
             ShouldKeepEventIdentityAndCommitMetadataStable();
             ShouldAuditPauseAndSpeedAsCommands();
             ShouldDisableLegacyTurnCommitPath();
+            ShouldRejectDecreeWithoutResponsibleCapability();
+            ShouldRejectDecreeWhenTreasuryOrDeadlineInvalid();
+            ShouldAcceptDecreeDeductBudgetAndBindShipment();
+            ShouldExpireDecreeAtDeadlineAndDropTrust();
+            ShouldKeepDecreeIdempotent();
+            ShouldTrackFrontierReadinessDaily();
+            ShouldFailHardAfterSevenZeroGrainDays();
+            ShouldEvaluateEndgameTiers();
+            ShouldReplayRiskSamplesDeterministically();
+            ShouldKeepShipmentEscortSettlementAndRaidCap();
             Console.WriteLine("MingSim 实时内核补审测试全部通过。");
             return 0;
         }
@@ -925,6 +937,310 @@ internal static class Program
             "切换倍速后必须继续使用既有余数，并按新速度累计后再提交整小时");
     }
 
+    // ===== P0 玩法规则（I2A 宁远急饷）新增验收 =====
+
+    /// <summary>政令权限拒绝：承办人无对应 CapabilityGrant 时，命令被结构化拒绝且世界不变。</summary>
+    private static void ShouldRejectDecreeWithoutResponsibleCapability()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var before = runtime.ReadModel;
+        var command = CreateDecree(runtime, "decree-denied", deadlineDays: 10, responsible: new CharacterId("war"));
+        Require(runtime.EnqueueCreateDecree(command).Queued, "政令命令应进入收件箱");
+        var result = runtime.AdvanceTo(before.GameTime);
+
+        Require(!result.CommandResults.Single().Accepted, "承办人无能力时必须拒绝政令");
+        Require(result.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_RESPONSIBLE_UNAUTHORIZED"),
+            "拒绝必须带结构化权限错误码");
+        Require(result.Events.Any(domainEvent => domainEvent.EventType == "DecreeRejected"),
+            "拒绝必须产生可审计 DecreeRejected 事件");
+        Require(runtime.ReadModel.Decrees.Count == 0, "拒绝不能创建政令状态");
+        Require(runtime.ReadModel.Scenario.SpentSilver == 0, "拒绝不能扣除预算");
+        Require(runtime.ReadModel.WorldVersion == before.WorldVersion && runtime.ReadModel.GameTime == before.GameTime,
+            "业务拒绝不能推进世界版本或时间");
+    }
+
+    /// <summary>政令预算超国库/期限已过：结构化拒绝，不产生任何世界变化。</summary>
+    private static void ShouldRejectDecreeWhenTreasuryOrDeadlineInvalid()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var before = runtime.ReadModel;
+        var overBudget = CreateDecree(runtime, "decree-over-budget", deadlineDays: 10, budget: long.MaxValue);
+        Require(runtime.EnqueueCreateDecree(overBudget).Queued, "超预算政令应进入收件箱");
+        var budgetResult = runtime.AdvanceTo(before.GameTime);
+        Require(!budgetResult.CommandResults.Single().Accepted &&
+                budgetResult.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_BUDGET_EXCEEDS_TREASURY"),
+            "预算超过国库必须拒绝 DECREE_BUDGET_EXCEEDS_TREASURY");
+
+        var pastDeadline = CreateDecree(runtime, "decree-past", deadlineDays: 0);
+        Require(runtime.EnqueueCreateDecree(pastDeadline).Queued, "过期期限政令应进入收件箱");
+        var deadlineResult = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!deadlineResult.CommandResults.Single().Accepted &&
+                deadlineResult.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_DEADLINE_IN_PAST"),
+            "期限不晚于当前时间必须拒绝 DECREE_DEADLINE_IN_PAST");
+        Require(runtime.ReadModel.Decrees.Count == 0 && runtime.ReadModel.Scenario.SpentSilver == 0,
+            "两类非法政令都不能创建状态或扣预算");
+    }
+
+    /// <summary>政令接纳：预算扣除、DecreeAccepted 事件；绑定粮运抵达后政令完成。</summary>
+    private static void ShouldAcceptDecreeDeductBudgetAndBindShipment()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var before = runtime.ReadModel;
+        var decree = CreateDecree(runtime, "decree-grain", deadlineDays: 20, budget: 5_000,
+            responsible: new CharacterId("works"), linkedShipmentId: "shipment-decree-grain");
+        Require(runtime.EnqueueCreateDecree(decree).Queued, "有权限承办人的政令应进入收件箱");
+        var accepted = runtime.AdvanceTo(before.GameTime);
+
+        Require(accepted.CommandResults.Single().Accepted, "承办人有对应能力时必须接纳政令");
+        Require(accepted.Events.Any(domainEvent => domainEvent.EventType == "DecreeAccepted"),
+            "接纳必须产生 DecreeAccepted 事件");
+        Require(runtime.ReadModel.Scenario.SpentSilver == 5_000, "接纳必须把预算计入场景支出");
+        Require(runtime.ReadModel.Decrees.Single().Status == DecreeStatus.Executing, "接纳后政令进入执行状态");
+
+        var shipment = new CreateShipmentCommand(
+            "shipment-decree-grain", new CharacterId("works"), new ShipmentId("shipment-decree-grain"),
+            new RouteId("capital-ningyuan-grain"), 5_000, runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion);
+        Require(runtime.EnqueueCreateShipment(shipment).Queued, "绑定粮运应进入收件箱");
+        runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        var arrived = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddDays(12)));
+
+        Require(arrived.Events.Any(domainEvent => domainEvent.EventType == "DecreeCompleted"),
+            "绑定单抵达必须触发 DecreeCompleted");
+        Require(runtime.ReadModel.Decrees.Single().Status == DecreeStatus.Completed, "绑定单抵达后政令必须完成");
+    }
+
+    /// <summary>甩责：政令到期未完成 → DecreeDeadlineExpired 事件、大臣信任 -5。</summary>
+    private static void ShouldExpireDecreeAtDeadlineAndDropTrust()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var before = runtime.ReadModel;
+        var decree = CreateDecree(runtime, "decree-expire", deadlineDays: 2, budget: 2_000);
+        Require(runtime.EnqueueCreateDecree(decree).Queued, "期限测试政令应进入收件箱");
+        var accepted = runtime.AdvanceTo(before.GameTime);
+        Require(accepted.CommandResults.Single().Accepted && runtime.ReadModel.Scenario.MinisterTrust == 50,
+            "接纳政令本身不能改变大臣信任");
+
+        var expired = runtime.AdvanceTo(new GameTime(before.GameTime.Value.AddDays(3)));
+        Require(expired.Events.Any(domainEvent => domainEvent.EventType == "DecreeDeadlineExpired"),
+            "逾期必须产生甩责事件");
+        Require(runtime.ReadModel.Decrees.Single().Status == DecreeStatus.Expired, "逾期政令必须作废");
+        Require(runtime.ReadModel.Scenario.MinisterTrust == 45, "甩责使大臣信任下降 5 点（DESIGN）");
+    }
+
+    /// <summary>政令幂等：同 CommandId 重放返回原结果且不二次扣预算；同号不同内容返回冲突。</summary>
+    private static void ShouldKeepDecreeIdempotent()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var before = runtime.ReadModel;
+        var decree = CreateDecree(runtime, "decree-idem", deadlineDays: 10, budget: 3_000);
+        Require(runtime.EnqueueCreateDecree(decree).Queued, "幂等政令应进入收件箱");
+        var accepted = runtime.AdvanceTo(before.GameTime);
+        Require(accepted.CommandResults.Single().Accepted && runtime.ReadModel.Scenario.SpentSilver == 3_000,
+            "首条政令必须接纳并扣预算");
+
+        Require(runtime.EnqueueCreateDecree(decree).Queued, "幂等重试应进入安全点判定");
+        var replay = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(replay.CommandResults.Single().Accepted && replay.CommandResults.Single().Message.Contains("幂等", StringComparison.Ordinal),
+            "同号同内容必须按幂等记录返回原结果");
+        Require(runtime.ReadModel.Scenario.SpentSilver == 3_000 && runtime.ReadModel.Decrees.Count == 1,
+            "幂等重放不能二次扣预算或创建第二道政令");
+
+        var conflict = decree with { Budget = 9_999 };
+        Require(runtime.EnqueueCreateDecree(conflict).Queued, "同号不同内容应进入安全点判定");
+        var conflictResult = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!conflictResult.CommandResults.Single().Accepted &&
+                conflictResult.CommandResults.Single().Errors.Any(error => error.Code == "IDEMPOTENCY_CONFLICT"),
+            "同 CommandId 携带不同内容必须返回 IDEMPOTENCY_CONFLICT");
+        Require(runtime.ReadModel.Scenario.SpentSilver == 3_000, "冲突拒绝不能扣预算");
+    }
+
+    /// <summary>前线战备：足额供粮日缓慢恢复、断粮日逐日下降、欠饷累计；到粮后恢复。</summary>
+    private static void ShouldTrackFrontierReadinessDaily()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var before = runtime.ReadModel;
+        Require(before.Readiness.Value == 60 && before.Scenario.LocalBurden == 20 && before.Scenario.MinisterTrust == 50,
+            "场景初始值必须符合 doc 03 §7.1：战备 60 / 负担 20 / 信任 50");
+
+        var day10 = runtime.AdvanceTo(new GameTime(before.GameTime.Value.AddDays(10)));
+        Require(day10.ReadModel.Stockpiles.Single(item => item.Id.Value == "ningyuan-granary").GrainQuantity == 5_400 - 10 * 300,
+            "10 天足额供粮应消耗 3000 石");
+        Require(day10.ReadModel.Readiness.ValueBasisPoints == 6_000 + 10 * ReadinessState.DesignFullDayGainBasisPoints,
+            "10 天足额供粮应恢复战备 +1（+100 基点）");
+        Require(day10.ReadModel.Readiness.ArrearsGrain == 0, "足额供粮不应产生欠饷");
+
+        var day24 = runtime.AdvanceTo(new GameTime(before.GameTime.Value.AddDays(24)));
+        Require(day24.ReadModel.Stockpiles.Single(item => item.Id.Value == "ningyuan-granary").GrainQuantity == 0,
+            "第 24 天应已完全断粮");
+        Require(day24.ReadModel.Readiness.ConsecutiveZeroGrainDays == 6, "第 19..24 天应连续断粮 6 天");
+        Require(day24.ReadModel.Readiness.ArrearsGrain == 6 * 300, "6 天断粮应累计欠饷 1800 石");
+        Require(day24.ReadModel.Readiness.ValueBasisPoints == 6_100 + 8 * 10 - 6 * 200,
+            "战备必须体现足额恢复与断粮衰减（DESIGN 公式）");
+
+        // 到粮缓慢恢复：补运 5000 石（12 日到达），到粮后足额供粮日每天 +0.1。
+        Require(runtime.EnqueueCreateShipment(CreateShipment(runtime, "recover", 5_000)).Queued, "补粮命令应进入收件箱");
+        runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        var arrival = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddDays(12)));
+        Require(arrival.ReadModel.Stockpiles.Single(item => item.Id.Value == "ningyuan-granary").GrainQuantity > 0,
+            "粮队必须到达并恢复库存");
+        var atArrival = arrival.ReadModel.Readiness.ValueBasisPoints;
+        var afterRecovery = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddDays(5)));
+        Require(afterRecovery.ReadModel.Readiness.ValueBasisPoints == atArrival + 5 * ReadinessState.DesignFullDayGainBasisPoints,
+            "到粮后足额供粮日必须每天缓慢恢复 +0.1（+10 基点）");
+        Require(afterRecovery.ReadModel.Readiness.ArrearsGrain == arrival.ReadModel.Readiness.ArrearsGrain,
+            "恢复供粮后不能再新增欠饷");
+    }
+
+    /// <summary>硬失败：连续 7 日可用粮为 0 → EvaluateEndgame 判 HardFailure 并只报告一次。</summary>
+    private static void ShouldFailHardAfterSevenZeroGrainDays()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld(destinationGrain: 0));
+        var before = runtime.ReadModel;
+        var day7 = runtime.AdvanceTo(new GameTime(before.GameTime.Value.AddDays(7)));
+        Require(day7.ReadModel.Readiness.ConsecutiveZeroGrainDays == 7, "第 7 天必须连续断粮 7 天");
+        Require(day7.Events.Count(domainEvent => domainEvent.EventType == "ScenarioHardFailure") == 1,
+            "达到硬失败条件必须且只能报告一次");
+
+        var evaluation = runtime.EvaluateEndgame();
+        Require(evaluation.Outcome == EndgameOutcome.HardFailure, "评估必须判硬失败");
+        Require(evaluation.HardFailureReason == "连续7日可用粮为0", "硬失败原因必须明确可解释");
+        Require(evaluation.Explanation.Contains("宁远可用粮", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("前线战备", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("中央财政", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("地方负担", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("大臣信任", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("执行与审计", StringComparison.Ordinal),
+            "终局评估必须输出 doc 03 §7.3 的六个解释维度");
+    }
+
+    /// <summary>90 日终局分档：勉强维持/成功/优秀/失败 与 90 日前 InProgress。</summary>
+    private static void ShouldEvaluateEndgameTiers()
+    {
+        var early = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        Require(early.EvaluateEndgame().Outcome == EndgameOutcome.InProgress,
+            "90 日前且未硬失败必须返回 InProgress");
+
+        // 失败：终局存粮 0 日（27000 石正好被 90 日消耗光），未达"勉强维持"。
+        var failed = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld(destinationGrain: 27_000));
+        failed.AdvanceTo(new GameTime(failed.ReadModel.GameTime.Value.AddDays(90)));
+        Require(failed.EvaluateEndgame().Outcome == EndgameOutcome.Failed,
+            "终局存粮不足 7 日且未硬失败必须判失败");
+
+        // 勉强维持：终局存粮 10 日、战备 69，但不足 18 日成功线。
+        var barely = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld(destinationGrain: 30_000));
+        barely.AdvanceTo(new GameTime(barely.ReadModel.GameTime.Value.AddDays(90)));
+        var barelyEvaluation = barely.EvaluateEndgame();
+        Require(barelyEvaluation.AvailableGrainDays == 10 && barelyEvaluation.Outcome == EndgameOutcome.BarelyMaintained,
+            $"终局存粮 10 日应判勉强维持，实际 {barelyEvaluation.Outcome}");
+
+        // 成功：终局存粮 20 日、战备 69、负担 20、银未透支。
+        var success = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld(destinationGrain: 33_000));
+        success.AdvanceTo(new GameTime(success.ReadModel.GameTime.Value.AddDays(90)));
+        var successEvaluation = success.EvaluateEndgame();
+        Require(successEvaluation.AvailableGrainDays == 20 && successEvaluation.Outcome == EndgameOutcome.Success,
+            $"终局存粮 20 日应判成功，实际 {successEvaluation.Outcome}");
+
+        // 优秀：存粮 30 日、战备 80+、信任 60、负担 20、银未透支（战备/信任由测试注入，评估本身可自动检查）。
+        var excellentWorld = CreateNingyuanScenarioWorld(destinationGrain: 36_000);
+        ReplaceReadiness(excellentWorld, new ReadinessState(7_200));
+        ChangeScenarioTrust(excellentWorld, +10);
+        var excellent = new RealtimeSimulationRuntime(excellentWorld);
+        excellent.AdvanceTo(new GameTime(excellent.ReadModel.GameTime.Value.AddDays(90)));
+        var excellentEvaluation = excellent.EvaluateEndgame();
+        Require(excellentEvaluation.AvailableGrainDays == 30 && excellentEvaluation.Outcome == EndgameOutcome.Excellent,
+            $"终局存粮 30 日且战备/信任达标应判优秀，实际 {excellentEvaluation.Outcome}");
+    }
+
+    /// <summary>固定风险样本：相同种子重放同一事件流与 hash；天气延误、袭粮、三份报告各一次。</summary>
+    private static void ShouldReplayRiskSamplesDeterministically()
+    {
+        var first = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld(travelHours: 24 * 24));
+        var replay = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld(travelHours: 24 * 24));
+        first.ScheduleScenarioRiskSamples();
+        replay.ScheduleScenarioRiskSamples();
+        Require(first.EnqueueCreateShipment(CreateShipment(first, "risk-a", 5_000)).Queued, "风险样本首批应进入收件箱");
+        Require(replay.EnqueueCreateShipment(CreateShipment(replay, "risk-a", 5_000)).Queued, "重放首批应进入收件箱");
+        first.AdvanceTo(first.ReadModel.GameTime);
+        replay.AdvanceTo(replay.ReadModel.GameTime);
+
+        var firstResult = first.AdvanceTo(new GameTime(first.ReadModel.GameTime.Value.AddDays(40)));
+        var replayResult = replay.AdvanceTo(new GameTime(replay.ReadModel.GameTime.Value.AddDays(40)));
+        Require(firstResult.ReadModel.StateHash == replayResult.ReadModel.StateHash,
+            "相同种子重放必须得到同一 canonical hash");
+        Require(EventFingerprints(firstResult.Events).SequenceEqual(EventFingerprints(replayResult.Events)),
+            "相同种子重放必须得到同一事件流");
+
+        var delayed = firstResult.Events.Where(domainEvent => domainEvent.EventType == "ShipmentDelayed").ToArray();
+        Require(delayed.Length == 1, "固定风险样本必须恰好一次天气延误");
+        var delayDays = int.Parse(delayed.Single().Data["delay_days"]);
+        Require(delayDays is >= 1 and <= 3, "天气延误天数必须落在确定性抽取的 1..3 日（DESIGN）");
+
+        var attacked = firstResult.Events.Where(domainEvent => domainEvent.EventType == "ShipmentAttacked").ToArray();
+        Require(attacked.Length == 1, "固定风险样本必须恰好一次袭粮");
+        var lossPercent = int.Parse(attacked.Single().Data["loss_percent"]);
+        Require(lossPercent is >= 0 and <= 20, "无护卫批次袭粮损失必须落在 0..20% 上限内");
+        var expectedRaidLoss = 5_000L * lossPercent / 100;
+        Require(firstResult.ReadModel.Shipments.Single(item => item.Id.Value == "shipment-risk-a").RaidLossGrain == expectedRaidLoss,
+            "袭粮损失必须按确定性比例计入运输单");
+
+        var reports = firstResult.Events.Where(domainEvent => domainEvent.EventType == "ScenarioReportReceived").ToArray();
+        Require(reports.Length == 3, "固定风险样本必须恰好三份报告");
+        Require(reports.Select(item => item.Data["report_id"]).Distinct(StringComparer.Ordinal).Count() == 3,
+            "三份报告必须各有独立 report_id");
+        foreach (var report in reports)
+        {
+            Require(int.Parse(report.Data["credibility"]) is >= 50 and <= 95,
+                "报告可信度必须落在确定性抽取的 50..95");
+            Require(int.Parse(report.Data["age_days"]) is >= 1 and <= 10,
+                "报告时效必须落在确定性抽取的 1..10 日");
+        }
+
+        Require(firstResult.Events.Any(domainEvent => domainEvent.EventType == "ShipmentArrived"),
+            "延误与袭粮后粮队仍必须抵达");
+    }
+
+    /// <summary>护卫：出发时每批 +400 两结算；袭粮损失上限更低；抵达仍守恒。</summary>
+    private static void ShouldKeepShipmentEscortSettlementAndRaidCap()
+    {
+        var escorted = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld(travelHours: 24 * 24));
+        var unescorted = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld(travelHours: 24 * 24));
+        escorted.ScheduleScenarioRiskSamples();
+        unescorted.ScheduleScenarioRiskSamples();
+        Require(escorted.EnqueueCreateShipment(new CreateShipmentCommand(
+            "escort-1", new CharacterId("works"), new ShipmentId("shipment-escort-1"),
+            new RouteId("capital-ningyuan-grain"), 5_000, escorted.ReadModel.GameTime.Value, 0, Escort: true)).Queued,
+            "护卫批次应进入收件箱");
+        Require(unescorted.EnqueueCreateShipment(new CreateShipmentCommand(
+            "plain-1", new CharacterId("works"), new ShipmentId("shipment-plain-1"),
+            new RouteId("capital-ningyuan-grain"), 5_000, unescorted.ReadModel.GameTime.Value, 0)).Queued,
+            "无护卫批次应进入收件箱");
+        // 出发安全点：命令接纳后同一推进内完成出发与护卫结算，事件必须在此可见。
+        var escortedDeparture = escorted.AdvanceTo(escorted.ReadModel.GameTime);
+        var unescortedDeparture = unescorted.AdvanceTo(unescorted.ReadModel.GameTime);
+
+        var escortedResult = escorted.AdvanceTo(new GameTime(escorted.ReadModel.GameTime.Value.AddDays(40)));
+        var unescortedResult = unescorted.AdvanceTo(new GameTime(unescorted.ReadModel.GameTime.Value.AddDays(40)));
+
+        Require(escortedDeparture.Events.Any(domainEvent => domainEvent.EventType == "EscortSettlement"),
+            "护卫批次出发时必须结算 +400 两");
+        Require(escortedResult.Events.All(domainEvent => domainEvent.EventType != "EscortSettlementFailed"),
+            "国库充足时护卫结算不能失败");
+        Require(!unescortedResult.Events.Any(domainEvent => domainEvent.EventType == "EscortSettlement"),
+            "无护卫批次不能产生护卫结算");
+        Require(escortedResult.ReadModel.Scenario.SpentSilver == 400 &&
+                unescortedResult.ReadModel.Scenario.SpentSilver == 0,
+            "护卫费用必须计入场景支出");
+
+        var escortedRaid = escortedResult.Events.Single(domainEvent => domainEvent.EventType == "ShipmentAttacked");
+        var unescortedRaid = unescortedResult.Events.Single(domainEvent => domainEvent.EventType == "ShipmentAttacked");
+        Require(int.Parse(escortedRaid.Data["loss_percent"]) <= 5, "护卫批次袭粮损失上限必须降到 5%");
+        Require(int.Parse(unescortedRaid.Data["loss_percent"]) <= 20, "无护卫批次袭粮损失上限为 20%");
+
+        var escortedShipment = escortedResult.ReadModel.Shipments.Single(item => item.Id.Value == "shipment-escort-1");
+        Require(escortedShipment.DeliveredGrain + escortedShipment.LossGrain == escortedShipment.GrainQuantity,
+            "袭粮后抵达仍必须满足粮食守恒（实到 + 损耗 = 计划量）");
+    }
+
     private static void InvokeCommitRealtime(WorldState world, long version, string commitId)
     {
         try
@@ -1102,6 +1418,78 @@ internal static class Program
                     routeCapacity, travelHours, lossPerThousand),
             ]);
     }
+
+    /// <summary>宁远急饷场景世界：携带场景状态（前线粮仓），用于战备/负担/信任/风险样本/终局验收。</summary>
+    private static WorldState CreateNingyuanScenarioWorld(
+        long sourceGrain = 20_000,
+        long destinationGrain = 5_400,
+        long routeCapacity = 6_000,
+        long destinationCapacity = 50_000,
+        int travelHours = 12 * 24,
+        int lossPerThousand = 80)
+    {
+        var map = new MapDefinition(
+            "ningyuan-map",
+            [
+                new ProvinceDefinition(new ProvinceId("capital"), "京师", [new ProvinceId("liaodong")]),
+                new ProvinceDefinition(new ProvinceId("liaodong"), "辽东", [new ProvinceId("capital")]),
+            ]);
+        return WorldState.CreateInitial(
+            new WorldId("ningyuan-1629"),
+            1,
+            200_000,
+            map,
+            characters:
+            [
+                new CharacterState(new CharacterId("emperor"), "崇祯皇帝",
+                    new CharacterAttributes(70, 55, 40, 65, 80),
+                    new CharacterPersonality(true, true, true, false)),
+                new CharacterState(new CharacterId("works"), "户部运粮官",
+                    new CharacterAttributes(80, 60, 30, 40, 70),
+                    new CharacterPersonality(true, false, true, true)),
+                new CharacterState(new CharacterId("war"), "无物流权限角色",
+                    new CharacterAttributes(60, 40, 80, 50, 60),
+                    new CharacterPersonality(true, true, true, false)),
+            ],
+            capabilityGrants:
+            [
+                new CapabilityGrant(new CharacterId("works"), GameCapability.PlanLogistics, "capital-ningyuan-grain"),
+            ],
+            stockpiles:
+            [
+                new StockpileState(new StockpileId("capital-granary"), new ProvinceId("capital"), 30_000, sourceGrain),
+                new StockpileState(new StockpileId("ningyuan-granary"), new ProvinceId("liaodong"), destinationCapacity, destinationGrain),
+            ],
+            routes:
+            [
+                new RouteState(new RouteId("capital-ningyuan-grain"),
+                    new StockpileId("capital-granary"), new StockpileId("ningyuan-granary"),
+                    routeCapacity, travelHours, lossPerThousand),
+            ],
+            scenario: new ScenarioState(frontStockpileId: new StockpileId("ningyuan-granary")));
+    }
+
+    private static CreateDecreeCommand CreateDecree(
+        RealtimeSimulationRuntime runtime,
+        string id,
+        int deadlineDays,
+        long budget = 5_000,
+        CharacterId? responsible = null,
+        string? linkedShipmentId = null) =>
+        new(id, new CharacterId("emperor"), new DecreeId(id), $"向宁远调运军粮 {id}", new ProvinceId("liaodong"),
+            budget, responsible ?? new CharacterId("works"),
+            new GameTime(runtime.ReadModel.GameTime.Value.AddDays(deadlineDays)),
+            "", "测试政令", GameCapability.PlanLogistics, "capital-ningyuan-grain",
+            linkedShipmentId, runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion);
+
+    /// <summary>只用于测试：注入终局分档所需的战备初值（评估函数本身可自动检查）。</summary>
+    private static void ReplaceReadiness(WorldState world, ReadinessState readiness) =>
+        typeof(WorldState).GetProperty("Readiness", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+            .SetValue(world, readiness);
+
+    private static void ChangeScenarioTrust(WorldState world, int delta) =>
+        typeof(ScenarioState).GetMethod("ChangeMinisterTrust", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(world.Scenario, [delta]);
 
     private static WorldState CreateWorld(string worldId = "smoke-world", string characterName = "兵部角色")
     {

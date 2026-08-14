@@ -59,3 +59,9 @@ public readonly record struct ShipmentId(string Value)
 {
     public override string ToString() => Value;
 }
+
+/// <summary>一道结构化政令的稳定编号。</summary>
+public readonly record struct DecreeId(string Value)
+{
+    public override string ToString() => Value;
+}

@@ -53,6 +53,42 @@ public sealed class InvariantChecker
             }
         }
 
+        if (world.Scenario.LocalBurden is < 0 or > 100 || world.Scenario.MinisterTrust is < 0 or > 100 ||
+            world.Scenario.DailyGrainDemand <= 0 || world.Scenario.SpentSilver < 0)
+        {
+            errors.Add(new SimulationError(
+                "INVARIANT_SCENARIO_INVALID",
+                "场景级状态必须满足 0<=负担/信任<=100、日需为正、支出非负。"));
+        }
+
+        if (world.Readiness.ValueBasisPoints is < 0 or > 10_000 ||
+            world.Readiness.ArrearsGrain < 0 || world.Readiness.ConsecutiveZeroGrainDays < 0)
+        {
+            errors.Add(new SimulationError(
+                "INVARIANT_READINESS_INVALID",
+                "战备必须在 0..10000 基点内，欠饷与连续断粮天数不能为负。"));
+        }
+
+        foreach (var decree in world.Decrees.Values)
+        {
+            if (decree.Budget < 0)
+            {
+                errors.Add(new SimulationError(
+                    "INVARIANT_DECREE_INVALID",
+                    $"政令 {decree.Id} 的预算不能为负。"));
+            }
+        }
+
+        foreach (var shipment in world.Logistics.Shipments.Values)
+        {
+            if (shipment.RaidLossGrain < 0 || shipment.RaidLossGrain > shipment.GrainQuantity)
+            {
+                errors.Add(new SimulationError(
+                    "INVARIANT_SHIPMENT_RAID_INVALID",
+                    $"运输单 {shipment.Id} 的袭粮损失必须落在 0 到计划量之间。"));
+            }
+        }
+
         return errors;
     }
 }

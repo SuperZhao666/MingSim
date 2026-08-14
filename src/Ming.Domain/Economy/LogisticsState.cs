@@ -179,7 +179,8 @@ public sealed class ShipmentState
         ShipmentId id,
         RouteId routeId,
         long grainQuantity,
-        GameTime plannedAt)
+        GameTime plannedAt,
+        bool escort = false)
     {
         if (string.IsNullOrWhiteSpace(id.Value))
         {
@@ -195,6 +196,7 @@ public sealed class ShipmentState
         RouteId = routeId;
         GrainQuantity = grainQuantity;
         PlannedAt = plannedAt;
+        Escort = escort;
     }
 
     public ShipmentId Id { get; }
@@ -214,6 +216,12 @@ public sealed class ShipmentState
     public long DeliveredGrain { get; private set; }
 
     public long LossGrain { get; private set; }
+
+    /// <summary>是否带护卫：护卫在出发时结算 +400 两费用，并把袭粮损失上限压到更低。</summary>
+    public bool Escort { get; }
+
+    /// <summary>袭粮损失（石）：在途被劫后累加；抵达结算时先从实到量里扣掉并计入损耗，保证粮食守恒。</summary>
+    public long RaidLossGrain { get; private set; }
 
     public long RemainingGrain => Status == ShipmentStatus.Arrived ? 0 : GrainQuantity;
 
@@ -246,15 +254,31 @@ public sealed class ShipmentState
         LossGrain = lossGrain;
     }
 
+    internal void ApplyRaidLoss(long lossGrain)
+    {
+        if (lossGrain <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(lossGrain), "袭粮损失必须为正数。");
+        }
+
+        if (RaidLossGrain > GrainQuantity - lossGrain)
+        {
+            throw new InvalidOperationException($"运输单 {Id} 的袭粮损失超过在途粮食总量。");
+        }
+
+        RaidLossGrain = checked(RaidLossGrain + lossGrain);
+    }
+
     public ShipmentState Clone()
     {
-        var clone = new ShipmentState(Id, RouteId, GrainQuantity, PlannedAt)
+        var clone = new ShipmentState(Id, RouteId, GrainQuantity, PlannedAt, Escort)
         {
             Status = Status,
             DepartedAt = DepartedAt,
             ArrivedAt = ArrivedAt,
             DeliveredGrain = DeliveredGrain,
             LossGrain = LossGrain,
+            RaidLossGrain = RaidLossGrain,
         };
         return clone;
     }
