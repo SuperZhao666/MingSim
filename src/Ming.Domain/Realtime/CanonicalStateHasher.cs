@@ -16,8 +16,13 @@ namespace MingSim.Domain.Realtime;
 public static class CanonicalStateHasher
 {
     // Schema 4→5：新增 AppointmentState 段（任命影响授权裁决，必须进入权威哈希）。
-    // 哈希 schema 改变就递增版本（doc 08 约定），旧存档按旧版本验证。
-    public const int SchemaVersion = 5;
+    // Schema 5→6：ScenarioState 新增 RationReductionActive 标志（减耗令生效改变未来日耗/战备规则，必须进入权威哈希）。
+    // 哈希 schema 改变就递增版本（doc 08 约定）。
+    // 兼容性说明：schema 6 与 schema 5（本 PR 之前）的存档不兼容——旧存档的 StateHash 按 schema 5 计算，
+    // 新代码按 schema 6 重算必然失配；恢复因此被显式拒绝（RealtimeSnapshotSchema.Version 已升到 7，
+    // Restore 的版本门禁先于哈希校验返回"不支持实时快照版本"），而不是以哈希失配的偶然失败收场。
+    // 旧存档不再可恢复（fail-closed），需要迁移或重建。
+    public const int SchemaVersion = 6;
 
     public static string Compute(
         WorldState state,
@@ -338,6 +343,7 @@ public static class CanonicalStateHasher
         WriteInt32(writer, state.Scenario.LocalBurden);
         WriteInt32(writer, state.Scenario.MinisterTrust);
         WriteInt32(writer, state.Scenario.DailyGrainDemand);
+        writer.Write(state.Scenario.RationReductionActive);
         WriteNullableString(writer, state.Scenario.FrontStockpileId?.Value);
         WriteInt32(writer, state.Scenario.SecondHalfFromDay);
         WriteInt32(writer, state.Scenario.BurdenCooperationThreshold);
