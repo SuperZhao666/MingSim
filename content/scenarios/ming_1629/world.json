@@ -1,0 +1,215 @@
+{
+  "id": "ming_1629_ningyuan_jixiang",
+  "title": "崇祯二年·宁远急饷 90 日垂直切片",
+  "startTurn": 1,
+  "treasurySilver": 20000,
+  "map": {
+    "id": "ming_1629_ningyuan_map",
+    "provinces": [
+      { "id": "beijing", "name": "京师", "adjacentTo": [ "tongzhou" ] },
+      { "id": "tongzhou", "name": "通州", "adjacentTo": [ "beijing", "shanhaiguan" ] },
+      { "id": "shanhaiguan", "name": "山海关", "adjacentTo": [ "tongzhou", "ningyuan" ] },
+      { "id": "ningyuan", "name": "宁远", "adjacentTo": [ "shanhaiguan", "juehuadao" ] },
+      { "id": "juehuadao", "name": "觉华岛", "adjacentTo": [ "ningyuan", "dengzhou" ] },
+      { "id": "dengzhou", "name": "登州", "adjacentTo": [ "juehuadao" ] }
+    ]
+  },
+  "characters": [
+    {
+      "id": "zhu-youjian",
+      "name": "朱由检（崇祯帝）",
+      "locationId": "beijing",
+      "officeId": "office-emperor-central"
+    },
+    {
+      "id": "yuan-chonghuan",
+      "name": "袁崇焕",
+      "locationId": "shanhaiguan",
+      "officeId": "office-jiliao-dushi"
+    },
+    {
+      "id": "mao-wenlong",
+      "name": "毛文龙",
+      "locationId": "juehuadao",
+      "officeId": "office-dongjiang-zongbing"
+    },
+    {
+      "id": "man-gui",
+      "name": "满桂",
+      "locationId": "shanhaiguan",
+      "officeId": "office-guanning-ningyuan"
+    },
+    {
+      "id": "zu-dashou",
+      "name": "祖大寿",
+      "locationId": "ningyuan",
+      "officeId": "office-guanning-ningyuan"
+    },
+    {
+      "id": "sun-chengzong",
+      "name": "孙承宗",
+      "locationId": "beijing",
+      "officeId": null
+    },
+    {
+      "id": "hubu-slot",
+      "name": "户部尚书（职位槽位）",
+      "locationId": "beijing",
+      "officeId": "office-hubu-grain"
+    },
+    {
+      "id": "duliaoxiang-slot",
+      "name": "督辽饷承办人（职位槽位）",
+      "locationId": "beijing",
+      "officeId": "office-duliaoxiang"
+    }
+  ],
+  "institutions": [
+    {
+      "id": "office-emperor-central",
+      "name": "皇帝/中枢诏令节点",
+      "capabilities": [],
+      "members": [ "zhu-youjian" ]
+    },
+    {
+      "id": "office-hubu-grain",
+      "name": "户部（度支/仓科，边镇粮饷）",
+      "capabilities": [ "ReadFinance", "AllocateFinance" ],
+      "members": [ "hubu-slot" ]
+    },
+    {
+      "id": "office-duliaoxiang",
+      "name": "督辽饷专项差遣",
+      "capabilities": [ "PlanLogistics" ],
+      "members": [ "duliaoxiang-slot" ]
+    },
+    {
+      "id": "office-bingbu-zhifang",
+      "name": "兵部（职方/征调军务文书）",
+      "capabilities": [],
+      "members": []
+    },
+    {
+      "id": "office-jiliao-dushi",
+      "name": "蓟辽登津督师（督师军务差遣）",
+      "capabilities": [ "PlanLogistics", "MoveArmy" ],
+      "members": [ "yuan-chonghuan" ]
+    },
+    {
+      "id": "office-guanning-ningyuan",
+      "name": "关宁军镇/宁远卫前线机构",
+      "capabilities": [],
+      "members": [ "man-gui", "zu-dashou" ]
+    }
+  ],
+  "capabilityGrants": [
+    { "actorId": "hubu-slot", "capability": "ReadFinance", "resourceId": null },
+    { "actorId": "hubu-slot", "capability": "AllocateFinance", "resourceId": null },
+    { "actorId": "duliaoxiang-slot", "capability": "PlanLogistics", "resourceId": null },
+    { "actorId": "yuan-chonghuan", "capability": "PlanLogistics", "resourceId": "ningyuan" },
+    { "actorId": "yuan-chonghuan", "capability": "MoveArmy", "resourceId": "ningyuan" }
+  ],
+  "inventory": [],
+  "armies": [],
+  "stockpiles": [
+    { "id": "sp-beijing", "locationId": "beijing", "capacity": 30000, "grainQuantity": 10000 },
+    { "id": "sp-tongzhou", "locationId": "tongzhou", "capacity": 5000, "grainQuantity": 0 },
+    { "id": "sp-shanhaiguan", "locationId": "shanhaiguan", "capacity": 5000, "grainQuantity": 0 },
+    { "id": "sp-ningyuan", "locationId": "ningyuan", "capacity": 30000, "grainQuantity": 5400 },
+    { "id": "sp-juehuadao", "locationId": "juehuadao", "capacity": 5000, "grainQuantity": 0 },
+    { "id": "sp-dengzhou", "locationId": "dengzhou", "capacity": 30000, "grainQuantity": 14000 }
+  ],
+  "routes": [
+    { "id": "route-beijing-tongzhou", "fromStockpileId": "sp-beijing", "toStockpileId": "sp-tongzhou", "capacity": 5000, "travelHours": 48, "lossPerThousand": 80 },
+    { "id": "route-tongzhou-shanhaiguan", "fromStockpileId": "sp-tongzhou", "toStockpileId": "sp-shanhaiguan", "capacity": 5000, "travelHours": 120, "lossPerThousand": 80 },
+    { "id": "route-shanhaiguan-ningyuan", "fromStockpileId": "sp-shanhaiguan", "toStockpileId": "sp-ningyuan", "capacity": 5000, "travelHours": 120, "lossPerThousand": 80 },
+    { "id": "route-dengzhou-juehuadao", "fromStockpileId": "sp-dengzhou", "toStockpileId": "sp-juehuadao", "capacity": 7000, "travelHours": 96, "lossPerThousand": 50 },
+    { "id": "route-juehuadao-ningyuan", "fromStockpileId": "sp-juehuadao", "toStockpileId": "sp-ningyuan", "capacity": 7000, "travelHours": 96, "lossPerThousand": 50 }
+  ],
+  "decrees": [
+    {
+      "id": "decree-cuishou",
+      "kind": "催饷",
+      "name": "催饷令",
+      "description": "皇帝/中枢催办粮饷按期起运与到边的结构化政令模板。",
+      "fields": [ "承办机构", "督办数量（石）", "期限（游戏日）", "起运路线", "加急原因", "备注" ],
+      "tag": "DESIGN",
+      "source": "03-MVP垂直切片与范围 §4 政令模板；INS-001 文书模板为游戏化简化"
+    },
+    {
+      "id": "decree-boshou",
+      "kind": "拨饷",
+      "name": "拨饷令",
+      "description": "批准并拨付粮银的结构化政令模板：预算、数量、承办人、路线、期限。",
+      "fields": [ "拨付机构", "接收方", "粮数（石）", "银两预算（两）", "路线", "承办人", "期限（游戏日）", "限制", "备注" ],
+      "tag": "DESIGN",
+      "source": "03-MVP垂直切片与范围 §4 政令模板；INS-001 文书模板为游戏化简化"
+    },
+    {
+      "id": "decree-qingshou",
+      "kind": "请饷",
+      "name": "请饷奏疏",
+      "description": "前线/东江向中枢提出粮饷需求的奏疏模板。",
+      "fields": [ "请饷人", "需求数量（石）", "理由", "期望期限（游戏日）", "备注" ],
+      "tag": "DESIGN",
+      "source": "CLAIM-MAO-REQUESTED-GRAIN 请饷语境；INS-001 文书模板为游戏化简化"
+    }
+  ],
+  "provenance": {
+    "scenario_title": "崇祯二年·宁远急饷 90 日垂直切片",
+    "snapshot_date": "1629-01-01",
+    "evidence_ledger": "content/scenarios/ming_1629/evidence/liaodong-1629-evidence.json",
+    "research_ledger": "content/scenarios/ming_1629/research/actors-and-offices.json",
+    "design_docs": [
+      "docs/设计蓝图/03-MVP垂直切片与范围.md",
+      "docs/设计蓝图/16-历史内容与证据生产规范.md",
+      "docs/设计蓝图/17-宁远急饷MVP来源账本.md",
+      "docs/玩法验证/宁远急饷90日纸面推演.md"
+    ],
+    "scope_note": "只覆盖 90 日垂直切片所需最小数据：6 节点、5 条路线、8 个角色、6 个机构、3 份文书模板；不做全国、不做锦州节点、不虚构兵额与验收成功。",
+    "map_relation_note": "本文件 map 是模拟拓扑（MapDefinition 消费），与 content/scenarios/ming_1629/map/* 表现层文件相互独立；表现层未闭合的山海关、觉华岛（见 places.json warning）在本切片中仅作为玩法节点存在。"
+  },
+  "design": {
+    "policy": "所有数值均为 DESIGN（平衡/调度输入）或 OPEN（未决），不把纸面推演值写成 1629 史实；人物身份、任职与文书节点按证据账本标 FACT；OPEN 项不写死。",
+    "snapshot": {
+      "date": "1629-01-01",
+      "tag": "DESIGN",
+      "source": "17号账本 SCN-001；ADR-004：首个玩法切片暂选 1629“宁远急饷”，90 游戏日"
+    },
+    "loader_compat": {
+      "note": "加载器实际消费字段与 src/Ming.Application/Scenarios/ScenarioLoader.cs 一致（id/startTurn/treasurySilver/map/characters/institutions/capabilityGrants/inventory/armies）。stockpiles/routes/decrees 为前瞻内容段：当前加载器忽略未知字段，后续代码任务接入 WorldState.CreateInitial(stockpiles, routes) 后生效；字段名与 Ming.Domain.Economy.StockpileState/RouteState 构造参数一致。",
+      "characters_attributes": "本文件不给史实人物写 Attributes/Personality/Loyalty：证据账本 forbidden_to_write_into_game 明确禁止“忠诚、能力、性格、战斗力数值”。加载器缺省 50/50/50/50/50 与 (honest=true,bold=false,loyalToRuler=true,compassionate=true) 仅为运行时占位，不是内容断言。",
+      "capability_grants": "机构能力与 CapabilityGrant 是 authority_matrix 到 GameCapability 枚举的最小映射（DESIGN）：提出/督催运粮→PlanLogistics；财粮会计拨付→ReadFinance/AllocateFinance；督师军务→PlanLogistics+MoveArmy。皇帝批准/下令、兵部征调文书、宁远接收验收在能力原语中无对应项，保持不授（见 OPEN 条目）。"
+    },
+    "numbers": [
+      { "item": "初始国库银两", "path": "treasurySilver", "value": 20000, "unit": "两", "tag": "DESIGN", "source": "17号账本 NUM-004；03 §7；纸面推演 §3.1", "note": "场景银预算，不是 1629 国库史实余额。" },
+      { "item": "宁远初始存粮", "path": "stockpiles[sp-ningyuan].grainQuantity", "value": 5400, "unit": "石", "tag": "DESIGN", "source": "17号账本 NUM-001；03 §7", "note": "按 300 石/日约 18 日，制造明确倒计时。" },
+      { "item": "可调用粮源总量", "path": "stockpiles[sp-beijing].grainQuantity + stockpiles[sp-dengzhou].grainQuantity", "value": 24000, "unit": "石", "tag": "DESIGN", "source": "17号账本 NUM-003；纸面推演 §3.1", "note": "总量 24,000 石；节点分配（北京 10,000 + 登州 14,000）未被推演冻结，标记 DESIGN/OPEN，试玩后可调整。分配与纸面推演并行方案批次量一致（陆 2×5,000、海 2×7,000）。" },
+      { "item": "中央节点仓容量", "path": "stockpiles[sp-beijing|sp-ningyuan|sp-dengzhou].capacity", "value": 30000, "unit": "石", "tag": "DESIGN", "source": "无账本条目；GEO-001 仓容 OPEN", "note": "非约束性上限，保证纸面推演各策略峰值（最大 20,240 石）不触顶；真实仓储容量保持 OPEN。" },
+      { "item": "转运节点仓容量", "path": "stockpiles[sp-tongzhou|sp-shanhaiguan|sp-juehuadao].capacity", "value": 5000, "unit": "石", "tag": "DESIGN", "source": "无账本条目；GEO-002/003 运力 OPEN", "note": "等于单批陆运容量，作为中继不滞留多批；容量本身 OPEN。" },
+      { "item": "转运节点初始存量", "path": "stockpiles[sp-tongzhou|sp-shanhaiguan|sp-juehuadao].grainQuantity", "value": 0, "unit": "石", "tag": "DESIGN", "source": "快照日存量无证据", "note": "不写死中转仓快照存量（OPEN）；开局由中央节点直接发货。" },
+      { "item": "陆运单批容量", "path": "routes[route-*-beijing-tongzhou|tongzhou-shanhaiguan|shanhaiguan-ningyuan].capacity", "value": 5000, "unit": "石/批", "tag": "DESIGN", "source": "17号账本 NUM-005", "note": "陆运基线 5,000 石/批。" },
+      { "item": "海运单批容量", "path": "routes[route-dengzhou-juehuadao|route-juehuadao-ningyuan].capacity", "value": 7000, "unit": "石/批", "tag": "DESIGN", "source": "17号账本 NUM-006", "note": "海运基线 7,000 石/批。" },
+      { "item": "陆运总行程", "path": "routes[land].travelHours 之和", "value": 288, "unit": "小时（12 游戏日）", "tag": "DESIGN", "source": "17号账本 NUM-005；纸面推演 §3.1", "note": "北京→通州 48h + 通州→山海关 120h + 山海关→宁远 120h；分段时长是 DESIGN 拆分，合计符合 12 日基线。" },
+      { "item": "海运总行程", "path": "routes[sea].travelHours 之和", "value": 192, "unit": "小时（8 游戏日）", "tag": "DESIGN", "source": "17号账本 NUM-006；纸面推演 §3.1", "note": "登州→觉华岛 96h + 觉华岛→宁远 96h；分段时长是 DESIGN 拆分，合计符合 8 日基线。" },
+      { "item": "陆运损耗率", "path": "routes[land].lossPerThousand", "value": 80, "unit": "‰（8%）", "tag": "DESIGN", "source": "17号账本 NUM-005", "note": "陆运基准损耗 8%。" },
+      { "item": "海运损耗率", "path": "routes[sea].lossPerThousand", "value": 50, "unit": "‰（5%）", "tag": "DESIGN", "source": "纸面推演 §6.1 无事件批次损耗；OPEN-ROUTE-DISPATCH", "note": "取纸面推演海路“无事件”批次损耗 5% 作路线基线；风暴卡 40%、常规波动 15% 是批次风险样本（DESIGN 事件卡），不是路线固定损耗。" },
+      { "item": "宁远日耗设计参数", "path": "未入 loader 字段（后续系统接入）", "value": 300, "unit": "石/日", "tag": "DESIGN", "source": "17号账本 NUM-002", "note": "标准日耗；减耗令 240 石/日为玩法补救参数（纸面推演 §3.2），不写入本文件。" },
+      { "item": "场景量表初值", "path": "未入 loader 字段（后续系统接入）", "value": "战备 60 / 信任 50 / 地方负担 20", "unit": "百分制", "tag": "DESIGN", "source": "17号账本 NUM-007；03 §7", "note": "纯玩法量表初值；与纸面推演共同输入一致，不在本文件写死为史实。" }
+    ],
+    "facts": [
+      { "item": "六名人物身份", "refs": [ "ACTOR-ZHU-YOUJIAN", "ACTOR-YUAN-CHONGHUAN", "ACTOR-MAO-WENLONG", "ACTOR-MAN-GUI", "ACTOR-ZU-DASHOU", "ACTOR-SUN-CHENGZONG" ], "tag": "FACT", "source": "evidence ledger actors", "note": "仅身份与文书节点；无能力/忠诚/性格数值。" },
+      { "item": "袁崇焕以督师差遣驻关门", "refs": [ "CLAIM-YUAN-APPOINTMENT-FEB" ], "tag": "FACT", "source": "evidence ledger", "note": "locationId=shanhaiguan；任命月份存在二月/四月来源冲突（CLAIM-YUAN-DUSHI OPEN），本文件不写具体任命日。" },
+      { "item": "机构身份", "refs": [ "OFFICE-EMPEROR-CENTRAL", "OFFICE-HUBU-GRAIN", "OFFICE-DULIAO-XIANG", "OFFICE-BINGBU-ZHIFANG", "OFFICE-JILIAO-DUSHI", "OFFICE-GUANNING-NINGYUAN" ], "tag": "FACT", "source": "evidence ledger offices_or_institutions", "note": "机构法定/差遣身份按账本；1629 具体承办人保持槽位。" },
+      { "item": "宁远设东江饷司、觉华岛转饷方案", "refs": [ "CLAIM-YUAN-EASTJIANG-GRAIN-OFFICE" ], "tag": "FACT", "source": "evidence ledger", "note": "仅作宁远—觉华岛节点关系与文书样例；不写运力、时长、损耗。" },
+      { "item": "皇帝批准/户部财粮/兵部征调职责边界", "refs": [ "CLAIM-EMPEROR-ORDERS", "CLAIM-HUBU-DUTIES", "CLAIM-BINGBU-DUTIES" ], "tag": "FACT", "source": "evidence ledger", "note": "作为 authority_matrix 到 CapabilityGrant 映射的依据；映射本身是 DESIGN。" }
+    ],
+    "open": [
+      { "item": "1629-01-01 官员名册（户部尚书、督辽饷承办人、兵部司官、宁远验收官）", "refs": [ "OPEN-1629-JAN-CURRENT-OFFICERS" ], "handling": "户部/督辽饷用职位槽位（hubu-slot、duliaoxiang-slot）并在姓名中显式标注；兵部成员留空；宁远验收不自动成功。" },
+      { "item": "路线逐段时长、运力、损耗", "refs": [ "OPEN-ROUTE-DISPATCH" ], "handling": "travelHours/lossPerThousand 全部为 DESIGN 输入，不称史实；不把地图文件当证据。" },
+      { "item": "钱粮数量口径（币制/粮制/名义与实收）", "refs": [ "OPEN-MONEY-GRAIN-AMOUNTS" ], "handling": "所有石/两均为 DESIGN；未来史料范围另立“史料观察值”字段，不覆盖本文件平衡值。" },
+      { "item": "接收/清点/验收/入仓/回报链", "refs": [ "OPEN-RECEIPT-ACCEPTANCE" ], "handling": "本文件不设置任何自动验收成功；宁远前线机构能力留空。" },
+      { "item": "毛文龙、孙承宗 1629-01-01 驻地与任职", "refs": [ "CLAIM-MAO-STATUS-CHANGE", "CLAIM-SUN-LATER-1629-ASSIGNMENT" ], "handling": "毛文龙 locationId=juehuadao 为 DESIGN 海岛占位（实际驻东江诸岛，不在本切片节点集）；孙承宗 officeId 为空（正月无现任差遣），locationId=beijing 为 DESIGN 中枢占位。" }
+    ]
+  }
+}
