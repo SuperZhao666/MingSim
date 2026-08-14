@@ -1,4 +1,7 @@
+using System.Diagnostics;
+using System.Reflection;
 using System.Text.RegularExpressions;
+using MingSim.Agents.Audit;
 using MingSim.Agents.Decision;
 using MingSim.Agents.Providers;
 using MingSim.Agents.Realtime;
@@ -393,6 +396,250 @@ internal static partial class Program
         Require(result.Intents.Single() is PlanLogisticsIntent, "规则路径必须产出粮运意图");
     }
 
+    /// <summary>
+    /// 预算预检（M6）：预算已耗尽时，即使配置了 Provider，也必须在调用前停止模型请求（0 次调用），
+    /// 回退 Utility 产出结构化意图；审计记录一次 BudgetExceeded，世界不阻塞。
+    /// </summary>
+    private static void ShouldStopModelCallsWhenBudgetExceededBeforeCall()
+    {
+        var world = CreateEntryLogisticsWorld();
+        var runtime = new RealtimeSimulationRuntime(world);
+        var entry = new AgentRealtimeEntry(runtime);
+        var context = new AgentContextCompiler().Compile(world, new CharacterId("works"));
+        var now = runtime.ReadModel.GameTime;
+        var request = new DecisionRequest(
+            "decision-budget-precheck", new CharacterId("works"), world.WorldVersion, now,
+            now.Add(TimeSpan.FromHours(1)));
+        var provider = new FakeModelProvider(
+            """{"schema_version":1,"intent_type":"logistics.request_shipment","parameters":{"route_id":"capital-ningyuan-grain","grain_quantity":200}}""");
+        var budget = new ModelBudgetTracker(
+            new ModelBudget(MaxTokens: 100, MaxCostMillis: long.MaxValue, CostPerTokenMillis: 0));
+        budget.RecordUsage(100); // 预算已耗尽：任何一次新调用都会被闸门拦截
+        var audit = new ModelAuditLog();
+        var planner = new DecisionPlanner(
+            new UtilityMinisterAgent(MinisterFocus.Logistics), provider, budget, audit);
+        var before = runtime.ReadModel;
+
+        var result = planner.PlanAsync(request, context, now.Add(TimeSpan.FromMinutes(30))).GetAwaiter().GetResult();
+
+        Require(result.Source == DecisionSource.Rules, "预算耗尽时必须回退规则路径");
+        Require(result.FallbackReason == ModelFallbackReason.BudgetExceeded,
+            "回退原因必须明确为 BudgetExceeded，不能静默假装模型决策成功");
+        Require(result.Intents.Single() is PlanLogisticsIntent, "回退必须产出 Utility 的结构化意图");
+        Require(provider.CallCount == 0, "预算耗尽后不得发起任何模型调用");
+
+        var auditEntries = audit.Entries;
+        Require(auditEntries.Count == 1 && auditEntries[0].Outcome == ModelCallOutcome.BudgetExceeded,
+            "审计必须记录一次 BudgetExceeded");
+        Require(auditEntries[0].DecisionId == request.DecisionId, "审计必须关联决策 ID");
+
+        var submit = entry.Submit(world, result.Intents).Single();
+        Require(submit.Accepted, "预算回退意图必须经入口提交");
+        var advanced = runtime.AdvanceTo(before.GameTime);
+        Require(advanced.ReadModel.Shipments.Count == 1, "预算耗尽后世界必须继续推进（回退意图生效）");
+    }
+
+    /// <summary>
+    /// 预算记账（M6）：成功调用按 请求+响应 token 估算记账（长整型，避免浮点）；超大响应耗尽预算后，
+    /// 下一次决策在调用前被闸门拦截并回退 Utility。
+    /// </summary>
+    private static void ShouldFallBackToUtilityAfterBudgetExhaustedByUsage()
+    {
+        var world = CreateEntryLogisticsWorld();
+        var runtime = new RealtimeSimulationRuntime(world);
+        var context = new AgentContextCompiler().Compile(world, new CharacterId("works"));
+        var now = runtime.ReadModel.GameTime;
+        var request = new DecisionRequest(
+            "decision-budget-usage", new CharacterId("works"), world.WorldVersion, now,
+            now.Add(TimeSpan.FromHours(1)));
+        var budget = new ModelBudgetTracker(
+            new ModelBudget(MaxTokens: 100_000, MaxCostMillis: long.MaxValue, CostPerTokenMillis: 0));
+        var audit = new ModelAuditLog();
+        // 超大响应：padding 字段被解析器固定忽略，但响应 token 估算会计入预算。
+        var padding = new string('x', 1_000_000);
+        var hugeJson = "{\"schema_version\":1,\"intent_type\":\"logistics.request_shipment\",\"parameters\":{\"route_id\":\"capital-ningyuan-grain\",\"grain_quantity\":1},\"padding\":\"" + padding + "\"}";
+        var provider = new SequencedFakeModelProvider(
+            """{"schema_version":1,"intent_type":"logistics.request_shipment","parameters":{"route_id":"capital-ningyuan-grain","grain_quantity":200}}""",
+            hugeJson);
+        var planner = new DecisionPlanner(
+            new UtilityMinisterAgent(MinisterFocus.Logistics), provider, budget, audit);
+        var acceptedGameTime = now.Add(TimeSpan.FromMinutes(30));
+
+        var first = planner.PlanAsync(request, context, acceptedGameTime).GetAwaiter().GetResult();
+        Require(first.Source == DecisionSource.Model, "预算充足时第一次调用必须走模型路径");
+        Require(budget.SpentTokens > 0, "成功调用后必须按请求+响应 token 记账");
+
+        var second = planner.PlanAsync(request, context, acceptedGameTime).GetAwaiter().GetResult();
+        Require(second.Source == DecisionSource.Model, "超大响应本身仍可解析（多余字段固定忽略）");
+        Require(budget.SpentTokens >= 100_000, "超大响应的记账必须耗尽预算");
+        Require(budget.IsExhausted, "记账后预算必须处于耗尽状态");
+
+        var third = planner.PlanAsync(request, context, acceptedGameTime).GetAwaiter().GetResult();
+        Require(third.Source == DecisionSource.Rules && third.FallbackReason == ModelFallbackReason.BudgetExceeded,
+            "预算耗尽后的下一次决策必须回退 Utility 并明确原因");
+        Require(provider.CallCount == 2, "只有前两次真正调用模型，第三次被预算闸门拦截");
+    }
+
+    /// <summary>
+    /// Provider 抛异常（M6）：异常文本即使包含密钥形态，也绝不能进入审计或异常路径；
+    /// 决策回退 Utility，世界照常推进（不阻塞）。
+    /// </summary>
+    private static void ShouldFallBackToUtilityWhenProviderThrowsWithoutBlockingWorld()
+    {
+        var world = CreateEntryLogisticsWorld();
+        var runtime = new RealtimeSimulationRuntime(world);
+        var entry = new AgentRealtimeEntry(runtime);
+        var context = new AgentContextCompiler().Compile(world, new CharacterId("works"));
+        var now = runtime.ReadModel.GameTime;
+        var request = new DecisionRequest(
+            "decision-provider-throws", new CharacterId("works"), world.WorldVersion, now,
+            now.Add(TimeSpan.FromHours(1)));
+        var key = "sk-demo-secret-" + Guid.NewGuid().ToString("N");
+        var audit = new ModelAuditLog();
+        var provider = new ThrowingModelProvider(new InvalidOperationException("provider boom " + key));
+        var planner = new DecisionPlanner(
+            new UtilityMinisterAgent(MinisterFocus.Logistics), provider, auditLog: audit);
+        var before = runtime.ReadModel;
+
+        var result = planner.PlanAsync(request, context, now.Add(TimeSpan.FromMinutes(30))).GetAwaiter().GetResult();
+
+        Require(result.Source == DecisionSource.Rules && result.FallbackReason == ModelFallbackReason.ProviderFailed,
+            "Provider 抛异常必须回退 Utility 并明确失败原因");
+        var ruleIntent = result.Intents.Single();
+        Require(ruleIntent is PlanLogisticsIntent && ruleIntent.IdempotencyKey == "turn-1-logistics-ningyuan-300",
+            "回退必须产出 Utility 的结构化意图");
+
+        var submit = entry.Submit(world, result.Intents).Single();
+        Require(submit.Accepted, "回退意图必须可提交，世界不阻塞");
+        var advanced = runtime.AdvanceTo(before.GameTime);
+        Require(advanced.ReadModel.Shipments.Count == 1, "Provider 抛异常后世界必须继续推进");
+
+        Require(provider.CallCount == 1, "抛异常的 Provider 必须被调用一次");
+        Require(audit.Entries.Single().Outcome == ModelCallOutcome.ProviderFailed, "审计必须记录 ProviderFailed");
+        Require(!FlattenAudit(audit.Entries).Contains(key, StringComparison.Ordinal),
+            "异常文本中的密钥绝不能进入审计");
+    }
+
+    /// <summary>
+    /// Provider 超时（M6）：真实 OpenAiCompatibleModelProvider 头部停滞触发总超时硬边界，
+    /// 决策回退 Utility，审计记录 ProviderFailed，世界照常推进。
+    /// </summary>
+    private static void ShouldFallBackToUtilityWhenProviderTimesOutWithoutBlockingWorld()
+    {
+        var world = CreateEntryLogisticsWorld();
+        var runtime = new RealtimeSimulationRuntime(world);
+        var entry = new AgentRealtimeEntry(runtime);
+        var context = new AgentContextCompiler().Compile(world, new CharacterId("works"));
+        var now = runtime.ReadModel.GameTime;
+        var request = new DecisionRequest(
+            "decision-provider-timeout", new CharacterId("works"), world.WorldVersion, now,
+            now.Add(TimeSpan.FromHours(1)));
+        using var client = CreateClient(new FakeHttpMessageHandler((_, _) =>
+            new TaskCompletionSource<HttpResponseMessage>().Task));
+        var provider = new OpenAiCompatibleModelProvider(
+            client, "test-model", totalTimeout: TimeSpan.FromMilliseconds(80));
+        var audit = new ModelAuditLog();
+        var planner = new DecisionPlanner(
+            new UtilityMinisterAgent(MinisterFocus.Logistics), provider, auditLog: audit);
+        var before = runtime.ReadModel;
+        var stopwatch = Stopwatch.StartNew();
+
+        var result = planner.PlanAsync(request, context, now.Add(TimeSpan.FromMinutes(30))).GetAwaiter().GetResult();
+
+        stopwatch.Stop();
+        Require(stopwatch.Elapsed < TimeSpan.FromSeconds(2),
+            $"Provider 超时必须受硬边界约束（实际耗时 {stopwatch.Elapsed}）");
+        Require(result.Source == DecisionSource.Rules && result.FallbackReason == ModelFallbackReason.ProviderFailed,
+            "Provider 超时必须回退 Utility");
+        Require(audit.Entries.Single().Outcome == ModelCallOutcome.ProviderFailed, "审计必须记录 ProviderFailed");
+
+        var submit = entry.Submit(world, result.Intents).Single();
+        Require(submit.Accepted, "超时回退意图必须可提交");
+        var advanced = runtime.AdvanceTo(before.GameTime);
+        Require(advanced.ReadModel.Shipments.Count == 1, "Provider 超时后世界必须继续推进");
+    }
+
+    /// <summary>
+    /// 密钥安全（M6）：密钥只从环境变量读取一次并写入 Bearer 认证头；
+    /// 解析器不保留密钥字段、不提供任何读回途径；环境变量未配置时明确失败。
+    /// </summary>
+    private static void ShouldReadApiKeyOnlyFromEnvironmentVariable()
+    {
+        var key = "sk-demo-secret-" + Guid.NewGuid().ToString("N");
+        var resolver = new ModelKeySource(() => key);
+        using var client = resolver.CreateKeyedHttpClient("https://provider.test/v1/");
+
+        Require(client.BaseAddress == new Uri("https://provider.test/v1/"), "HttpClient 必须使用配置的 BaseAddress");
+        Require(client.DefaultRequestHeaders.Authorization is { Scheme: "Bearer" } &&
+                client.DefaultRequestHeaders.Authorization.Parameter == key,
+            "密钥必须只进入 Bearer 认证头");
+
+        // 解析器任何字段都不得留存密钥：密钥只在本地变量中短暂存在，设置完认证头即被丢弃。
+        var retained = typeof(ModelKeySource)
+            .GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(field => field.GetValue(resolver) as string)
+            .Where(value => value == key)
+            .ToArray();
+        Require(retained.Length == 0, "ModelKeySource 不得在任何字段中保留密钥");
+
+        var missing = new ModelKeySource(() => null);
+        RequireThrows<InvalidOperationException>(
+            () => missing.CreateKeyedHttpClient("https://provider.test/v1/"),
+            "环境变量未配置时必须明确失败，而不是生成空密钥客户端");
+    }
+
+    /// <summary>
+    /// 审计不泄露（M6）：无论模型成功、失败，审计都只记录固定摘要（决策 ID、provider 名称、
+    /// 结果、请求/响应 token、金额、耗时），绝不回显模型文本或异常细节；
+    /// 密钥字符串不得出现于审计文本、DecisionResult 或任何抛出的异常消息。
+    /// </summary>
+    private static void ShouldKeepKeyOutOfAuditAndExceptions()
+    {
+        var world = CreateEntryLogisticsWorld();
+        var runtime = new RealtimeSimulationRuntime(world);
+        var context = new AgentContextCompiler().Compile(world, new CharacterId("works"));
+        var now = runtime.ReadModel.GameTime;
+        var request = new DecisionRequest(
+            "decision-key-audit", new CharacterId("works"), world.WorldVersion, now,
+            now.Add(TimeSpan.FromHours(1)));
+        var key = "sk-demo-secret-" + Guid.NewGuid().ToString("N");
+        // 模型输出不可信：即使模型把密钥形态文本塞进参数（多余字段固定忽略），审计也不得回显。
+        var taintedModelJson = "{\"schema_version\":1,\"intent_type\":\"logistics.request_shipment\"," +
+                               "\"parameters\":{\"route_id\":\"capital-ningyuan-grain\",\"grain_quantity\":200,\"note\":\"" +
+                               key + "\"}}";
+        var audit = new ModelAuditLog();
+        var planner = new DecisionPlanner(
+            new UtilityMinisterAgent(MinisterFocus.Logistics),
+            new FakeModelProvider(taintedModelJson),
+            auditLog: audit);
+        var acceptedGameTime = now.Add(TimeSpan.FromMinutes(30));
+
+        var result = planner.PlanAsync(request, context, acceptedGameTime).GetAwaiter().GetResult();
+        Require(result.Source == DecisionSource.Model, "带多余字段的模型输出应被采用（多余字段固定忽略）");
+        Require(!result.ToString().Contains(key, StringComparison.Ordinal), "DecisionResult 文本不得包含密钥");
+
+        var acceptedEntry = audit.Entries.Single();
+        Require(acceptedEntry.Outcome == ModelCallOutcome.Accepted, "审计必须记录 Accepted");
+        Require(acceptedEntry.RequestTokens > 0 && acceptedEntry.ResponseTokens > 0,
+            "审计必须记录请求/响应 token 估算");
+        Require(!FlattenAudit(audit.Entries).Contains(key, StringComparison.Ordinal),
+            "成功路径审计不得包含密钥");
+
+        // 失败路径：Provider 返回失败，审计只记固定摘要，同样不得回显模型文本。
+        var failingAudit = new ModelAuditLog();
+        var failingPlanner = new DecisionPlanner(
+            new UtilityMinisterAgent(MinisterFocus.Logistics),
+            new FakeModelProvider(taintedModelJson, succeeded: false),
+            auditLog: failingAudit);
+        var failing = failingPlanner.PlanAsync(request, context, acceptedGameTime).GetAwaiter().GetResult();
+        Require(failing.Source == DecisionSource.Rules && failing.FallbackReason == ModelFallbackReason.ProviderFailed,
+            "模型失败必须回退 Utility");
+        Require(failingAudit.Entries.Single().Outcome == ModelCallOutcome.ProviderFailed,
+            "失败路径审计必须记录 ProviderFailed");
+        Require(!FlattenAudit(failingAudit.Entries).Contains(key, StringComparison.Ordinal),
+            "失败路径审计不得包含密钥");
+    }
+
     private static bool IsSecretMemberName(string name) =>
         name.Contains("ApiKey", StringComparison.Ordinal) ||
         name.Contains("Secret", StringComparison.Ordinal) ||
@@ -519,18 +766,57 @@ internal static partial class Program
             ]);
     }
 
+    /// <summary>把审计条目拍平成可检查的文本，便于断言其中绝不含密钥形态文本。</summary>
+    private static string FlattenAudit(IReadOnlyList<ModelAuditEntry> entries) =>
+        string.Join("\n", entries.Select(entry =>
+            $"{entry.DecisionId}|{entry.ProviderName}|{entry.Outcome}|{entry.RequestTokens}|{entry.ResponseTokens}|{entry.CostMillis}|{entry.Duration}|{entry.RecordedAt:O}"));
+
     /// <summary>
     /// 契约测试用的假 Provider：只返回预先写好的文本，不联网、不携带任何密钥；
-    /// succeeded 为 false 时模拟模型失败/超时。
+    /// succeeded 为 false 时模拟模型失败/超时。CallCount 记录实际发起的模型调用次数。
     /// </summary>
     private sealed class FakeModelProvider(string content, bool succeeded = true) : IModelProvider
     {
+        public int CallCount { get; private set; }
+
         public Task<ModelResponse> GenerateAsync(
             ModelRequest request,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            CallCount++;
             return Task.FromResult(new ModelResponse(succeeded, content));
         }
     }
+
+    /// <summary>按调用序号依次返回内容的假 Provider；调用超过内容数量时重复最后一项。</summary>
+    private sealed class SequencedFakeModelProvider(params string[] contents) : IModelProvider
+    {
+        public int CallCount { get; private set; }
+
+        public Task<ModelResponse> GenerateAsync(
+            ModelRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CallCount++;
+            var index = Math.Min(CallCount - 1, contents.Length - 1);
+            return Task.FromResult(new ModelResponse(true, contents[index]));
+        }
+    }
+
+    /// <summary>每次调用都以固定异常失败的假 Provider（模拟 Provider 抛异常/断网）。</summary>
+    private sealed class ThrowingModelProvider(Exception exception) : IModelProvider
+    {
+        public int CallCount { get; private set; }
+
+        public Task<ModelResponse> GenerateAsync(
+            ModelRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return Task.FromException<ModelResponse>(exception);
+        }
+    }
 }
+
