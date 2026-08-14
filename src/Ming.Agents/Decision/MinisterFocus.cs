@@ -14,4 +14,7 @@ public enum MinisterFocus
 
     /// <summary>关注军队编制和前线战备。</summary>
     Military,
+
+    /// <summary>关注粮运调度和补给线。</summary>
+    Logistics,
 }

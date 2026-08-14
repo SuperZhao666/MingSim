@@ -22,7 +22,7 @@ namespace MingSim.SmokeTests;
 /// </summary>
 internal static class Program
 {
-    private static readonly DateTimeOffset FixedUtc =
+    internal static readonly DateTimeOffset FixedUtc =
         new(2026, 8, 13, 0, 0, 0, TimeSpan.Zero);
 
     private static int Main()
@@ -75,6 +75,13 @@ internal static class Program
             ShouldReplayRiskSamplesDeterministically();
             ShouldKeepShipmentEscortSettlementAndRaidCap();
             ShouldDropEscortWhenSettlementFails();
+            SnapshotCodecAcceptance.RunAll();
+#if MINGSIM_SQLITE_STORE
+            SqliteStoreAcceptance.RunAll();
+#else
+            Console.WriteLine("（SQLite 适配器未启用：MingSimEnableSqliteStore=false。离线沙箱无法还原 Microsoft.Data.Sqlite，" +
+                "SQLite 单事务提交/恢复/篡改验收由联网 CI 执行；本地已执行快照编解码等价验收。）");
+#endif
             Console.WriteLine("MingSim 实时内核补审测试全部通过。");
             return 0;
         }
@@ -1290,7 +1297,7 @@ internal static class Program
         }
     }
 
-    private static MoveArmyCommand CreateMove(
+    internal static MoveArmyCommand CreateMove(
         RealtimeSimulationRuntime runtime,
         string commandId,
         DateTimeOffset submittedAt,
@@ -1298,7 +1305,7 @@ internal static class Program
         int travelHours = 2) =>
         new(commandId, new CharacterId("war"), new ArmyId("army-1"), new ProvinceId("capital"), submittedAt, expectedVersion, travelHours);
 
-    private static CreateShipmentCommand CreateShipment(
+    internal static CreateShipmentCommand CreateShipment(
         RealtimeSimulationRuntime runtime,
         string commandId,
         long grainQuantity,
@@ -1317,9 +1324,14 @@ internal static class Program
             .GetField("_state", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(runtime)!;
 
-    private static WorldState GetSnapshotState(RealtimeSnapshot snapshot) =>
+    internal static WorldState GetSnapshotState(RealtimeSnapshot snapshot) =>
         (WorldState)typeof(RealtimeSnapshot)
             .GetProperty("State", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(snapshot)!;
+
+    internal static IReadOnlyList<DomainEvent> GetSnapshotOutbox(RealtimeSnapshot snapshot) =>
+        (IReadOnlyList<DomainEvent>)typeof(RealtimeSnapshot)
+            .GetProperty("OutboxEvents", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(snapshot)!;
 
     /// <summary>只用于测试：模拟调用方错误地投递了内核不认识的命令子类型。
@@ -1348,7 +1360,7 @@ internal static class Program
             "DailyHeartbeat", new Dictionary<string, string>()));
     }
 
-    private static IReadOnlyList<string> EventFingerprints(IEnumerable<DomainEvent> events) =>
+    internal static IReadOnlyList<string> EventFingerprints(IEnumerable<DomainEvent> events) =>
         events.Select(item => string.Join("\u001f", [
             item.EventId,
             item.EventSequence.ToString(),
@@ -1370,7 +1382,7 @@ internal static class Program
             .GetValue(runtime.CaptureSnapshot())!;
 
     /// <summary>宁远急饷 L1 批次的世界：5000 石、8% 损耗、12 游戏日到达（纸面推演 DESIGN 数值）。</summary>
-    private static WorldState CreateNingyuanWorld(
+    internal static WorldState CreateNingyuanWorld(
         long sourceGrain = 20_000,
         long routeCapacity = 6_000,
         long destinationCapacity = 30_000,
@@ -1411,7 +1423,7 @@ internal static class Program
             ]);
     }
 
-    private static WorldState CreateLogisticsWorld(
+    internal static WorldState CreateLogisticsWorld(
         long destinationCapacity = 1_000,
         long destinationGrain = 0,
         long routeCapacity = 500,
@@ -1527,7 +1539,7 @@ internal static class Program
         typeof(ScenarioState).GetMethod("ChangeMinisterTrust", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(world.Scenario, [delta]);
 
-    private static WorldState CreateWorld(string worldId = "smoke-world", string characterName = "兵部角色")
+    internal static WorldState CreateWorld(string worldId = "smoke-world", string characterName = "兵部角色")
     {
         var map = new MapDefinition(
             "smoke-map",
@@ -1547,7 +1559,7 @@ internal static class Program
             armies: [new ArmyState(new ArmyId("army-1"), "测试军", new ProvinceId("frontier"), 10_000, 3_000)]);
     }
 
-    private static void Require(bool condition, string message)
+    internal static void Require(bool condition, string message)
     {
         if (!condition)
         {
@@ -1555,7 +1567,7 @@ internal static class Program
         }
     }
 
-    private static void RequireThrows<TException>(Action action)
+    internal static void RequireThrows<TException>(Action action)
         where TException : Exception
     {
         try
@@ -1568,5 +1580,20 @@ internal static class Program
         }
 
         throw new InvalidOperationException($"应该抛出 {typeof(TException).Name}。");
+    }
+
+    /// <summary>篡改恢复必须"抛异常、不发布半状态"，异常类型可能是格式错误或校验失败，这里只断言确实失败。</summary>
+    internal static void RequireThrowsAny(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch
+        {
+            return;
+        }
+
+        throw new InvalidOperationException("应该抛出异常（恢复失败），但实际成功返回了。");
     }
 }
