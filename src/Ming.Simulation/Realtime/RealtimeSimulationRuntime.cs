@@ -253,16 +253,15 @@ public sealed class RealtimeSimulationRuntime
         ValidateSpeed(_speed);
         _randomState = snapshot.RandomState;
 
-        var actualHash = ComputeStateHash();
+        // 权威校验与捕获/迁移共用同一套哈希规则（RealtimeSnapshotHash）：
+        // 任何一侧各写一份都会造成"迁移后 hash 与运行时校验失配"（独立审查 P1）。
+        var (actualHash, actualChecksum) = RealtimeSnapshotHash.ComputeHashes(snapshot);
         if (!StringComparer.Ordinal.Equals(actualHash, snapshot.StateHash))
         {
             throw new InvalidDataException("实时快照的 canonical state hash 校验失败。");
         }
 
-        var pendingCommands = _inbox.ToArray();
-        var outboxEvents = _outboxEvents.ToArray();
-        var restoredStateHash = ComputeStateHash(pendingCommands.Select(Fingerprint));
-        if (!StringComparer.Ordinal.Equals(ComputePayloadChecksum(pendingCommands, outboxEvents, restoredStateHash), snapshot.PayloadChecksum))
+        if (!StringComparer.Ordinal.Equals(actualChecksum, snapshot.PayloadChecksum))
         {
             throw new InvalidDataException("实时快照 payload checksum 校验失败。");
         }
@@ -477,7 +476,10 @@ public sealed class RealtimeSimulationRuntime
         {
             var pendingCommands = _inbox.ToArray();
             var outboxEvents = _outboxEvents.ToArray();
-            var stateHash = ComputeStateHash(pendingCommands.Select(Fingerprint));
+            var (stateHash, payloadChecksum) = RealtimeSnapshotHash.ComputeHashes(
+                _state, _scheduledEvents, pendingCommands, _nextCreationSequence, _nextIngressSequence,
+                _commandOutcomes.Values, _randomState, outboxEvents, _realGameTickRemainder,
+                _initialGameTime, _initialWorldVersion, _processedScheduledEventCount, _isPaused, _speed, _nextEventSequence);
             return new RealtimeSnapshot(
                 RealtimeSnapshotSchema.Version,
                 _state.Clone(),
@@ -490,7 +492,7 @@ public sealed class RealtimeSimulationRuntime
                 outboxEvents,
                 _realGameTickRemainder,
                 stateHash,
-                ComputePayloadChecksum(pendingCommands, outboxEvents, stateHash),
+                payloadChecksum,
                 _initialGameTime,
                 _initialWorldVersion,
                 _processedScheduledEventCount,
@@ -676,7 +678,7 @@ public sealed class RealtimeSimulationRuntime
         {
             var candidate = CreateWorkingCopy();
             var ingressSequence = candidate.NextIngressSequence++;
-            var fingerprint = Fingerprint(command);
+            var fingerprint = RealtimeSnapshotHash.Fingerprint(command);
             if (_commandOutcomes.TryGetValue(command.CommandId, out var previous))
             {
                 var duplicate = StringComparer.Ordinal.Equals(previous.Fingerprint, fingerprint);
@@ -1582,49 +1584,11 @@ public sealed class RealtimeSimulationRuntime
 
     private RealtimeReadModel BuildReadModel() => RealtimeReadModel.From(_state, _scheduledEvents, _commandOutcomes.Values, _outboxEvents.Count, _isPaused, ComputeStateHash());
 
-    private string ComputeStateHash(IEnumerable<string>? pendingCommandFingerprints = null) => CanonicalStateHasher.Compute(_state, _scheduledEvents, _nextCreationSequence, _nextIngressSequence,
-        _commandOutcomes.Values, _randomState, _outboxEvents, _realGameTickRemainder, _initialGameTime, _initialWorldVersion,
-        _processedScheduledEventCount, _isPaused, _speed, pendingCommandFingerprints ?? _inbox.Select(Fingerprint), _nextEventSequence);
-
-    private string ComputePayloadChecksum(IReadOnlyList<RealtimeCommand> pendingCommands, IReadOnlyList<DomainEvent> outboxEvents, string stateHash)
-    {
-        using var stream = new MemoryStream();
-        using var writer = new BinaryWriter(stream, new UTF8Encoding(false), leaveOpen: true);
-        writer.Write(RealtimeSnapshotSchema.Version);
-        writer.Write(stateHash);
-        writer.Write(_nextCreationSequence);
-        writer.Write(_nextIngressSequence);
-        writer.Write(_nextEventSequence);
-        writer.Write(_processedScheduledEventCount);
-        writer.Write(_realGameTickRemainder.ToString("G29", CultureInfo.InvariantCulture));
-        writer.Write(_isPaused);
-        writer.Write(BitConverter.DoubleToInt64Bits(_speed));
-        writer.Write(_randomState);
-        foreach (var command in pendingCommands) writer.Write(Fingerprint(command));
-        foreach (var domainEvent in outboxEvents)
-        {
-            writer.Write(domainEvent.EventId);
-            writer.Write(domainEvent.WorldId.Value);
-            writer.Write(domainEvent.TurnNumber);
-            writer.Write(domainEvent.EventType);
-            writer.Write(domainEvent.Description);
-            writer.Write(domainEvent.OccurredAt.HasValue);
-            if (domainEvent.OccurredAt.HasValue) writer.Write(domainEvent.OccurredAt.Value.UtcTicks);
-            writer.Write(domainEvent.EventSequence);
-            writer.Write(domainEvent.WorldVersion);
-            writer.Write(domainEvent.CommitId);
-            writer.Write(domainEvent.CausalCommandId ?? string.Empty);
-            var data = domainEvent.Data.OrderBy(item => item.Key, StringComparer.Ordinal).ToArray();
-            writer.Write(data.Length);
-            foreach (var item in data)
-            {
-                writer.Write(item.Key);
-                writer.Write(item.Value);
-            }
-        }
-        writer.Flush();
-        return Convert.ToHexString(SHA256.HashData(stream.ToArray()));
-    }
+    /// <summary>只读状态哈希：与捕获/恢复/迁移共用 RealtimeSnapshotHash 的同一套组装规则。</summary>
+    private string ComputeStateHash() => RealtimeSnapshotHash.ComputeStateHash(
+        _state, _scheduledEvents, _inbox.ToArray(), _nextCreationSequence, _nextIngressSequence,
+        _commandOutcomes.Values, _randomState, _outboxEvents, _realGameTickRemainder,
+        _initialGameTime, _initialWorldVersion, _processedScheduledEventCount, _isPaused, _speed, _nextEventSequence);
 
     private static void Schedule(WorkingCopy candidate, string eventId, GameTime due, int phase, int priority, string eventType,
         IReadOnlyDictionary<string, string> data, string? causalCommandId)
@@ -1659,98 +1623,7 @@ public sealed class RealtimeSimulationRuntime
         return new(false, commandId, message, new ReadOnlyCollection<SimulationError>([new SimulationError(code, message)]), ingress, acceptedAt, version);
     }
 
-    private static string Fingerprint(RealtimeCommand command)
-    {
-        using var stream = new MemoryStream();
-        using var writer = new BinaryWriter(stream, new UTF8Encoding(false), leaveOpen: true);
-        switch (command)
-        {
-            case MoveArmyCommand move:
-                WriteFingerprintString(writer, "move");
-                WriteFingerprintString(writer, move.CommandId);
-                WriteFingerprintString(writer, move.ActorId.Value);
-                WriteFingerprintString(writer, move.ArmyId.Value);
-                WriteFingerprintString(writer, move.DestinationId.Value);
-                writer.Write(move.SubmittedAt.UtcTicks);
-                writer.Write(move.ExpectedWorldVersion);
-                writer.Write(move.TravelHours);
-                break;
-            case CreateShipmentCommand shipment:
-                WriteFingerprintString(writer, "shipment");
-                WriteFingerprintString(writer, shipment.CommandId);
-                WriteFingerprintString(writer, shipment.ActorId.Value);
-                WriteFingerprintString(writer, shipment.ShipmentId.Value);
-                WriteFingerprintString(writer, shipment.RouteId.Value);
-                writer.Write(shipment.GrainQuantity);
-                writer.Write(shipment.Escort);
-                writer.Write(shipment.SubmittedAt.UtcTicks);
-                writer.Write(shipment.ExpectedWorldVersion);
-                break;
-            case CreateDecreeCommand decree:
-                WriteFingerprintString(writer, "decree");
-                WriteFingerprintString(writer, decree.CommandId);
-                WriteFingerprintString(writer, decree.ActorId.Value);
-                WriteFingerprintString(writer, decree.DecreeId.Value);
-                WriteFingerprintString(writer, decree.Goal);
-                WriteFingerprintString(writer, decree.RegionScope.Value);
-                writer.Write(decree.Budget);
-                WriteFingerprintString(writer, decree.ResponsibleActorId.Value);
-                writer.Write(decree.Deadline.Value.UtcTicks);
-                WriteFingerprintString(writer, decree.Restrictions);
-                WriteFingerprintString(writer, decree.Remarks);
-                WriteFingerprintString(writer, decree.LinkedShipmentId ?? string.Empty);
-                WriteFingerprintString(writer, decree.Kind.ToString());
-                writer.Write(decree.SubmittedAt.UtcTicks);
-                writer.Write(decree.ExpectedWorldVersion);
-                break;
-            case ApproveDecreeCommand approve:
-                WriteFingerprintString(writer, "approve-decree");
-                WriteFingerprintString(writer, approve.CommandId);
-                WriteFingerprintString(writer, approve.ActorId.Value);
-                WriteFingerprintString(writer, approve.DecreeId.Value);
-                writer.Write(approve.SubmittedAt.UtcTicks);
-                writer.Write(approve.ExpectedWorldVersion);
-                break;
-            case SetPausedCommand pause:
-                WriteFingerprintString(writer, "pause");
-                WriteFingerprintString(writer, pause.CommandId);
-                WriteFingerprintString(writer, pause.ActorId.Value);
-                writer.Write(pause.Paused);
-                writer.Write(pause.SubmittedAt.UtcTicks);
-                writer.Write(pause.ExpectedWorldVersion);
-                break;
-            case SetSimulationSpeedCommand speed:
-                WriteFingerprintString(writer, "speed");
-                WriteFingerprintString(writer, speed.CommandId);
-                WriteFingerprintString(writer, speed.ActorId.Value);
-                writer.Write(BitConverter.DoubleToInt64Bits(speed.Speed));
-                writer.Write(speed.SubmittedAt.UtcTicks);
-                writer.Write(speed.ExpectedWorldVersion);
-                break;
-            default:
-                // 未知命令类型没有稳定的负载字段；用类型名兜底生成指纹。
-                // 为什么：ValidateAndApplyCommand 的 switch 已经用 UNKNOWN_COMMAND
-                // 结构化拒绝未知类型，Fingerprint 若在这里抛异常反而会在拒绝之前
-                // 让整个推进崩溃；稳定的类型指纹让同一命令编号的重放得到同一拒绝结果。
-                WriteFingerprintString(writer, "unknown");
-                WriteFingerprintString(writer, command.GetType().FullName ?? command.GetType().Name);
-                WriteFingerprintString(writer, command.CommandId);
-                WriteFingerprintString(writer, command.ActorId.Value);
-                writer.Write(command.SubmittedAt.UtcTicks);
-                writer.Write(command.ExpectedWorldVersion);
-                break;
-        }
-
-        writer.Flush();
-        return Convert.ToHexString(SHA256.HashData(stream.ToArray()));
-    }
-
-    private static void WriteFingerprintString(BinaryWriter writer, string value)
-    {
-        var bytes = Encoding.UTF8.GetBytes(value.Normalize(NormalizationForm.FormC));
-        writer.Write(bytes.Length);
-        writer.Write(bytes);
-    }
+    // 命令指纹由 RealtimeSnapshotHash.Fingerprint 提供（#35 共享哈希纯函数，捕获/校验/幂等三方共用）。
 
     private static bool IsValidId(string value) =>
         !string.IsNullOrWhiteSpace(value) && value.Length <= 128 &&
@@ -1790,4 +1663,9 @@ public static class RealtimeSnapshotSchema
     // （Restore 的版本检查先于哈希校验，返回"不支持实时快照版本"），而不是以哈希失配的偶然失败收场。
     // 旧存档不再兼容，恢复即拒绝（fail-closed），与 doc 08 存档版本约定一致。
     public const int Version = 7;
+
+    /// <summary>v1 载荷时代（#28 之前，4b035ab 及以前）的运行时快照 schema 版本：
+    /// 当时 payload checksum 头部写入 6（与当前 7 不同）。迁移按 v1 时代规则校验旧档
+    /// 自带 checksum 时必须用本常量（独立审查 P1-2：用当前版本比对必然误拒真实 v1 档）。</summary>
+    public const int LegacyVersionV1 = 6;
 }

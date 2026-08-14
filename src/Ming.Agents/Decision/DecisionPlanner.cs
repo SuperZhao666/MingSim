@@ -213,14 +213,20 @@ public sealed class DecisionPlanner
         TokenEstimation.FromText(request.UserInput) +
         TokenEstimation.FromText(request.ExpectedOutputSchema);
 
-    /// <summary>编译最小决策上下文（DecisionPacket 的最小子集），不包含密钥或完整世界状态。</summary>
+    /// <summary>
+    /// 编译最小决策上下文（DecisionPacket 的最小子集），不包含密钥或完整世界状态。
+    /// 候选集（路线/军队/邻接目的地）进入提示，让模型只能从权威候选里选择（P1-AGENT-02）。
+    /// </summary>
     private static ModelRequest BuildModelRequest(DecisionRequest request, AgentContext context)
     {
         var capabilities = string.Join(", ", context.Capabilities
             .OrderBy(item => item.ToString(), StringComparer.Ordinal));
         var armies = string.Join("; ", context.Armies
             .OrderBy(item => item.ArmyId.Value, StringComparer.Ordinal)
-            .Select(item => $"{item.ArmyId.Value}(aux={item.Auxiliaries},line={item.LineInfantry},training={item.TrainingDays})"));
+            .Select(item => $"{item.ArmyId.Value}(loc={item.LocationId.Value},aux={item.Auxiliaries},line={item.LineInfantry},training={item.TrainingDays},adjacent=[{string.Join(",", item.AdjacentDestinations.OrderBy(province => province.Value, StringComparer.Ordinal).Select(province => province.Value))}])"));
+        var routes = string.Join("; ", context.Routes
+            .OrderBy(item => item.RouteId.Value, StringComparer.Ordinal)
+            .Select(item => $"{item.RouteId.Value}(from={item.From.Value},to={item.To.Value},sourceGrain={item.SourceGrain},headroom={item.DestinationHeadroom},capacity={item.RouteCapacity},inTransit={item.InTransitGrain},travelHours={item.TravelHours},lossPerThousand={item.LossPerThousand})"));
         var input = string.Join("\n", new[]
         {
             $"decision_request_id: {request.DecisionId}",
@@ -232,6 +238,9 @@ public sealed class DecisionPlanner
             $"facility_count: {context.FacilityCount}",
             $"capabilities: {capabilities}",
             $"armies: {armies}",
+            $"routes: {routes}",
+            "约束：route_id 只能从 routes 候选列表中选择；army_id 只能从 armies 候选列表中选择，" +
+            "destination_id 必须是所选军队 adjacent 列表中的一个。",
         });
 
         return new ModelRequest(

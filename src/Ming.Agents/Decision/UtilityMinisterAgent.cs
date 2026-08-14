@@ -89,7 +89,8 @@ public sealed class UtilityMinisterAgent : IAgentDecisionSource
         context.Armies.Any(army => army.Auxiliaries >= 1_000);
 
     private static bool CanPlanLogistics(AgentContext context) =>
-        context.Capabilities.Contains(GameCapability.PlanLogistics);
+        context.Capabilities.Contains(GameCapability.PlanLogistics) &&
+        context.Routes.Count > 0;
 
     private static WorldIntent BuildFacilityIntent(AgentContext context) =>
         new BuildFacilityIntent(
@@ -117,16 +118,31 @@ public sealed class UtilityMinisterAgent : IAgentDecisionSource
             Count: 1_000);
     }
 
-    private static WorldIntent BuildPlanLogisticsIntent(AgentContext context) =>
-        new PlanLogisticsIntent(
-            $"agent-logistics-ningyuan-300-{context.WorldVersion}",
+    /// <summary>
+    /// 从候选集选择真实存在的路线生成粮运意图（P1-AGENT-01 修复）。
+    /// </summary>
+    /// <remarks>
+    /// 候选集由 AgentContextCompiler 从权威 WorldState 编译，只含可行动路线；
+    /// 选择规则固定（RouteId 字典序取第一条、数量按约束封顶），同上下文必然同意图。
+    /// 数量封顶在 300 石与 起点库存/目的地余量/路线剩余容量 之内，保证意图真实可执行；
+    /// 意图 ID 与幂等键都携带所选路线 ID，不再出现审计中的虚构路线 capital-ningyuan-grain。
+    /// </remarks>
+    private static WorldIntent BuildPlanLogisticsIntent(AgentContext context)
+    {
+        // Decide 只在 CanPlanLogistics 成立时调用本方法，因此候选集非空。
+        var route = context.Routes.OrderBy(item => item.RouteId.Value, StringComparer.Ordinal).First();
+        var remainingCapacity = route.RouteCapacity - route.InTransitGrain;
+        var quantity = Math.Min(300, Math.Min(route.SourceGrain, Math.Min(route.DestinationHeadroom, remainingCapacity)));
+        return new PlanLogisticsIntent(
+            $"agent-logistics-{route.RouteId.Value}-{quantity}-{context.WorldVersion}",
             context.ActorId,
             context.TurnNumber,
-            $"logistics-ningyuan-300-{context.WorldVersion}",
+            $"logistics-{route.RouteId.Value}-{quantity}-{context.WorldVersion}",
             context.WorldVersion,
-            new RouteId("capital-ningyuan-grain"),
-            300,
+            route.RouteId,
+            quantity,
             context.GameTime.Value);
+    }
 
     private sealed record IntentCandidate(
         double Weight,
