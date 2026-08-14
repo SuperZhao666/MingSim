@@ -26,13 +26,17 @@ public sealed record ModelParseResult(
 ///   模型 JSON 里写什么都没用，不能伪造身份；
 /// - 意图幂等键由 DecisionId + 序号派生，重试解析不会生成新键，避免绕过内核幂等。
 /// 解析失败由调用方（DecisionPlanner）回退规则决策；本类不修改任何状态。
+///
+/// Parse 声明为 virtual、本类不密封的唯一原因：让契约测试能注入一个"必然抛异常"
+/// 的子类，证明 DecisionPlanner 的解析 try 回退防线（P2-1）真实生效。
+/// 这不是给外部扩展解析规则预留的扩展点——解析白名单仍固定在本类。
 /// </remarks>
-public sealed class ModelDecisionParser
+public class ModelDecisionParser
 {
     private const int SupportedSchemaVersion = 1;
 
     /// <summary>解析模型文本；任何失败都返回 Succeeded == false 的结构化结果。</summary>
-    public ModelParseResult Parse(
+    public virtual ModelParseResult Parse(
         DecisionRequest request,
         AgentContext context,
         string modelJson,

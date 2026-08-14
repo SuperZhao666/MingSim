@@ -54,6 +54,13 @@ internal static partial class Program
             ShouldFallBackToUtilityWhenProviderTimesOutWithoutBlockingWorld();
             ShouldReadApiKeyOnlyFromEnvironmentVariable();
             ShouldKeepKeyOutOfAuditAndExceptions();
+            ShouldRunHostEndToEndThroughKernel();
+            ShouldFallBackToRulesThroughHostWhenBudgetExhausted();
+            ShouldFallBackToRulesThroughHostWhenProviderTimesOut();
+            ShouldNotLoseConcurrentUsageAccounting();
+            ShouldTruncateAuditLogToCapacityPreservingOrder();
+            ShouldEnforceMaxCostMillisAndSaturatingBoundaries();
+            ShouldFallBackToRulesWhenParserThrows();
 
             Console.WriteLine("Ming.Agents OpenAI-compatible contract tests passed.");
             return 0;
