@@ -74,6 +74,7 @@ internal static class Program
             ShouldEvaluateEndgameTiers();
             ShouldReplayRiskSamplesDeterministically();
             ShouldKeepShipmentEscortSettlementAndRaidCap();
+            ShouldDropEscortWhenSettlementFails();
             Console.WriteLine("MingSim 实时内核补审测试全部通过。");
             return 0;
         }
@@ -1239,6 +1240,41 @@ internal static class Program
         var escortedShipment = escortedResult.ReadModel.Shipments.Single(item => item.Id.Value == "shipment-escort-1");
         Require(escortedShipment.DeliveredGrain + escortedShipment.LossGrain == escortedShipment.GrainQuantity,
             "袭粮后抵达仍必须满足粮食守恒（实到 + 损耗 = 计划量）");
+    }
+
+    /// <summary>护卫费用结算失败：出发前国库被政令耗尽 → 护卫无法成行、护卫标记清除、袭粮按无护卫上限。</summary>
+    private static void ShouldDropEscortWhenSettlementFails()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld(travelHours: 24 * 24));
+        runtime.ScheduleScenarioRiskSamples();
+        var before = runtime.ReadModel;
+
+        // 先规划护卫运输（规划时国库 200000 足以支付 400 两护卫费），再发政令把国库扣到 300。
+        Require(runtime.EnqueueCreateShipment(new CreateShipmentCommand(
+            "escort-drop", new CharacterId("works"), new ShipmentId("shipment-escort-drop"),
+            new RouteId("capital-ningyuan-grain"), 5_000, before.GameTime.Value, 0, Escort: true)).Queued,
+            "护卫运输应进入收件箱");
+        // 政令预期版本 = 运输接纳后的版本：同一帧先接纳运输（版本 +1），政令再以最新版本提交，
+        // 这样出发事件结算时国库已被政令扣空，才能验证"规划时够、出发时不够"的护卫失效路径。
+        var drainDecree = CreateDecree(runtime, "decree-drain", deadlineDays: 20, budget: 199_700);
+        Require(runtime.EnqueueCreateDecree(drainDecree with { ExpectedWorldVersion = 1 }).Queued,
+            "扣库政令应进入收件箱");
+        var departure = runtime.AdvanceTo(before.GameTime);
+
+        Require(departure.Events.Any(domainEvent => domainEvent.EventType == "EscortSettlementFailed"),
+            "出发时国库不足必须产生护卫结算失败事件");
+        Require(departure.Events.All(domainEvent => domainEvent.EventType != "EscortSettlement"),
+            "护卫未成行不能产生 +400 两结算");
+        Require(runtime.ReadModel.Shipments.Single(item => item.Id.Value == "shipment-escort-drop").Escort == false,
+            "护卫结算失败后必须清除护卫标记（否则袭粮按错误的上限结算）");
+        Require(runtime.ReadModel.Scenario.SpentSilver == 199_700,
+            "护卫未成行不能计入护卫费用");
+
+        // 第 24 天袭粮：无护卫批次损失上限回到 20%。
+        var risked = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddDays(40)));
+        var attacked = risked.Events.Single(domainEvent => domainEvent.EventType == "ShipmentAttacked");
+        Require(attacked.Data["escorted"] == "False", "袭粮事件必须记录无护卫");
+        Require(int.Parse(attacked.Data["loss_percent"]) <= 20, "护卫失效后袭粮损失上限为 20%");
     }
 
     private static void InvokeCommitRealtime(WorldState world, long version, string commitId)

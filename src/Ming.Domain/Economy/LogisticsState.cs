@@ -218,7 +218,7 @@ public sealed class ShipmentState
     public long LossGrain { get; private set; }
 
     /// <summary>是否带护卫：护卫在出发时结算 +400 两费用，并把袭粮损失上限压到更低。</summary>
-    public bool Escort { get; }
+    public bool Escort { get; private set; }
 
     /// <summary>袭粮损失（石）：在途被劫后累加；抵达结算时先从实到量里扣掉并计入损耗，保证粮食守恒。</summary>
     public long RaidLossGrain { get; private set; }
@@ -253,6 +253,9 @@ public sealed class ShipmentState
         DeliveredGrain = deliveredGrain;
         LossGrain = lossGrain;
     }
+
+    /// <summary>出发时护卫费用结算失败（国库不足）：护卫无法成行，后续袭粮按无护卫上限计算。</summary>
+    internal void ClearEscort() => Escort = false;
 
     internal void ApplyRaidLoss(long lossGrain)
     {

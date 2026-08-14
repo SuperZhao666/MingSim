@@ -1045,8 +1045,11 @@ public sealed class RealtimeSimulationRuntime
                 }
                 else
                 {
+                    // 护卫费用结算失败（出发时国库已被其他支出耗尽）：护卫无法成行，
+                    // 必须清除护卫标记，否则袭粮仍会按"有护卫"的低上限结算，自相矛盾。
+                    shipment.ClearEscort();
                     events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "EscortSettlementFailed", candidate.State.GameTime,
-                        ("shipment_id", shipment.Id.Value), ("reason", "treasury_insufficient")));
+                        ("shipment_id", shipment.Id.Value), ("reason", "treasury_insufficient"), ("escorted_after", "false")));
                     candidate.Outbox.Add(events[^1]);
                 }
             }

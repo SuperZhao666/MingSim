@@ -43,6 +43,19 @@ internal static class ScenarioP0Rules
     public const string GrainRaidEvent = "GrainRaid";
     public const string ScenarioReportsEvent = "ScenarioReports";
 
+    // 风险样本的抽取区间全部是 DESIGN 调参起点（doc 03 §7.1 天气/袭粮"概率与损失先用固定种子场景校准"）。
+    public const int DesignWeatherDelayMinDays = 1;      // 天气延误下限（日）
+    public const int DesignWeatherDelayMaxExclusive = 4; // 天气延误上限（排他，即最多 3 日）
+    public const int DesignRaidLossMaxEscortedExclusive = 6;   // 护卫批次袭粮上限 5%
+    public const int DesignRaidLossMaxPlainExclusive = 21;     // 无护卫批次袭粮上限 20%
+    public const int DesignReportCredibilityMin = 50;    // 报告可信度下限
+    public const int DesignReportCredibilityMaxExclusive = 96; // 报告可信度上限（排他，即最多 95）
+    public const int DesignReportStaleTrustThreshold = 40;     // 大臣信任低于该值时报告更陈旧
+    public const int DesignReportStaleAgeMin = 5;              // 低信任：报告时效 5..10 日
+    public const int DesignReportStaleAgeMaxExclusive = 11;
+    public const int DesignReportFreshAgeMin = 1;              // 高信任：报告时效 1..4 日
+    public const int DesignReportFreshAgeMaxExclusive = 5;
+
     /// <summary>前线日耗结算：先扣粮再判战备；返回摘要供 Runtime 写事件。</summary>
     public static DailyRationSummary ApplyDailyRation(WorldState state)
     {
@@ -111,21 +124,23 @@ internal static class ScenarioP0Rules
 
     /// <summary>天气延误天数：确定性随机抽取 1..3 日（DESIGN：一次天气延误，运输 +N 日）。</summary>
     public static int ResolveWeatherDelayDays(WorldState state) =>
-        NewRandom(state, "ningyuan-risk-weather").Next(1, 4);
+        NewRandom(state, "ningyuan-risk-weather").Next(DesignWeatherDelayMinDays, DesignWeatherDelayMaxExclusive);
 
     /// <summary>袭粮损失比例：护卫与否决定上限（DESIGN：无护卫 0..20%，有护卫 0..5%）。</summary>
     public static int ResolveRaidLossPercent(bool escorted, WorldState state)
     {
         var random = NewRandom(state, "ningyuan-risk-raid");
-        return escorted ? random.Next(0, 6) : random.Next(0, 21);
+        return escorted ? random.Next(0, DesignRaidLossMaxEscortedExclusive) : random.Next(0, DesignRaidLossMaxPlainExclusive);
     }
 
     /// <summary>三份报告之一：可信度与时效都确定性抽取；大臣信任越低报告越陈旧（DESIGN）。</summary>
     public static (int AgeDays, int Credibility) ResolveReportProfile(WorldState state, int reportIndex)
     {
         var random = NewRandom(state, $"ningyuan-risk-report-{reportIndex}");
-        var credibility = random.Next(50, 96);
-        var ageDays = state.Scenario.MinisterTrust < 40 ? random.Next(5, 11) : random.Next(1, 5);
+        var credibility = random.Next(DesignReportCredibilityMin, DesignReportCredibilityMaxExclusive);
+        var ageDays = state.Scenario.MinisterTrust < DesignReportStaleTrustThreshold
+            ? random.Next(DesignReportStaleAgeMin, DesignReportStaleAgeMaxExclusive)
+            : random.Next(DesignReportFreshAgeMin, DesignReportFreshAgeMaxExclusive);
         return (ageDays, credibility);
     }
 
