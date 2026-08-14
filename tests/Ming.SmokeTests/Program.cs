@@ -75,6 +75,9 @@ internal static class Program
             ShouldReplayRiskSamplesDeterministically();
             ShouldKeepShipmentEscortSettlementAndRaidCap();
             ShouldDropEscortWhenSettlementFails();
+            ShouldRoundTripThroughInMemoryCommitStore();
+            ShouldPersistRejectedOutcomeThroughCommitStore();
+            ShouldLoadNingyuan1629InitialWorld();
             SnapshotCodecAcceptance.RunAll();
 #if MINGSIM_SQLITE_STORE
             SqliteStoreAcceptance.RunAll();
@@ -1552,11 +1555,62 @@ internal static class Program
             1,
             200_000,
             map,
+            currentTime: null,
             [new CharacterState(new CharacterId("war"), characterName,
                 new CharacterAttributes(60, 40, 80, 50, 60),
                 new CharacterPersonality(true, true, true, false))],
             capabilityGrants: [new CapabilityGrant(new CharacterId("war"), GameCapability.MoveArmy, "army-1")],
             armies: [new ArmyState(new ArmyId("army-1"), "测试军", new ProvinceId("frontier"), 10_000, 3_000)]);
+    }
+
+    /// <summary>ICommitStore 端口：内存商店往返——推进→恢复→同 hash 同事件流（doc 04 §5 LoadCommittedWorld）。</summary>
+    private static void ShouldRoundTripThroughInMemoryCommitStore()
+    {
+        var store = new InMemoryCommitStore();
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanWorld(), store);
+        var command = CreateShipment(runtime, "store-loop", 5_000);
+        Require(runtime.EnqueueCreateShipment(command).Queued, "提交商店测试命令应进入收件箱");
+        var advanced = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddHours(12 * 24)));
+        Require(advanced.Succeeded, "提交商店测试推进应成功");
+        var hash = runtime.ReadModel.StateHash;
+
+        var restored = RealtimeSimulationRuntime.RestoreFromStore(store);
+        Require(restored.ReadModel.StateHash == hash, "经提交商店恢复后 canonical hash 必须一致");
+        Require(restored.ReadModel.WorldVersion == runtime.ReadModel.WorldVersion,
+            "经提交商店恢复后 WorldVersion 必须一致");
+        Require(EventFingerprints(restored.OutboxEvents).SequenceEqual(EventFingerprints(runtime.OutboxEvents)),
+            "经提交商店恢复后事件流必须一致");
+    }
+
+    /// <summary>ICommitStore 端口：未改变世界的拒绝结果也要持久化（doc 08 §5 重试得到同一结论）。</summary>
+    private static void ShouldPersistRejectedOutcomeThroughCommitStore()
+    {
+        var store = new InMemoryCommitStore();
+        var runtime = new RealtimeSimulationRuntime(CreateLogisticsWorld(), store);
+        var denied = new CreateShipmentCommand(
+            "store-denied", new CharacterId("war"), new ShipmentId("shipment-store-denied"),
+            new RouteId("capital-ningyuan-grain"), 300, FixedUtc, runtime.ReadModel.WorldVersion);
+        Require(runtime.EnqueueCreateShipment(denied).Queued, "被拒命令应进入收件箱");
+        var result = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!result.CommandResults.Single().Accepted, "无物流权限的角色必须被拒绝");
+        Require(store.Outcomes.ContainsKey("store-denied"), "被拒绝命令的终态 Outcome 必须持久化");
+        Require(store.Outcomes["store-denied"].OutcomeCode == "TOOL_SCOPE_DENIED",
+            "持久化的拒绝结果必须保留结构化错误码");
+    }
+
+    /// <summary>场景装配：world.json 装配出 6 库存/5 路线/5 授权，且前线场景规则启用。</summary>
+    private static void ShouldLoadNingyuan1629InitialWorld()
+    {
+        var world = MingSim.Application.Scenarios.Ningyuan1629InitialWorld.Load();
+        Require(world.Id.Value == "ming_1629_ningyuan_jixiang", "剧本世界编号必须与 world.json 一致");
+        Require(world.GameTime.Value == new DateTimeOffset(1629, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            "剧本起点必须是崇祯二年正月初一");
+        Require(world.Economy.Treasury.Silver == 20_000, "国库 20000 两（DESIGN doc 03 §7.1）");
+        Require(world.Logistics.Stockpiles.Count == 6, "剧本必须装配 6 个库存点");
+        Require(world.Logistics.Routes.Count == 5, "剧本必须装配 5 条路线");
+        Require(world.CapabilityGrants.Count == 5, "剧本必须装配 5 条能力授予");
+        Require(world.Characters.Count == 8, "剧本必须装配 8 个角色（6 史实 + 2 职位槽位）");
+        Require(world.Scenario.IsScenarioActive, "宁远前线粮仓必须启用场景规则");
     }
 
     internal static void Require(bool condition, string message)

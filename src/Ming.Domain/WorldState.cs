@@ -57,6 +57,7 @@ public sealed class WorldState
         int turnNumber,
         long treasurySilver,
         MapDefinition map,
+        DateTimeOffset? currentTime = null,
         IEnumerable<CharacterState>? characters = null,
         IEnumerable<InstitutionState>? institutions = null,
         IEnumerable<CapabilityGrant>? capabilityGrants = null,
@@ -66,7 +67,8 @@ public sealed class WorldState
         IEnumerable<RouteState>? routes = null,
         ScenarioState? scenario = null)
     {
-        var world = new WorldState(id, turnNumber, treasurySilver, map)
+        // currentTime 允许剧本指定历史起点（如 1629-01-01）；缺省沿用 SimulationEpoch 的回合映射。
+        var world = new WorldState(id, turnNumber, treasurySilver, map, currentTime)
         {
             Scenario = scenario ?? new ScenarioState(),
         };

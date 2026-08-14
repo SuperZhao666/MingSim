@@ -4,5 +4,11 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Ming.Domain\Ming.Domain.csproj" />
+    <!--
+      doc 04 §5 规则 3 的目标态：Application 依赖 Simulation 的公开 API（命令类型/运行时收件箱），
+      承担 UI 与 Agent 的"承办窗口"。PR #11 移除本引用是为了封死旧回合编排路径的第二权威；
+      本轮只新增 CommandFacade 这一个消费点，旧 TurnOrchestrator 仍保持封存拒绝，不再有第二套世界写入。
+    -->
+    <ProjectReference Include="..\Ming.Simulation\Ming.Simulation.csproj" />
   </ItemGroup>
 </Project>

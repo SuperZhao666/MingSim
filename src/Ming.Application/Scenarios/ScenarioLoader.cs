@@ -60,7 +60,7 @@ public sealed class ScenarioLoader
             new ProvinceId(army.LocationId), army.Auxiliaries, army.LineInfantry)).ToArray();
 
         var world = WorldState.CreateInitial(new WorldId(definition.Id), definition.StartTurn,
-            definition.TreasurySilver, map, characters, institutions, grants, inventory, armies);
+            definition.TreasurySilver, map, currentTime: null, characters, institutions, grants, inventory, armies);
 
         return world;
     }

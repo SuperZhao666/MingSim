@@ -25,7 +25,7 @@ namespace MingSim.Persistence.Sqlite;
 /// 本类依赖 Microsoft.Data.Sqlite（MIT）；离线沙箱无法还原该包时由 csproj 条件编译排除，
 /// CI（联网）启用后编译并执行 SqliteStoreAcceptance 验收。
 /// </remarks>
-public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotStore, IDisposable
+public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotStore, ICommitStore, IDisposable
 {
     /// <summary>SQLite schema 版本；schema 变更必须迁移而不是原地改表。</summary>
     private const int SchemaVersion = 1;
@@ -33,6 +33,7 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
     private const string ChecksumMagic = "mingsim-commit-v1";
 
     private readonly SqliteConnection _connection;
+    private readonly string _databasePath;
     private readonly WorldId _worldId;
     private readonly object _gate = new();
     private WorldState? _pendingState;
@@ -42,6 +43,7 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
     public SqliteCommitStore(string databasePath, WorldId worldId)
     {
         ArgumentNullException.ThrowIfNull(databasePath);
+        _databasePath = databasePath;
         _worldId = worldId;
         // Pooling=false：Microsoft.Data.Sqlite 默认连接池会在 Dispose 后仍持有文件句柄，
         // 导致删除/导出 .db 失败；单写者存档不需要连接池，关闭它让 Dispose 立即释放句柄。
@@ -305,6 +307,81 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
         }
     }
 
+    /// <summary>
+    /// ICommitStore：把"暂存 → 单事务原子落盘"的既有流程包装成端口的一次调用。
+    /// 失败时返回失败回执，不抛出（调用方据此决定是否中止推进）；数据库始终保持上一个完整提交。
+    /// </summary>
+    public CommitReceipt CommitWorld(CommitPackage package)
+    {
+        ArgumentNullException.ThrowIfNull(package);
+        try
+        {
+            var state = SnapshotReflection.GetState(package.Snapshot);
+            Commit(state);
+            Append(_worldId, package.JournalEvents);
+            Promote(Prepare(state, package.JournalEvents));
+            CommitAll(package.Snapshot);
+            return new CommitReceipt(true, state.WorldVersion, null);
+        }
+        catch (Exception exception)
+        {
+            return new CommitReceipt(false, -1, exception.Message);
+        }
+    }
+
+    /// <summary>
+    /// ICommitStore：把未改变世界的拒绝/过期结果写进 command_outcomes 表（同一写连接、单条 INSERT）。
+    /// 世界版本不变，重试同一命令时恢复路径可按 command_id 找到同一结论。
+    /// </summary>
+    public CommitReceipt RecordOutcome(InputOutcome outcome)
+    {
+        ArgumentNullException.ThrowIfNull(outcome);
+        lock (_gate)
+        {
+            using var transaction = _connection.BeginTransaction();
+            try
+            {
+                using var command = _connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = """
+                    INSERT OR REPLACE INTO command_outcomes (world_id, command_id, outcome_code, message, world_version)
+                    VALUES ($world, $commandId, $code, $message, $version);
+                    """;
+                command.Parameters.AddWithValue("$world", _worldId.Value);
+                command.Parameters.AddWithValue("$commandId", outcome.CommandId);
+                command.Parameters.AddWithValue("$code", outcome.OutcomeCode);
+                command.Parameters.AddWithValue("$message", outcome.Message);
+                command.Parameters.AddWithValue("$version", outcome.WorldVersion);
+                command.ExecuteNonQuery();
+                transaction.Commit();
+                return new CommitReceipt(true, outcome.WorldVersion, null);
+            }
+            catch (Exception exception)
+            {
+                transaction.Rollback();
+                return new CommitReceipt(false, outcome.WorldVersion, exception.Message);
+            }
+        }
+    }
+
+    /// <summary>
+    /// ICommitStore：只读恢复最新完整提交。数据库不存在视为"还没有任何提交"（返回 null），
+    /// 其余任何读取/校验失败原样抛出——恢复失败必须可见，绝不静默降级。
+    /// </summary>
+    public LoadedWorld? LoadCommittedWorld()
+    {
+        if (!File.Exists(_databasePath))
+        {
+            return null;
+        }
+
+        lock (_gate)
+        {
+            var snapshot = RestoreLatest(_databasePath, _worldId);
+            return new LoadedWorld(snapshot, Read(_worldId));
+        }
+    }
+
     /// <summary>释放写连接。恢复路径使用独立的只读连接，不经过本实例。</summary>
     public void Dispose() => _connection.Dispose();
 
@@ -367,6 +444,14 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
                 payload_checksum TEXT    NOT NULL,
                 snapshot_blob    BLOB    NOT NULL,
                 PRIMARY KEY (world_id, snapshot_seq)
+            );
+            CREATE TABLE IF NOT EXISTS command_outcomes (
+                world_id      TEXT    NOT NULL,
+                command_id    TEXT    NOT NULL,
+                outcome_code  TEXT    NOT NULL,
+                message       TEXT    NOT NULL,
+                world_version INTEGER NOT NULL,
+                PRIMARY KEY (world_id, command_id)
             );
             PRAGMA user_version=1;
             """;
