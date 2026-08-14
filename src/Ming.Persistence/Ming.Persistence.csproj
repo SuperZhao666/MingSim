@@ -1,9 +1,28 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Library</OutputType>
+    <!--
+      SQLite 适配器（Sqlite\SqliteCommitStore.cs）依赖 Microsoft.Data.Sqlite（MIT）。
+      离线沙箱无法还原该包，但 CI（GitHub Actions，联网）可以；因此：
+      - 默认在 GitHub Actions 或显式 -p:MingSimEnableSqliteStore=true 时启用（引入包并编译）；
+      - 本地离线构建不启用，保证 0 警告 0 错误，SQLite 验收由 CI 执行。
+      删除方案：不需要 SQLite 时移除本属性、PackageReference 与 Sqlite\SqliteCommitStore.cs 即可，
+      其余项目不受影响（快照编解码 SnapshotCodec 不依赖该包，供后续持久化复用）。
+    -->
+    <MingSimEnableSqliteStore Condition="'$(MingSimEnableSqliteStore)' == '' and '$(GITHUB_ACTIONS)' == 'true'">true</MingSimEnableSqliteStore>
+    <MingSimEnableSqliteStore Condition="'$(MingSimEnableSqliteStore)' == ''">false</MingSimEnableSqliteStore>
+    <DefineConstants Condition="'$(MingSimEnableSqliteStore)' == 'true'">$(DefineConstants);MINGSIM_SQLITE_STORE</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Ming.Application\Ming.Application.csproj" />
     <ProjectReference Include="..\Ming.Domain\Ming.Domain.csproj" />
+    <!-- 快照编解码需要 RealtimeSnapshot 类型签名；依赖方向仍是 Simulation 不依赖 Persistence/SQLite -->
+    <ProjectReference Include="..\Ming.Simulation\Ming.Simulation.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(MingSimEnableSqliteStore)' == 'true'">
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Sqlite\SqliteCommitStore.cs" Condition="'$(MingSimEnableSqliteStore)' != 'true'" />
   </ItemGroup>
 </Project>
