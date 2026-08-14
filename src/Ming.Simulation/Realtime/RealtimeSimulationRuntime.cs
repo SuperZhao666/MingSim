@@ -191,6 +191,7 @@ public sealed class RealtimeSimulationRuntime
     private const string RandomState = "schema=1;streams=none";
 
     private readonly CapabilityAuthorizer _authorizer = new();
+    private readonly ICommitStore? _commitStore;
     private readonly ConcurrentQueue<RealtimeCommand> _inbox = new();
     private readonly object _writerGate = new();
     private WorldState _state;
@@ -209,9 +210,10 @@ public sealed class RealtimeSimulationRuntime
     private string _randomState = RandomState;
     private static readonly IReadOnlyList<SimulationError> NoErrors = ReadOnlyCollection<SimulationError>.Empty;
 
-    public RealtimeSimulationRuntime(WorldState initialState)
+    public RealtimeSimulationRuntime(WorldState initialState, ICommitStore? commitStore = null)
     {
         ArgumentNullException.ThrowIfNull(initialState);
+        _commitStore = commitStore;
         _state = initialState.Clone();
         _initialGameTime = _state.GameTime;
         _initialWorldVersion = _state.WorldVersion;
@@ -449,6 +451,15 @@ public sealed class RealtimeSimulationRuntime
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         return new RealtimeSimulationRuntime(snapshot);
+    }
+
+    /// <summary>从提交商店恢复最后一个完整提交（doc 04 §5）；没有提交时抛异常而不是静默开新世界。</summary>
+    public static RealtimeSimulationRuntime RestoreFromStore(ICommitStore store)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        var loaded = store.LoadCommittedWorld()
+            ?? throw new InvalidDataException("提交商店中没有可恢复的完整提交。");
+        return Restore(loaded.Snapshot);
     }
 
     /// <summary>确定性地推进到目标游戏时刻；过去时刻只返回结构化错误。</summary>
@@ -1311,6 +1322,8 @@ public sealed class RealtimeSimulationRuntime
 
     private void CommitWorkingCopy(WorkingCopy candidate)
     {
+        // 本次提交新产生的事件日志增量：候选 outbox 里超过既有 outbox 数量的部分。
+        var newEvents = candidate.Outbox.Skip(_outboxEvents.Count).ToArray();
         _state = candidate.State;
         _scheduledEvents = candidate.Scheduled;
         _commandOutcomes = candidate.Outcomes;
@@ -1321,6 +1334,17 @@ public sealed class RealtimeSimulationRuntime
         _isPaused = candidate.IsPaused;
         _speed = candidate.Speed;
         _nextEventSequence = candidate.NextEventSequence;
+
+        // 权威提交落盘：内存发布之后立刻调用持久化端口；端口失败必须中止本次推进，
+        // 让上层把整个会话视为致命错误（数据库始终保持上一个完整提交，绝不写半状态）。
+        if (_commitStore is not null)
+        {
+            var receipt = _commitStore.CommitWorld(new CommitPackage(CaptureSnapshot(), newEvents));
+            if (!receipt.Success)
+            {
+                throw new InvalidOperationException($"提交商店写入失败，中止推进：{receipt.Error}");
+            }
+        }
     }
 
     private RealtimeAdvanceResult Report(bool succeeded, List<DomainEvent> events, List<RealtimeCommandResult> commandResults,
@@ -1426,8 +1450,12 @@ public sealed class RealtimeSimulationRuntime
     private static RealtimeCommandResult Accepted(string commandId, string message, long ingress, GameTime acceptedAt, long version) =>
         new(true, commandId, message, NoErrors, ingress, acceptedAt, version);
 
-    private static RealtimeCommandResult Reject(string commandId, string message, string code, long ingress, GameTime acceptedAt, long version) =>
-        new(false, commandId, message, new ReadOnlyCollection<SimulationError>([new SimulationError(code, message)]), ingress, acceptedAt, version);
+    private RealtimeCommandResult Reject(string commandId, string message, string code, long ingress, GameTime acceptedAt, long version)
+    {
+        // 未改变世界的拒绝也要持久化（doc 08 §5）：重试同一命令必须得到同一结论。
+        _commitStore?.RecordOutcome(new InputOutcome(commandId, code, message, version));
+        return new(false, commandId, message, new ReadOnlyCollection<SimulationError>([new SimulationError(code, message)]), ingress, acceptedAt, version);
+    }
 
     private static string Fingerprint(RealtimeCommand command)
     {
