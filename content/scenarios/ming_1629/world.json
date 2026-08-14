@@ -31,7 +31,7 @@
       "id": "mao-wenlong",
       "name": "毛文龙",
       "locationId": "juehuadao",
-      "officeId": "office-dongjiang-zongbing"
+      "officeId": null
     },
     {
       "id": "man-gui",
@@ -116,7 +116,7 @@
     { "id": "sp-tongzhou", "locationId": "tongzhou", "capacity": 5000, "grainQuantity": 0 },
     { "id": "sp-shanhaiguan", "locationId": "shanhaiguan", "capacity": 5000, "grainQuantity": 0 },
     { "id": "sp-ningyuan", "locationId": "ningyuan", "capacity": 30000, "grainQuantity": 5400 },
-    { "id": "sp-juehuadao", "locationId": "juehuadao", "capacity": 5000, "grainQuantity": 0 },
+    { "id": "sp-juehuadao", "locationId": "juehuadao", "capacity": 7000, "grainQuantity": 0 },
     { "id": "sp-dengzhou", "locationId": "dengzhou", "capacity": 30000, "grainQuantity": 14000 }
   ],
   "routes": [
@@ -179,7 +179,7 @@
     "loader_compat": {
       "note": "加载器实际消费字段与 src/Ming.Application/Scenarios/ScenarioLoader.cs 一致（id/startTurn/treasurySilver/map/characters/institutions/capabilityGrants/inventory/armies）。stockpiles/routes/decrees 为前瞻内容段：当前加载器忽略未知字段，后续代码任务接入 WorldState.CreateInitial(stockpiles, routes) 后生效；字段名与 Ming.Domain.Economy.StockpileState/RouteState 构造参数一致。",
       "characters_attributes": "本文件不给史实人物写 Attributes/Personality/Loyalty：证据账本 forbidden_to_write_into_game 明确禁止“忠诚、能力、性格、战斗力数值”。加载器缺省 50/50/50/50/50 与 (honest=true,bold=false,loyalToRuler=true,compassionate=true) 仅为运行时占位，不是内容断言。",
-      "office_id_scope": "officeId 是与 1627 模板一致的自由字符串头衔，不要求匹配机构 id；毛文龙 officeId=office-dongjiang-zongbing（东江总兵）对应机构不在本切片机构集（东江不在 6 节点），仅作身份头衔。",
+      "office_id_scope": "officeId 全部解析到本文件 institutions（无悬空引用）；毛文龙、孙承宗正月无切片内机构任职，officeId 置 null（毛文龙东江任职/印信链、孙承宗正月差遣见 OPEN 条目），不虚构机构。",
       "capability_grants": "机构能力与 CapabilityGrant 是 authority_matrix 到 GameCapability 枚举的最小映射（DESIGN）：提出/督催运粮→PlanLogistics；财粮会计拨付→ReadFinance/AllocateFinance；督师军务→PlanLogistics+MoveArmy。皇帝批准/下令、兵部征调文书、宁远接收验收在能力原语中无对应项，保持不授（见 OPEN 条目）。满桂/祖大寿等前线将领的守援与战备是自动结算、不在 P0 命令面，故不授 MoveArmy；毛文龙请饷走 decree-qingshou 文书模板，不授能力。"
     },
     "numbers": [
@@ -187,7 +187,7 @@
       { "item": "宁远初始存粮", "path": "stockpiles[sp-ningyuan].grainQuantity", "value": 5400, "unit": "石", "tag": "DESIGN", "source": "17号账本 NUM-001；03 §7", "note": "按 300 石/日约 18 日，制造明确倒计时。" },
       { "item": "可调用粮源总量", "path": "stockpiles[sp-beijing].grainQuantity + stockpiles[sp-dengzhou].grainQuantity", "value": 24000, "unit": "石", "tag": "DESIGN", "source": "17号账本 NUM-003；纸面推演 §3.1", "note": "总量 24,000 石；节点分配（北京 10,000 + 登州 14,000）未被推演冻结，标记 DESIGN/OPEN，试玩后可调整。分配与纸面推演并行方案批次量一致（陆 2×5,000、海 2×7,000）。" },
       { "item": "中央节点仓容量", "path": "stockpiles[sp-beijing|sp-ningyuan|sp-dengzhou].capacity", "value": 30000, "unit": "石", "tag": "DESIGN", "source": "无账本条目；GEO-001 仓容 OPEN", "note": "非约束性上限，保证纸面推演各策略峰值（最大 20,240 石）不触顶；真实仓储容量保持 OPEN。" },
-      { "item": "转运节点仓容量", "path": "stockpiles[sp-tongzhou|sp-shanhaiguan|sp-juehuadao].capacity", "value": 5000, "unit": "石", "tag": "DESIGN", "source": "无账本条目；GEO-002/003 运力 OPEN", "note": "等于单批陆运容量，作为中继不滞留多批；容量本身 OPEN。" },
+      { "item": "转运节点仓容量", "path": "stockpiles[sp-tongzhou|sp-shanhaiguan].capacity=5000; stockpiles[sp-juehuadao].capacity=7000", "value": "通州/山海关 5000；觉华岛 7000", "unit": "石", "tag": "DESIGN", "source": "无账本条目；GEO-002/003 运力 OPEN", "note": "通州/山海关=陆运单批容量 5000；觉华岛=海运单批容量 7000（中继容量不小于批次容量，避免转运瓶颈）；容量本身 OPEN。" },
       { "item": "转运节点初始存量", "path": "stockpiles[sp-tongzhou|sp-shanhaiguan|sp-juehuadao].grainQuantity", "value": 0, "unit": "石", "tag": "DESIGN", "source": "快照日存量无证据", "note": "不写死中转仓快照存量（OPEN）；开局由中央节点直接发货。" },
       { "item": "陆运单批容量", "path": "routes[route-*-beijing-tongzhou|tongzhou-shanhaiguan|shanhaiguan-ningyuan].capacity", "value": 5000, "unit": "石/批", "tag": "DESIGN", "source": "17号账本 NUM-005", "note": "陆运基线 5,000 石/批。" },
       { "item": "海运单批容量", "path": "routes[route-dengzhou-juehuadao|route-juehuadao-ningyuan].capacity", "value": 7000, "unit": "石/批", "tag": "DESIGN", "source": "17号账本 NUM-006", "note": "海运基线 7,000 石/批。" },
@@ -210,7 +210,9 @@
       { "item": "路线逐段时长、运力、损耗", "refs": [ "OPEN-ROUTE-DISPATCH" ], "handling": "travelHours/lossPerThousand 全部为 DESIGN 输入，不称史实；不把地图文件当证据。" },
       { "item": "钱粮数量口径（币制/粮制/名义与实收）", "refs": [ "OPEN-MONEY-GRAIN-AMOUNTS" ], "handling": "所有石/两均为 DESIGN；未来史料范围另立“史料观察值”字段，不覆盖本文件平衡值。" },
       { "item": "接收/清点/验收/入仓/回报链", "refs": [ "OPEN-RECEIPT-ACCEPTANCE" ], "handling": "本文件不设置任何自动验收成功；宁远前线机构能力留空。" },
-      { "item": "毛文龙、孙承宗 1629-01-01 驻地与任职", "refs": [ "CLAIM-MAO-STATUS-CHANGE", "CLAIM-SUN-LATER-1629-ASSIGNMENT" ], "handling": "毛文龙 locationId=juehuadao 为 DESIGN 海岛占位（实际驻东江诸岛，不在本切片节点集）；孙承宗 officeId 为空（正月无现任差遣），locationId=beijing 为 DESIGN 中枢占位。" }
+      { "item": "孙承宗 1629-01-01 驻地与任职", "refs": [ "CLAIM-SUN-LATER-1629-ASSIGNMENT" ], "handling": "正月无现任差遣，officeId 置 null，locationId=beijing 为 DESIGN 中枢占位；崇祯二年十月起守通州见 CLAIM-SUN-LATER-1629-ASSIGNMENT。" },
+      { "item": "毛文龙东江任职/印信链", "refs": [ "CLAIM-MAO-STATUS-CHANGE" ], "handling": "officeId 置 null（不虚构东江机构）；东江镇接任、印信交接、统属转换与饷运停续 OPEN；locationId=juehuadao 为 DESIGN 海岛占位（实际驻东江诸岛，不在本切片节点集）。" },
+      { "item": "满桂、祖大寿 1629-01-01 驻地与任职", "refs": [ "CLAIM-GUANNING-GENERALS" ], "handling": "证据支持天启六年至崇祯二年的关宁防区守援关系，但 1629-01-01 当天驻地/任职 OPEN；满桂=shanhaiguan、祖大寿=ningyuan 为 DESIGN 占位，不把天启六年任职倒灌为 1629 正月事实。" }
     ]
   }
 }
