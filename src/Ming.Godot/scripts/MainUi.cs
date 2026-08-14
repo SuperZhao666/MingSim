@@ -52,6 +52,7 @@ public partial class MainUi : Control
     private CommandFacade? _facade;
     private DecreePanel _decreePanel = null!;
     private EndgameReportPanel _endgameReportPanel = null!;
+    private GuidePanel _guidePanel = null!;
     private Label _realtimeClock = null!;
     private Label _realtimeStockpiles = null!;
     private Label _realtimeOutcome = null!;
@@ -100,6 +101,7 @@ public partial class MainUi : Control
         // 面板必须在 BuildRealtimeBar 之后接 runtime：全场景只有桥装配的那一份内核与门面。
         _decreePanel = GetNode<DecreePanel>("DecreePanel");
         _endgameReportPanel = GetNode<EndgameReportPanel>("EndgameReportPanel");
+        _guidePanel = GetNode<GuidePanel>("GuidePanel");
         _decreePanel.ConnectRuntime(_runtime, _facade);
         _endgameReportPanel.ConnectRuntime(_runtime);
         OnPlaceSelected(_map.SelectedPlaceId);
@@ -673,8 +675,22 @@ public partial class MainUi : Control
         var endgameButton = AddPaperButton(bar, "终局复盘", new Rect2(1416, 48, 128, 34));
         endgameButton.Name = "OpenEndgameReport";
         endgameButton.Pressed += OpenEndgameReport;
+        var guideButton = AddPaperButton(bar, "新手引导", new Rect2(1460, 10, 130, 34));
+        guideButton.Name = "OpenGuidePanel";
+        guideButton.Pressed += OpenGuidePanel;
 
         RefreshRealtimeLabels();
+    }
+
+    private void OpenGuidePanel()
+    {
+        if (!IsInstanceValid(_guidePanel))
+        {
+            return;
+        }
+        _decreePanel.Close();
+        _endgameReportPanel.Close();
+        _guidePanel.Open();
     }
 
     private void OpenDecreePanel()
