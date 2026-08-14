@@ -15,18 +15,29 @@ public sealed record ModelBudget(
 /// <remarks>
 /// <see cref="ModelBudgetTracker.TryReserve"/> 成功时返回预留句柄；调用结束后必须
 /// 恰好结算一次（<see cref="ModelBudgetTracker.Settle"/>）：按实际用量补记差额、
-/// 未用额度返还、全额返还（取消/未发起调用路径）。预留句柄是不可变的纯数据，
-/// 不携带锁或对预算的引用。
+/// 未用额度返还、全额返还（取消/未发起调用路径）。
+/// 句柄携带创建它的预算实例引用与已结算标记，用于归属校验与防重入（P2 审查）：
+/// - 用其他预算实例结算本句柄 → 拒绝；
+/// - 同一句柄结算两次 → 拒绝。
 /// </remarks>
-public readonly struct ModelBudgetReservation
+public sealed class ModelBudgetReservation
 {
-    internal ModelBudgetReservation(long reservedTokens)
+    internal ModelBudgetReservation(ModelBudgetTracker owner, long reservedTokens)
     {
+        Owner = owner ?? throw new ArgumentNullException(nameof(owner));
         ReservedTokens = reservedTokens;
     }
 
+    /// <summary>创建本预留的预算实例（归属校验用；不暴露给外部改写）。</summary>
+    internal ModelBudgetTracker Owner { get; }
+
     /// <summary>本次预留占用的 token 额度。</summary>
     public long ReservedTokens { get; }
+
+    /// <summary>是否已经结算；只由所属预算实例在临界区内读取与置位。</summary>
+    internal bool Settled { get; private set; }
+
+    internal void MarkSettled() => Settled = true;
 }
 
 /// <summary>
@@ -153,13 +164,13 @@ public sealed class ModelBudgetTracker
         {
             if (IsExhaustedCore)
             {
-                reservation = default;
+                reservation = null!;
                 return false;
             }
 
             if (estimatedTokens == 0)
             {
-                reservation = new ModelBudgetReservation(0);
+                reservation = new ModelBudgetReservation(this, 0);
                 return true;
             }
 
@@ -167,43 +178,47 @@ public sealed class ModelBudgetTracker
             var projectedCost = AddSaturating(_spentCostMillis, MultiplySaturating(estimatedTokens, _budget.CostPerTokenMillis));
             if (projectedTokens > _budget.MaxTokens || projectedCost > _budget.MaxCostMillis)
             {
-                reservation = default;
+                reservation = null!;
                 return false;
             }
 
             _spentTokens = projectedTokens;
             _spentCostMillis = projectedCost;
-            reservation = new ModelBudgetReservation(estimatedTokens);
+            reservation = new ModelBudgetReservation(this, estimatedTokens);
             return true;
         }
     }
 
     /// <summary>
     /// 结算一次预留：把预留额度修正为实际用量（actualTokens ≥ 0）。
-    /// - 实际 &gt; 预留（如响应 token）：补记差额；
-    /// - 实际 &lt; 预留：返还未用额度；
+    /// 结算 = 撤销预留占用 + 按实际入账，撤销与入账走与预留完全相同的饱和路径
+    /// （MultiplySaturating/AddSaturating），杜绝返还金额在饱和边界与预留不一致（P2 审查）。
+    /// - 实际 &gt; 预留（如响应 token）：净补记差额；
+    /// - 实际 &lt; 预留：净返还未用额度；
     /// - 实际 == 0（取消/未发起调用）：全额返还。
-    /// 每次成功的 <see cref="TryReserve"/> 必须恰好结算一次；预留占用期间
-    /// 不持有任何锁外的网络/世界调用。
+    /// 防重入与归属校验（P2 审查）：句柄只能由创建它的预算实例结算，且只能结算一次。
     /// </summary>
     public void Settle(ModelBudgetReservation reservation, long actualTokens)
     {
+        ArgumentNullException.ThrowIfNull(reservation);
         ArgumentOutOfRangeException.ThrowIfNegative(actualTokens);
+        if (!ReferenceEquals(reservation.Owner, this))
+        {
+            throw new InvalidOperationException("预留必须由创建它的预算实例结算。");
+        }
+
         lock (_gate)
         {
-            var delta = actualTokens - reservation.ReservedTokens;
-            if (delta > 0)
+            if (reservation.Settled)
             {
-                _spentTokens = AddSaturating(_spentTokens, delta);
-                _spentCostMillis = AddSaturating(_spentCostMillis, MultiplySaturating(delta, _budget.CostPerTokenMillis));
+                throw new InvalidOperationException("预留只能结算一次。");
             }
-            else if (delta < 0)
-            {
-                // 未用额度返还；防御性饱和到 0，绝不回绕成负数“凭空有钱”。
-                var refundTokens = checked(-delta);
-                _spentTokens = SubtractSaturatingAtZero(_spentTokens, refundTokens);
-                _spentCostMillis = SubtractSaturatingAtZero(_spentCostMillis, MultiplySaturating(refundTokens, _budget.CostPerTokenMillis));
-            }
+
+            reservation.MarkSettled();
+            _spentTokens = SubtractSaturatingAtZero(_spentTokens, reservation.ReservedTokens);
+            _spentCostMillis = SubtractSaturatingAtZero(_spentCostMillis, MultiplySaturating(reservation.ReservedTokens, _budget.CostPerTokenMillis));
+            _spentTokens = AddSaturating(_spentTokens, actualTokens);
+            _spentCostMillis = AddSaturating(_spentCostMillis, MultiplySaturating(actualTokens, _budget.CostPerTokenMillis));
         }
     }
 

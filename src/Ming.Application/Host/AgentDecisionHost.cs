@@ -39,14 +39,17 @@ public sealed record HostedDecisionBatch(
 ///   意图只能经 AgentRealtimeEntry 转成 RealtimeCommand 投入唯一 Simulation 收件箱，
 ///   由单写者安全点复核权限、版本与前置条件；
 /// - 不创建接口/工厂；不复制 DecisionPlanner/AgentRealtimeEntry 已有逻辑；
-/// - 每个角色的 DecisionId 由 actor + 观察世界版本 + 接受时刻派生，同一决策重试保持
+/// - 每个角色的 DecisionId 由 actor + 调用方快照版本 + 接受时刻派生，同一决策重试保持
 ///   稳定；模型输出第 N 个意图的 CommandId 稳定派生为 DecisionId-N（doc 07 §12），
 ///   不会因重试绕过内核幂等；
 /// - P1-AGENT-05（Wave 5A 审计）：多角色不能共享同一快照版本——首位提交生效后，
-///   后续角色的意图必须携带内核实际推进后的权威版本，否则被 STATE_VERSION_CONFLICT
-///   拒绝。本类每角色规划前都从 <see cref="RealtimeSimulationRuntime"/> 的权威状态
-///   重取当前版本（绝不是 base+index 猜未来版本），并在本角色提交成功后把收件箱
-///   在当前安全点真实推进，让下一角色看到权威推进后的世界；
+///   后续角色的命令必须携带内核实际推进后的权威版本，否则被 STATE_VERSION_CONFLICT
+///   拒绝。本类把“决策身份”与“命令版本”解耦：决策身份（DecisionId/CommandId 前缀）
+///   用重试稳定输入（actor + 调用方快照版本 + 接受时刻）派生，保证部分提交后重试整批
+///   命中原始 CommandId 被内核幂等去重/拒绝，绝不重复执行同一逻辑决策；
+///   命令提交时单独把 ExpectedWorldVersion 盖章为 <see cref="RealtimeSimulationRuntime"/>
+///   的权威版本（绝不是 base+index 猜未来版本），并在本角色提交成功后把收件箱在当前
+///   安全点真实推进，让下一角色看到权威推进后的世界；
 /// - 版本权威性由 Simulation 持有：本类只读 ReadModel 的权威版本，不猜测、不预测；
 ///   调用方提供的内容快照用于编译最小上下文与入口预检，内核仍在安全点按最新状态
 ///   复核权限、版本与前置条件（doc 08 §8：绝不按旧快照透支资源）。
@@ -103,16 +106,13 @@ public sealed class AgentDecisionHost
             var agent = ordered[index];
             cancellationToken.ThrowIfCancellationRequested();
 
-            // P1-AGENT-05：规划前从权威状态重取当前版本。前序角色已提交的命令已经过
-            // 安全点真实生效（见下方 AdvanceTo），因此这里读到的必然是内核实际推进后的
-            // 版本——用 base+index 猜未来版本被明确禁止。
-            var authoritativeVersion = _runtime.ReadModel.WorldVersion;
+            // P1-AGENT-05 审查修复：决策身份（DecisionId/CommandId 前缀）用重试稳定输入
+            // 派生——actor + 调用方快照版本 + 接受时刻。部分提交后重试整批时，已提交角色
+            // 的 DecisionId 保持稳定，重试命令命中原始 CommandId，被内核幂等去重/拒绝，
+            // 绝不因权威版本推进而漂移成新命令，导致同一逻辑决策重复执行（doc 08 §8）。
+            // 注意：这里用的是调用方快照版本（world.WorldVersion），不是逐角色推进后的
+            // 权威版本——权威版本只用于命令提交时的 ExpectedWorldVersion 盖章（见下）。
             var context = _contextCompiler.Compile(world, agent.ActorId);
-            if (context.WorldVersion != authoritativeVersion)
-            {
-                context = context with { WorldVersion = authoritativeVersion };
-            }
-
             var decisionId = BuildDecisionId(agent.ActorId, context.WorldVersion, acceptedAt);
             var request = new DecisionRequest(
                 decisionId,
@@ -121,16 +121,29 @@ public sealed class AgentDecisionHost
                 context.GameTime,
                 acceptedAt.Add(DecisionWindow));
             var result = await agent.Planner.PlanAsync(request, context, acceptedAt, cancellationToken).ConfigureAwait(false);
-            var submissions = _entry.Submit(world, result.Intents);
+
+            // P1-AGENT-05：命令提交时单独把 ExpectedWorldVersion 更新为权威版本——每角色
+            // 规划后收件箱已在前一角色提交时真实推进，这里读到的版本是内核实际推进后的
+            // 版本（绝非 base+index 猜未来版本）。意图身份（IntentId/幂等键/CommandId）
+            // 保持不变，既保逐角色版本新鲜度，又让重试命中原始 CommandId。
+            var authoritativeVersion = _runtime.ReadModel.WorldVersion;
+            var submitted = StampAuthoritativeVersion(result.Intents, authoritativeVersion);
+            var submissions = _entry.Submit(world, submitted);
             decisions.Add(new HostedAgentDecision(
-                agent.ActorId, decisionId, result.Source, result.FallbackReason, result.Intents, submissions));
+                agent.ActorId, decisionId, result.Source, result.FallbackReason, submitted, submissions));
 
             // 本角色提交成功后（有意图进入收件箱）在当前安全点真实推进，权威版本随之
             // 前进；下一角色据此重取。末位角色无需内部推进：调用方在自己的安全点统一
             // 受理即可，保持“调用方一次 AdvanceTo 看到批次结果”的既有契约。
             if (index < ordered.Length - 1 && submissions.Any(submission => submission.Accepted))
             {
-                _runtime.AdvanceTo(_runtime.ReadModel.GameTime);
+                var advanced = _runtime.AdvanceTo(_runtime.ReadModel.GameTime);
+                if (!advanced.Succeeded || advanced.Errors.Count > 0)
+                {
+                    // P2 审查：内部推进失败必须显式暴露，不能让宿主带着已损坏的世界继续决策。
+                    var detail = string.Join("; ", advanced.Errors.Select(error => $"{error.Code}: {error.Message}"));
+                    throw new InvalidOperationException($"宿主逐角色推进失败，世界不可继续决策：{detail}");
+                }
             }
         }
 
@@ -138,7 +151,34 @@ public sealed class AgentDecisionHost
     }
 
     /// <summary>
-    /// 稳定决策编号：actor + 观察版本 + 接受时刻，保证同一决策重试得到同一 ID
+    /// 把意图的 ExpectedWorldVersion 盖章为当前权威版本，其余字段（身份/幂等键/内容）不变。
+    /// 非实时内核支持的意图原样返回，由入口结构化拒绝。
+    /// </summary>
+    private static IReadOnlyList<WorldIntent> StampAuthoritativeVersion(
+        IReadOnlyList<WorldIntent> intents,
+        long authoritativeVersion)
+    {
+        if (intents.Count == 0)
+        {
+            return intents;
+        }
+
+        var stamped = new List<WorldIntent>(intents.Count);
+        foreach (var intent in intents)
+        {
+            stamped.Add(intent switch
+            {
+                PlanLogisticsIntent logistics => logistics with { ExpectedWorldVersion = authoritativeVersion },
+                MoveArmyIntent move => move with { ExpectedWorldVersion = authoritativeVersion },
+                _ => intent,
+            });
+        }
+
+        return stamped;
+    }
+
+    /// <summary>
+    /// 稳定决策编号：actor + 调用方快照版本 + 接受时刻，保证同一决策重试得到同一 ID
     /// （幂等键随之为 DecisionId-N，不会因重试绕过内核幂等）。
     /// </summary>
     private static string BuildDecisionId(CharacterId actorId, long worldVersion, GameTime acceptedAt) =>

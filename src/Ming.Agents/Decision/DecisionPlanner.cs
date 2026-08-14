@@ -92,8 +92,7 @@ public sealed class DecisionPlanner
         // 不足即拒绝（0 次调用，直接回退 Utility，doc 07 §13.3）；两个并发调用
         // 不可能同时通过同一额度的闸门。锁内只有整数累加，网络 await 绝不在锁内。
         var budget = _budget;
-        var hasReservation = false;
-        var reservation = new ModelBudgetReservation(0);
+        ModelBudgetReservation? reservation = null;
         if (budget is not null)
         {
             if (!budget.TryReserve(estimatedRequestTokens, out reservation))
@@ -109,8 +108,6 @@ public sealed class DecisionPlanner
                     DateTimeOffset.UtcNow));
                 return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.BudgetExceeded);
             }
-
-            hasReservation = true;
         }
 
         // 预留成功后到结算前，模型调用（网络 await）、解析等任何耗时操作都不持有预算锁；
@@ -149,7 +146,8 @@ public sealed class DecisionPlanner
             }
 
             var responseTokens = TokenEstimation.FromText(response.Content);
-            actualTokens = estimatedRequestTokens + responseTokens;
+            // 请求+响应饱和相加（P2 审查）：两个估算都是 long，极端文本下直接相加可能溢出回绕。
+            actualTokens = AddSaturating(estimatedRequestTokens, responseTokens);
 
             // 解析步骤整体纳入 try 回退（P2-1）：解析器是"模型输出不可信"的最后一道硬防线，
             // 任何未预期异常（未来 schema 版本、解析器缺陷等）都必须回退规则路径并记 ParseFailed 审计，
@@ -167,7 +165,7 @@ public sealed class DecisionPlanner
                     ModelCallOutcome.ParseFailed,
                     estimatedRequestTokens,
                     responseTokens,
-                    CostFor(estimatedRequestTokens + responseTokens),
+                    CostFor(AddSaturating(estimatedRequestTokens, responseTokens)),
                     stopwatch.Elapsed,
                     DateTimeOffset.UtcNow));
                 return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.ParseFailed);
@@ -181,7 +179,7 @@ public sealed class DecisionPlanner
                     ModelCallOutcome.Accepted,
                     estimatedRequestTokens,
                     responseTokens,
-                    CostFor(estimatedRequestTokens + responseTokens),
+                    CostFor(AddSaturating(estimatedRequestTokens, responseTokens)),
                     stopwatch.Elapsed,
                     DateTimeOffset.UtcNow));
                 return new DecisionResult(request.DecisionId, DecisionSource.Model, parsed.Intents, acceptedGameTime);
@@ -196,14 +194,14 @@ public sealed class DecisionPlanner
                 outcome,
                 estimatedRequestTokens,
                 responseTokens,
-                CostFor(estimatedRequestTokens + responseTokens),
+                CostFor(AddSaturating(estimatedRequestTokens, responseTokens)),
                 stopwatch.Elapsed,
                 DateTimeOffset.UtcNow));
             return RulesResult(request, context, acceptedGameTime, reason);
         }
         finally
         {
-            if (hasReservation)
+            if (reservation is not null)
             {
                 budget!.Settle(reservation, actualTokens);
             }
@@ -218,6 +216,17 @@ public sealed class DecisionPlanner
         new(request.DecisionId, DecisionSource.Rules, _ruleSource.Decide(context), acceptedGameTime, reason);
 
     private long CostFor(long tokens) => _budget?.CostFor(tokens) ?? 0;
+
+    /// <summary>饱和相加（P2 审查）：与预算记账同规则，溢出不回绕。</summary>
+    private static long AddSaturating(long left, long right)
+    {
+        if (right > 0 && left > long.MaxValue - right)
+        {
+            return long.MaxValue;
+        }
+
+        return left + right;
+    }
 
     private void AppendAudit(ModelAuditEntry entry) => _auditLog?.Append(entry);
 
