@@ -1,3 +1,4 @@
+using MingSim.Agents.Realtime;
 using MingSim.Agents.Runtime;
 using MingSim.Domain.Common;
 using MingSim.Domain.Economy;
@@ -37,6 +38,7 @@ public sealed class RuleBasedMinisterAgent : IAgentDecisionSource
         {
             MinisterFocus.Industry => DecideIndustry(context),
             MinisterFocus.Military => DecideMilitary(context),
+            MinisterFocus.Logistics => DecideLogistics(context),
             _ => [],
         };
     }
@@ -72,6 +74,31 @@ public sealed class RuleBasedMinisterAgent : IAgentDecisionSource
                 Budget: 50_000,                        // 预算
                 BaseCapacity: 800,                     // 基础产能
                 Workforce: 80),                        // 配备工人
+        ];
+    }
+
+    /// <summary>
+    /// 物流导向策略：具备粮运权限时，提议一单演示粮运。
+    /// 路线和数量与现有规则代理一样写死为示例参数，真实数量应由世界上下文决定。
+    /// </summary>
+    private static IReadOnlyList<WorldIntent> DecideLogistics(AgentContext context)
+    {
+        if (!context.Capabilities.Contains(GameCapability.PlanLogistics))
+        {
+            return [];
+        }
+
+        return
+        [
+            new PlanLogisticsIntent(
+                "agent-logistics-ningyuan-300",        // 意图ID（本回合动作唯一标识）
+                context.ActorId,                       // 当前决策的大臣角色
+                context.TurnNumber,                    // 目标回合
+                "turn-1-logistics-ningyuan-300",       // 幂等键，避免重复提交同一动作
+                context.WorldVersion,                  // 决策时观察到的世界版本
+                new RouteId("capital-ningyuan-grain"), // 演示路线
+                300,                                   // 演示数量
+                context.GameTime.Value),               // 决策时观察到的 UTC 时间
         ];
     }
 
