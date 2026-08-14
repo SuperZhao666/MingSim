@@ -68,6 +68,7 @@ internal static class ScenarioP0Rules
         }
 
         var available = front.GrainQuantity;
+        // 日耗读取减耗后的当前需求：减耗令生效后 DailyGrainDemand 已为 240（纸面推演 §3.2）。
         var demand = scenario.DailyGrainDemand;
         var consumed = Math.Min(available, demand);
         if (consumed > 0)
@@ -77,7 +78,16 @@ internal static class ScenarioP0Rules
 
         if (available >= demand)
         {
-            state.Readiness.ApplyFullDay();
+            // 减耗代价：减耗令生效的足额供粮日战备恢复减半（+10→+5 基点/日）。
+            if (scenario.RationReductionActive)
+            {
+                state.Readiness.ApplyReducedFullDay();
+            }
+            else
+            {
+                state.Readiness.ApplyFullDay();
+            }
+
             return new DailyRationSummary(RationKind.Full, consumed, available, 0);
         }
 

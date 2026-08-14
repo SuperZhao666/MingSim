@@ -72,6 +72,11 @@ internal static class Program
             ShouldExpireDecreeAtDeadlineAndDropTrust();
             ShouldKeepDecreeIdempotent();
             ShouldTrackFrontierReadinessDaily();
+            ShouldApplyRationReductionDecreeTo240();
+            ShouldHalveReadinessRecoveryDuringReduction();
+            ShouldKeepRationReductionInHashAndSnapshot();
+            ShouldPenalizeTrustForUnplannedRationReduction();
+            ShouldRejectLegacySnapshotSchemaVersion();
             ShouldFailHardAfterSevenZeroGrainDays();
             ShouldEvaluateEndgameTiers();
             ShouldReplayRiskSamplesDeterministically();
@@ -1117,6 +1122,182 @@ internal static class Program
             "恢复供粮后不能再新增欠饷");
     }
 
+    /// <summary>
+    /// 减耗令（M5 通关杠杆，纸面推演 §3.2）：皇帝发布减耗政令后，前线日耗 300→240 石/日；
+    /// 每日消耗按新需求执行；终局可用粮天数分母用当前日耗；同号同内容幂等、同号不同 Kind 冲突。
+    /// </summary>
+    private static void ShouldApplyRationReductionDecreeTo240()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var before = runtime.ReadModel;
+        Require(before.Scenario.DailyGrainDemand == 300, "场景标准日耗必须是 300 石/日（doc 03 §7.1）");
+
+        var decree = CreateDecree(runtime, "decree-reduction", deadlineDays: 20, budget: 100,
+            kind: DecreeKind.RationReduction);
+        Require(runtime.EnqueueCreateDecree(decree).Queued, "减耗令应进入收件箱");
+        var accepted = runtime.AdvanceTo(before.GameTime);
+        Require(accepted.CommandResults.Single().Accepted, "有权限承办人的减耗令必须接纳");
+        Require(runtime.ReadModel.Scenario.DailyGrainDemand == 240,
+            "减耗令生效后日耗必须降为 240 石/日（纸面推演 §3.2）");
+        Require(accepted.Events.Any(domainEvent => domainEvent.EventType == "RationReductionEnacted" &&
+                domainEvent.Data["new_demand"] == "240"),
+            "减耗生效必须留下可审计 RationReductionEnacted 事件");
+
+        // 每日消耗按 240 执行：1 天只扣 240 石（对照 300 石/日）。
+        var day1 = runtime.AdvanceTo(new GameTime(before.GameTime.Value.AddDays(1)));
+        Require(day1.ReadModel.Stockpiles.Single(item => item.Id.Value == "ningyuan-granary").GrainQuantity == 5_400 - 240,
+            "减耗令生效后每日必须只扣 240 石");
+
+        // 终局可用粮天数分母用当前日耗（契约：EndgameEvaluator 分母用当前日耗）。
+        var evaluation = runtime.EvaluateEndgame();
+        Require(evaluation.Explanation.Contains("日需 240 石", StringComparison.Ordinal),
+            "终局报告必须按当前日耗 240 石说明可用粮天数分母");
+
+        // 幂等：同号同内容重放 → 幂等结果、不二次生效不二次扣预算；同号不同 Kind → 冲突。
+        Require(runtime.EnqueueCreateDecree(decree).Queued, "减耗令幂等重试应进入安全点判定");
+        var replay = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(replay.CommandResults.Single().Accepted &&
+                replay.CommandResults.Single().Message.Contains("幂等", StringComparison.Ordinal),
+            "同号同内容减耗令必须按幂等记录返回");
+        Require(runtime.ReadModel.Scenario.DailyGrainDemand == 240 && runtime.ReadModel.Scenario.SpentSilver == 100,
+            "幂等重放不能二次生效减耗或二次扣预算");
+        var kindConflict = decree with { Kind = DecreeKind.General };
+        Require(runtime.EnqueueCreateDecree(kindConflict).Queued, "同号不同 Kind 应进入安全点判定");
+        var conflictResult = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!conflictResult.CommandResults.Single().Accepted &&
+                conflictResult.CommandResults.Single().Errors.Any(error => error.Code == "IDEMPOTENCY_CONFLICT"),
+            "同 CommandId 携带不同 Kind 必须返回 IDEMPOTENCY_CONFLICT");
+    }
+
+    /// <summary>
+    /// 战备恢复减半（契约代价）：减耗令生效后的足额供粮日，战备恢复 +10→+5 基点/日；
+    /// 对照组（无减耗）仍按 +10 基点/日恢复；缺粮/断粮日衰减不受减耗影响。
+    /// </summary>
+    private static void ShouldHalveReadinessRecoveryDuringReduction()
+    {
+        var reduced = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var control = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var reducedBefore = reduced.ReadModel;
+        Require(reduced.EnqueueCreateDecree(CreateDecree(reduced, "decree-reduced", deadlineDays: 20, budget: 100,
+                kind: DecreeKind.RationReduction)).Queued,
+            "减耗世界减耗令应进入收件箱");
+        reduced.AdvanceTo(reducedBefore.GameTime);
+        Require(reduced.ReadModel.Scenario.DailyGrainDemand == 240, "减耗世界必须生效 240 日耗");
+
+        var start = reducedBefore.GameTime;
+        reduced.AdvanceTo(new GameTime(start.Value.AddDays(10)));
+        control.AdvanceTo(new GameTime(start.Value.AddDays(10)));
+        Require(reduced.ReadModel.Readiness.ValueBasisPoints == 6_000 + 10 * (ReadinessState.DesignFullDayGainBasisPoints / 2),
+            "减耗令生效的足额供粮日战备必须只恢复 +5 基点/日（+10 减半）");
+        Require(control.ReadModel.Readiness.ValueBasisPoints == 6_000 + 10 * ReadinessState.DesignFullDayGainBasisPoints,
+            "对照组足额供粮日战备仍按 +10 基点/日恢复");
+        Require(reduced.ReadModel.Readiness.ValueBasisPoints == control.ReadModel.Readiness.ValueBasisPoints - 50,
+            "减耗 10 日相对对照恰好少恢复 50 基点（10 日 × 5 基点）");
+    }
+
+    /// <summary>
+    /// 哈希/快照（契约：日耗变化进入 canonical hash 与快照，重放确定）：
+    /// 减耗状态（日耗 240 + 生效标志）必须改变 canonical hash；RealtimeSnapshot 往返后
+    /// 减耗状态与 hash 保持一致，恢复实例可继续按 240 日耗推进。
+    /// </summary>
+    private static void ShouldKeepRationReductionInHashAndSnapshot()
+    {
+        var plain = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var reduced = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        Require(reduced.EnqueueCreateDecree(CreateDecree(reduced, "decree-hash", deadlineDays: 20, budget: 100,
+                kind: DecreeKind.RationReduction)).Queued,
+            "哈希测试减耗令应进入收件箱");
+        reduced.AdvanceTo(reduced.ReadModel.GameTime);
+        Require(reduced.ReadModel.Scenario.DailyGrainDemand == 240, "哈希测试世界必须生效减耗");
+        Require(plain.StateHash != reduced.StateHash, "减耗状态必须改变 canonical hash（日耗/标志纳入权威哈希）");
+
+        var snapshot = reduced.CaptureSnapshot();
+        var restored = RealtimeSimulationRuntime.Restore(snapshot);
+        Require(restored.StateHash == reduced.StateHash, "含减耗状态的快照恢复后 canonical hash 必须一致");
+        Require(restored.ReadModel.Scenario.DailyGrainDemand == 240, "快照恢复后减耗状态（日耗 240）必须保留");
+
+        // 恢复实例继续推进：仍按 240 日耗执行，重放确定（同一推进目标得到同一 hash）。
+        var start = reduced.ReadModel.GameTime;
+        var original = reduced.AdvanceTo(new GameTime(start.Value.AddDays(3)));
+        var restoredAdvance = restored.AdvanceTo(new GameTime(start.Value.AddDays(3)));
+        Require(original.ReadModel.StateHash == restoredAdvance.ReadModel.StateHash,
+            "恢复实例推进到同一目标必须与原实例 canonical hash 一致");
+        Require(original.ReadModel.Stockpiles.Single(item => item.Id.Value == "ningyuan-granary").GrainQuantity == 5_400 - 3 * 240,
+            "恢复实例推进后每日仍按 240 石消耗");
+    }
+
+    /// <summary>
+    /// 逾期临时改令语义（契约：预先计划——硬失败前发布——不扣大臣信任；临时改令才扣）：
+    /// 硬失败已发生（HardFailureReported）后才发布的减耗令属于临时改令，扣大臣信任 2 点
+    /// （纸面推演 §3.2"未计划改令×2"），但减耗仍然生效（日耗 300→240）。
+    /// </summary>
+    private static void ShouldPenalizeTrustForUnplannedRationReduction()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld(destinationGrain: 0));
+        var start = runtime.ReadModel.GameTime;
+        var failed = runtime.AdvanceTo(new GameTime(start.Value.AddDays(7)));
+        Require(failed.ReadModel.IsPaused && GetRuntimeState(runtime).Scenario.HardFailureReported,
+            "硬失败必须已报告并自动暂停（前置条件）");
+        Require(runtime.ReadModel.Scenario.MinisterTrust == 50, "硬失败本身不扣大臣信任（信任只按事件收据）");
+
+        var decree = CreateDecree(runtime, "decree-late", deadlineDays: 10, budget: 100,
+            kind: DecreeKind.RationReduction);
+        Require(runtime.EnqueueCreateDecree(decree).Queued, "暂停状态下减耗令应进入收件箱");
+        var accepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(accepted.CommandResults.Single().Accepted, "临时减耗令必须仍被接纳");
+        Require(runtime.ReadModel.Scenario.DailyGrainDemand == 240, "临时改令仍然生效：日耗 300→240");
+        Require(runtime.ReadModel.Scenario.MinisterTrust == 48,
+            "临时改令必须扣大臣信任 2 点（未计划改令×2，DESIGN）");
+        Require(accepted.Events.Any(domainEvent => domainEvent.EventType == "RationReductionEnacted" &&
+                domainEvent.Data["unplanned"] == "True"),
+            "临时改令必须留下可审计的 unplanned 标记");
+
+        // P2③ 回归：减耗已生效后，硬失败状态下再次发布减耗令（无任何状态变化）仍扣信任 2 点
+        // （"未计划改令"按政令次数计，不因幂等状态免罚），但不得重复产生减耗生效事件。
+        var second = CreateDecree(runtime, "decree-late-2", deadlineDays: 10, budget: 100,
+            kind: DecreeKind.RationReduction);
+        Require(runtime.EnqueueCreateDecree(second).Queued, "第二道减耗令应进入收件箱");
+        var secondAccepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(secondAccepted.CommandResults.Single().Accepted, "第二道减耗令必须被接纳");
+        Require(runtime.ReadModel.Scenario.MinisterTrust == 46,
+            "减耗已生效后的临时改令仍扣信任 2 点（信任 48→46）");
+        Require(runtime.ReadModel.Scenario.DailyGrainDemand == 240, "第二道减耗令不能再改变日耗（已 240）");
+        Require(runtime.OutboxEvents.Count(domainEvent => domainEvent.EventType == "RationReductionEnacted") == 1,
+            "第二道减耗令不能重复产生减耗生效事件（状态幂等）");
+    }
+
+    /// <summary>
+    /// P1 回归（独立审查结论）：旧 schema 快照（本 PR 之前的存档，哈希 schema 5）恢复必须被
+    /// 快照版本门禁显式拒绝（"不支持实时快照版本"），而不是哈希校验失配的偶然失败。
+    /// </summary>
+    private static void ShouldRejectLegacySnapshotSchemaVersion()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        Require(runtime.EnqueueCreateDecree(CreateDecree(runtime, "decree-legacy-schema", deadlineDays: 20, budget: 100,
+                kind: DecreeKind.RationReduction)).Queued,
+            "旧 schema 测试减耗令应进入收件箱");
+        runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        var snapshot = runtime.CaptureSnapshot();
+        Require(snapshot.SchemaVersion == RealtimeSnapshotSchema.Version,
+            "捕获快照必须携带当前快照 schema 版本");
+
+        // 把快照的 schema version 篡改为旧版本（Version - 1）：恢复必须因版本门禁被显式拒绝。
+        var backingField = typeof(RealtimeSnapshot).GetField("<SchemaVersion>k__BackingField",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new MissingMemberException(typeof(RealtimeSnapshot).FullName, "SchemaVersion backing field");
+        backingField.SetValue(snapshot, RealtimeSnapshotSchema.Version - 1);
+
+        try
+        {
+            RealtimeSimulationRuntime.Restore(snapshot);
+            throw new InvalidOperationException("旧 schema 快照必须被显式拒绝，不能成功恢复。");
+        }
+        catch (InvalidDataException exception) when (exception.Message.Contains("不支持实时快照版本", StringComparison.Ordinal))
+        {
+            // 期望：版本门禁显式拒绝（fail-closed），而不是哈希失配的偶然失败。
+        }
+    }
+
     /// <summary>硬失败：连续 7 日可用粮为 0 → EvaluateEndgame 判 HardFailure 并只报告一次。</summary>
     private static void ShouldFailHardAfterSevenZeroGrainDays()
     {
@@ -1541,12 +1722,14 @@ internal static class Program
         int deadlineDays,
         long budget = 5_000,
         CharacterId? responsible = null,
-        string? linkedShipmentId = null) =>
+        string? linkedShipmentId = null,
+        DecreeKind kind = DecreeKind.General) =>
         new(id, new CharacterId("emperor"), new DecreeId(id), $"向宁远调运军粮 {id}", new ProvinceId("liaodong"),
             budget, responsible ?? new CharacterId("works"),
             new GameTime(runtime.ReadModel.GameTime.Value.AddDays(deadlineDays)),
             "", "测试政令", GameCapability.PlanLogistics, "capital-ningyuan-grain",
-            linkedShipmentId, runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion);
+            linkedShipmentId, runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion,
+            kind);
 
     /// <summary>只用于测试：注入终局分档所需的战备初值（评估函数本身可自动检查）。</summary>
     private static void ReplaceReadiness(WorldState world, ReadinessState readiness) =>

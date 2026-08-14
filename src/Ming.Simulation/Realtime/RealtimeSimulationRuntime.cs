@@ -918,6 +918,32 @@ public sealed class RealtimeSimulationRuntime
             ("responsible_actor", command.ResponsibleActorId.Value), ("deadline", command.Deadline.ToString()),
             ("linked_shipment", command.LinkedShipmentId ?? "")));
         candidate.Outbox.Add(events[^1]);
+
+        // 减耗令（M5 通关杠杆，纸面推演 §3.2）：接纳即生效——前线日耗 300→240 石/日。
+        // 信任规则：预先计划（硬失败前发布）不扣大臣信任；硬失败已发生后的临时改令才扣
+        // （"未计划改令×2"，DESIGN）。改令与政令接纳同一提交原子生效，重放确定。
+        // 非场景世界（FrontStockpileId 为 null、日耗/战备规则关闭）下减耗令仍被接纳但无玩法效果
+        // （ScenarioState.DailyGrainDemand 变化无任何读取方）——预期行为，不做额外前置拒绝。
+        if (command.Kind == DecreeKind.RationReduction)
+        {
+            var unplanned = candidate.State.Scenario.HardFailureReported;
+            if (unplanned)
+            {
+                candidate.State.Scenario.ChangeMinisterTrust(-ScenarioState.DesignUnplannedDecreeTrustPenalty);
+            }
+
+            var beforeDemand = candidate.State.Scenario.DailyGrainDemand;
+            candidate.State.Scenario.ApplyRationReduction();
+            if (candidate.State.Scenario.DailyGrainDemand != beforeDemand)
+            {
+                events.Add(CreateEvent(candidate, command.CommandId, "RationReductionEnacted", acceptedAt,
+                    ("decree_id", command.DecreeId.Value),
+                    ("new_demand", candidate.State.Scenario.DailyGrainDemand.ToString()),
+                    ("unplanned", unplanned.ToString())));
+                candidate.Outbox.Add(events[^1]);
+            }
+        }
+
         return Accepted(command.CommandId, "政令已接纳并扣除预算。", ingressSequence, acceptedAt, candidate.State.WorldVersion);
     }
 
@@ -1510,6 +1536,7 @@ public sealed class RealtimeSimulationRuntime
                 WriteFingerprintString(writer, decree.RequiredCapability.ToString());
                 WriteFingerprintString(writer, decree.RequiredResourceId ?? string.Empty);
                 WriteFingerprintString(writer, decree.LinkedShipmentId ?? string.Empty);
+                WriteFingerprintString(writer, decree.Kind.ToString());
                 writer.Write(decree.SubmittedAt.UtcTicks);
                 writer.Write(decree.ExpectedWorldVersion);
                 break;
@@ -1587,5 +1614,9 @@ public sealed class RealtimeSimulationRuntime
 
 public static class RealtimeSnapshotSchema
 {
-    public const int Version = 6;
+    // 快照 payload schema 版本。6→7：CanonicalStateHasher.SchemaVersion 5→6（RationReductionActive 入哈希）后，
+    // 本 PR 之前的存档（旧哈希 schema）在新代码下必然哈希校验失败；版本门禁升到 7 使旧快照被显式拒绝
+    // （Restore 的版本检查先于哈希校验，返回"不支持实时快照版本"），而不是以哈希失配的偶然失败收场。
+    // 旧存档不再兼容，恢复即拒绝（fail-closed），与 doc 08 存档版本约定一致。
+    public const int Version = 7;
 }

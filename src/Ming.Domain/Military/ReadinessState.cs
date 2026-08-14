@@ -41,6 +41,16 @@ public sealed class ReadinessState
         ConsecutiveZeroGrainDays = 0;
     }
 
+    /// <summary>
+    /// 减耗令生效日的足额供粮：战备恢复减半（+10→+5 基点/日，纸面推演 §3.2 减耗政策代价）。
+    /// 增益由标准恢复常量派生（减半），不引入新的平衡常量。
+    /// </summary>
+    internal void ApplyReducedFullDay()
+    {
+        ValueBasisPoints = Math.Min(10_000, ValueBasisPoints + DesignFullDayGainBasisPoints / 2);
+        ConsecutiveZeroGrainDays = 0;
+    }
+
     /// <summary>缺粮日（0 &lt; 可用粮 &lt; 日需）：战备 -1，缺口计入欠饷。</summary>
     internal void ApplyShortDay(long shortfallGrain)
     {
