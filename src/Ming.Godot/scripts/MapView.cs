@@ -296,6 +296,11 @@ public partial class MapView : Control
     public void InjectFleetAcceptanceSample(int shipmentCount) =>
         SetFleetReadModel(MapFleetReadModel.CreateAcceptanceSample(shipmentCount));
 
+    /// <summary>只供自动验收注入"天气延误重排"样本：同一在途粮队目标进度回落（0.6→0.15），
+    /// 验证表现层在权威目标回落时保持显示单调不倒退。</summary>
+    public void InjectFleetAcceptanceSampleDelayed() =>
+        SetFleetReadModel(MapFleetReadModel.CreateAcceptanceSample(1, delayHours: 54));
+
     public override void _Ready()
     {
         MouseFilter = MouseFilterEnum.Stop;
@@ -615,6 +620,9 @@ public partial class MapView : Control
                 continue;
             }
             if (Mathf.Abs(target - current) < 0.0005f) continue;
+            // 天气延误等权威事件会把到货目标向后重排（目标暂时小于当前显示进度）：
+            // 表现层保持显示值不动（视觉单调不倒退），等权威目标再次追上后继续趋近。
+            if (target < current) continue;
             var factor = 1.0f - Mathf.Exp((float)(-delta / FleetEaseTimeConstantSeconds));
             _shipmentDisplayProgress[shipment.ShipmentId] = current + (target - current) * factor;
             changed = true;

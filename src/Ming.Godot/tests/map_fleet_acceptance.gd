@@ -43,6 +43,7 @@ func _init() -> void:
 	_test_source_contract()
 	_test_injected_sample(map)
 	await _test_interpolation(map)
+	await _test_delayed_target_does_not_slide_back(map)
 	_test_reinject_keeps_progress(map)
 	_test_existing_map_behavior_unaffected(map)
 
@@ -100,6 +101,19 @@ func _test_interpolation(map: Control) -> void:
 	_assert(absf(late - target) < 0.03, "插值最终收敛到目标：%.3f" % late)
 	_assert(float(map.GetFleetShipmentDisplayProgress(1)) == 1.0, "已抵达粮队显示在终点")
 	_assert(float(map.GetFleetShipmentDisplayProgress(2)) == 0.0, "计划粮队显示在起点")
+
+
+# 天气延误把权威到货目标推后（0.6 -> 0.15）时，显示进度必须保持单调不倒退、不越界。
+func _test_delayed_target_does_not_slide_back(map: Control) -> void:
+	await create_timer(0.4).timeout
+	var before: float = float(map.GetFleetShipmentDisplayProgress(0))
+	_assert(before > 0.2, "延误区先让显示进度离开起点：%.3f" % before)
+	map.InjectFleetAcceptanceSampleDelayed()
+	_assert(float(map.GetFleetShipmentTargetProgress(0)) < before, "权威目标确实回落（延误区前提）：%.3f" % float(map.GetFleetShipmentTargetProgress(0)))
+	await create_timer(0.8).timeout
+	var after: float = float(map.GetFleetShipmentDisplayProgress(0))
+	_assert(after >= before - 0.0001, "目标回落时显示进度不得倒退：%.3f -> %.3f" % [before, after])
+	_assert(after < 1.0 + 0.0005, "显示进度不得越界：%.3f" % after)
 
 
 # 重新注入同一世界的更新快照时，已见过的粮队显示进度不得重置回 0。

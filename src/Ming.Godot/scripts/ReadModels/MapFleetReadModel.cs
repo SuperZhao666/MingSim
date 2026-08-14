@@ -242,13 +242,13 @@ public sealed partial class MapFleetReadModel : RefCounted
     }
 
     /// <summary>只供自动验收注入固定样本；正式接线应调用 Create(RealtimeReadModel)。</summary>
-    public static MapFleetReadModel CreateAcceptanceSample(int shipmentCount)
+    public static MapFleetReadModel CreateAcceptanceSample(int shipmentCount, int delayHours = 0)
     {
         if (shipmentCount < 0)
             throw new ArgumentOutOfRangeException(nameof(shipmentCount), "粮队数量不能为负数。");
 
         var gameTime = new GameTime(new DateTimeOffset(1629, 1, 5, 0, 0, 0, TimeSpan.Zero));
-        var inTransitArrival = new GameTime(new DateTimeOffset(1629, 1, 7, 0, 0, 0, TimeSpan.Zero));
+        var inTransitArrival = new GameTime(new DateTimeOffset(1629, 1, 7, 0, 0, 0, TimeSpan.Zero).AddHours(delayHours));
         const int dailyDemand = 300;
 
         var stockpiles = new List<MapStockpileDto>
