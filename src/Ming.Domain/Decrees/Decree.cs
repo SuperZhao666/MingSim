@@ -10,6 +10,7 @@ public enum DecreeStatus
     Executing,
     Completed,
     Rejected,
+    Expired,
 }
 
 /// <summary>

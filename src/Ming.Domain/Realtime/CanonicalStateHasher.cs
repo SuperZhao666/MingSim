@@ -15,7 +15,7 @@ namespace MingSim.Domain.Realtime;
 /// </remarks>
 public static class CanonicalStateHasher
 {
-    public const int SchemaVersion = 3;
+    public const int SchemaVersion = 4;
 
     public static string Compute(
         WorldState state,
@@ -71,6 +71,9 @@ public static class CanonicalStateHasher
         WriteMilitary(writer, state);
         WriteLogistics(writer, state);
         WriteMovements(writer, state);
+        WriteScenario(writer, state);
+        WriteReadiness(writer, state);
+        WriteDecrees(writer, state);
 
         var actions = scheduledEvents
             .OrderBy(item => item.DueGameTime)
@@ -283,6 +286,8 @@ public static class CanonicalStateHasher
             WriteNullableInt64(writer, shipment.ArrivedAt?.Value.UtcTicks);
             WriteInt64(writer, shipment.DeliveredGrain);
             WriteInt64(writer, shipment.LossGrain);
+            writer.Write(shipment.Escort);
+            WriteInt64(writer, shipment.RaidLossGrain);
         }
     }
 
@@ -298,6 +303,49 @@ public static class CanonicalStateHasher
             WriteString(writer, movement.Destination.Value);
             WriteInt64(writer, movement.DueGameTime.Value.UtcTicks);
             WriteString(writer, movement.RouteFingerprint);
+        }
+    }
+
+    private static void WriteScenario(BinaryWriter writer, WorldState state)
+    {
+        WriteInt32(writer, state.Scenario.LocalBurden);
+        WriteInt32(writer, state.Scenario.MinisterTrust);
+        WriteInt32(writer, state.Scenario.DailyGrainDemand);
+        WriteNullableString(writer, state.Scenario.FrontStockpileId?.Value);
+        WriteInt32(writer, state.Scenario.SecondHalfFromDay);
+        WriteInt32(writer, state.Scenario.BurdenCooperationThreshold);
+        WriteInt64(writer, state.Scenario.ScenarioSilverBudget);
+        WriteInt64(writer, state.Scenario.SpentSilver);
+        WriteInt64(writer, state.Scenario.ScenarioStartGameTime.Value.UtcTicks);
+        writer.Write(state.Scenario.HardFailureReported);
+    }
+
+    private static void WriteReadiness(BinaryWriter writer, WorldState state)
+    {
+        WriteInt32(writer, state.Readiness.ValueBasisPoints);
+        WriteInt64(writer, state.Readiness.ArrearsGrain);
+        WriteInt32(writer, state.Readiness.ConsecutiveZeroGrainDays);
+    }
+
+    private static void WriteDecrees(BinaryWriter writer, WorldState state)
+    {
+        var decrees = state.Decrees.Values.OrderBy(item => item.Id.Value, StringComparer.Ordinal).ToArray();
+        WriteInt32(writer, decrees.Length);
+        foreach (var decree in decrees)
+        {
+            WriteString(writer, decree.Id.Value);
+            WriteString(writer, decree.IssuerId.Value);
+            WriteString(writer, decree.Goal);
+            WriteString(writer, decree.RegionScope.Value);
+            WriteInt64(writer, decree.Budget);
+            WriteString(writer, decree.ResponsibleActorId.Value);
+            WriteInt64(writer, decree.Deadline.Value.UtcTicks);
+            WriteString(writer, decree.Restrictions);
+            WriteString(writer, decree.Remarks);
+            WriteString(writer, decree.RequiredCapability.ToString());
+            WriteNullableString(writer, decree.RequiredResourceId);
+            WriteNullableString(writer, decree.LinkedShipmentId);
+            WriteString(writer, decree.Status.ToString());
         }
     }
 
