@@ -9,14 +9,14 @@ namespace MingSim.Domain.Realtime;
 /// </remarks>
 public static class SimulationEpoch
 {
-    public static DateTime DefaultForTurn(int turnNumber)
+    public static DateTimeOffset DefaultForTurn(int turnNumber)
     {
         if (turnNumber < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(turnNumber), "回合号必须从 1 开始。");
         }
 
-        return new DateTime(1627, 1, 1, 0, 0, 0, DateTimeKind.Utc)
+        return new DateTimeOffset(1627, 1, 1, 0, 0, 0, TimeSpan.Zero)
             .AddDays(turnNumber - 1);
     }
 }
