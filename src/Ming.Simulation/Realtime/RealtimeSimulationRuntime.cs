@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using MingSim.Domain;
@@ -38,6 +39,22 @@ public sealed record CreateShipmentCommand(
     ShipmentId ShipmentId,
     RouteId RouteId,
     long GrainQuantity,
+    DateTimeOffset SubmittedAt,
+    long ExpectedWorldVersion)
+    : RealtimeCommand(CommandId, ActorId, SubmittedAt, ExpectedWorldVersion);
+
+public sealed record SetPausedCommand(
+    string CommandId,
+    CharacterId ActorId,
+    bool Paused,
+    DateTimeOffset SubmittedAt,
+    long ExpectedWorldVersion)
+    : RealtimeCommand(CommandId, ActorId, SubmittedAt, ExpectedWorldVersion);
+
+public sealed record SetSimulationSpeedCommand(
+    string CommandId,
+    CharacterId ActorId,
+    double Speed,
     DateTimeOffset SubmittedAt,
     long ExpectedWorldVersion)
     : RealtimeCommand(CommandId, ActorId, SubmittedAt, ExpectedWorldVersion);
@@ -88,11 +105,13 @@ public sealed class RealtimeSnapshot
         IReadOnlyList<DomainEvent> outboxEvents,
         decimal realGameTickRemainder,
         string stateHash,
+        string payloadChecksum,
         GameTime initialGameTime,
         long initialWorldVersion,
         long processedScheduledEventCount,
         bool isPaused,
-        double speed)
+        double speed,
+        long nextEventSequence)
     {
         SchemaVersion = schemaVersion;
         State = state;
@@ -110,6 +129,8 @@ public sealed class RealtimeSnapshot
         IsPaused = isPaused;
         Speed = speed;
         StateHash = stateHash;
+        PayloadChecksum = payloadChecksum;
+        NextEventSequence = nextEventSequence;
     }
 
     public int SchemaVersion { get; }
@@ -143,6 +164,10 @@ public sealed class RealtimeSnapshot
     internal double Speed { get; }
 
     public string StateHash { get; }
+
+    public string PayloadChecksum { get; }
+
+    internal long NextEventSequence { get; }
 }
 
 /// <summary>
@@ -155,6 +180,8 @@ public sealed class RealtimeSnapshot
 public sealed class RealtimeSimulationRuntime
 {
     private const double GameHoursPerRealSecondAtSpeedOne = 6.0;
+    // 当前实时垂直切片的权威提交粒度；GameTime 仍由 Scheduler 精确推进到 DueAt。
+    private static readonly TimeSpan RealtimeCommitQuantum = TimeSpan.FromHours(1);
     private const int DailyHeartbeatPhase = 2;
     private const string RandomState = "schema=1;streams=none";
 
@@ -171,6 +198,7 @@ public sealed class RealtimeSimulationRuntime
     private readonly GameTime _initialGameTime;
     private readonly long _initialWorldVersion;
     private long _processedScheduledEventCount;
+    private long _nextEventSequence;
     private bool _isPaused;
     private double _speed;
     private string _randomState = RandomState;
@@ -186,7 +214,7 @@ public sealed class RealtimeSimulationRuntime
         _commandOutcomes = new(StringComparer.Ordinal);
         _outboxEvents = [];
         _speed = 1.0;
-        var initialWork = new WorkingCopy(_state, _scheduledEvents, _commandOutcomes, _outboxEvents, _nextCreationSequence, _nextIngressSequence, 0);
+        var initialWork = new WorkingCopy(_state, _scheduledEvents, _commandOutcomes, _outboxEvents, _nextCreationSequence, _nextIngressSequence, 0, _isPaused, _speed, _nextEventSequence);
         ScheduleDailyHeartbeat(_state, _scheduledEvents, initialWork);
         _nextCreationSequence = initialWork.NextCreationSequence;
     }
@@ -212,6 +240,7 @@ public sealed class RealtimeSimulationRuntime
         _nextIngressSequence = snapshot.NextIngressSequence;
         _realGameTickRemainder = snapshot.RealGameTickRemainder;
         _processedScheduledEventCount = snapshot.ProcessedScheduledEventCount;
+        _nextEventSequence = snapshot.NextEventSequence;
         _isPaused = snapshot.IsPaused;
         _speed = snapshot.Speed;
         ValidateSpeed(_speed);
@@ -221,6 +250,14 @@ public sealed class RealtimeSimulationRuntime
         if (!StringComparer.Ordinal.Equals(actualHash, snapshot.StateHash))
         {
             throw new InvalidDataException("实时快照的 canonical state hash 校验失败。");
+        }
+
+        var pendingCommands = _inbox.ToArray();
+        var outboxEvents = _outboxEvents.ToArray();
+        var restoredStateHash = ComputeStateHash(pendingCommands.Select(Fingerprint));
+        if (!StringComparer.Ordinal.Equals(ComputePayloadChecksum(pendingCommands, outboxEvents, restoredStateHash), snapshot.PayloadChecksum))
+        {
+            throw new InvalidDataException("实时快照 payload checksum 校验失败。");
         }
     }
 
@@ -236,9 +273,27 @@ public sealed class RealtimeSimulationRuntime
         }
     }
 
-    public bool IsPaused => _isPaused;
+    public bool IsPaused
+    {
+        get
+        {
+            lock (_writerGate)
+            {
+                return _isPaused;
+            }
+        }
+    }
 
-    public double Speed => _speed;
+    public double Speed
+    {
+        get
+        {
+            lock (_writerGate)
+            {
+                return _speed;
+            }
+        }
+    }
 
     public string StateHash
     {
@@ -277,11 +332,17 @@ public sealed class RealtimeSimulationRuntime
 
     public RealtimeCommandReceipt EnqueueCreateShipment(CreateShipmentCommand command) => Enqueue(command);
 
+    public RealtimeCommandReceipt EnqueueSetPaused(SetPausedCommand command) => Enqueue(command);
+
+    public RealtimeCommandReceipt EnqueueSetSimulationSpeed(SetSimulationSpeedCommand command) => Enqueue(command);
+
     public void SetPaused(bool paused)
     {
         lock (_writerGate)
         {
-            _isPaused = paused;
+            var commandId = $"control-pause-{_state.WorldVersion}-{paused.ToString().ToLowerInvariant()}";
+            Enqueue(new SetPausedCommand(commandId, new CharacterId("system"), paused,
+                _state.GameTime.Value, _state.WorldVersion));
         }
     }
 
@@ -295,7 +356,10 @@ public sealed class RealtimeSimulationRuntime
 
         lock (_writerGate)
         {
-            _speed = speed;
+            var speedBits = BitConverter.DoubleToInt64Bits(speed);
+            var commandId = $"control-speed-{_state.WorldVersion}-{speedBits}";
+            Enqueue(new SetSimulationSpeedCommand(commandId, new CharacterId("system"), speed,
+                _state.GameTime.Value, _state.WorldVersion));
         }
     }
 
@@ -312,23 +376,28 @@ public sealed class RealtimeSimulationRuntime
     {
         lock (_writerGate)
         {
+            var pendingCommands = _inbox.ToArray();
+            var outboxEvents = _outboxEvents.ToArray();
+            var stateHash = ComputeStateHash(pendingCommands.Select(Fingerprint));
             return new RealtimeSnapshot(
                 RealtimeSnapshotSchema.Version,
                 _state.Clone(),
                 _scheduledEvents.ToArray(),
-                _inbox.ToArray(),
+                pendingCommands,
                 _nextCreationSequence,
                 _nextIngressSequence,
                 CommandOutcomes,
                 _randomState,
-                _outboxEvents.ToArray(),
+                outboxEvents,
                 _realGameTickRemainder,
-                ComputeStateHash(),
+                stateHash,
+                ComputePayloadChecksum(pendingCommands, outboxEvents, stateHash),
                 _initialGameTime,
                 _initialWorldVersion,
                 _processedScheduledEventCount,
                 _isPaused,
-                _speed);
+                _speed,
+                _nextEventSequence);
         }
     }
 
@@ -347,7 +416,7 @@ public sealed class RealtimeSimulationRuntime
         }
     }
 
-    private RealtimeAdvanceResult AdvanceToCore(GameTime targetGameTime)
+    private RealtimeAdvanceResult AdvanceToCore(GameTime targetGameTime, bool fixedHourlyCommits = false)
     {
         var errors = new List<SimulationError>();
         var startTime = _state.GameTime;
@@ -373,7 +442,16 @@ public sealed class RealtimeSimulationRuntime
                     .ThenBy(item => item.CreationSequence)
                     .FirstOrDefault();
 
-                if (next is not null && next.DueGameTime <= targetGameTime)
+                var nextBoundary = fixedHourlyCommits
+                    ? NextRealtimeCommitBoundary(_state.GameTime)
+                    : targetGameTime;
+                var commitTarget = nextBoundary;
+                if (commitTarget > targetGameTime)
+                {
+                    commitTarget = targetGameTime;
+                }
+
+                if (next is not null && next.DueGameTime <= commitTarget)
                 {
                     if (!TryCommitScheduledEvent(next, events, out var eventError))
                     {
@@ -385,12 +463,16 @@ public sealed class RealtimeSimulationRuntime
                     continue;
                 }
 
-                if (_state.GameTime < targetGameTime)
+                if (_state.GameTime < commitTarget &&
+                    (!fixedHourlyCommits || commitTarget == nextBoundary))
                 {
-                    CommitTimeOnly(targetGameTime, events);
+                    CommitTimeOnly(commitTarget, events);
                 }
 
-                break;
+                if (!fixedHourlyCommits || _state.GameTime >= targetGameTime || commitTarget != nextBoundary)
+                {
+                    break;
+                }
             }
 
             return Report(errors.Count == 0, events, commandResults, errors, startTime, processed);
@@ -411,44 +493,61 @@ public sealed class RealtimeSimulationRuntime
 
         lock (_writerGate)
         {
-            var gameTicks = ((decimal)realElapsed.Ticks / TimeSpan.TicksPerSecond) *
-                6m * (decimal)_speed * TimeSpan.TicksPerHour;
-            if (_isPaused)
+            // 先在当前安全点接纳收件箱。这样同一帧提交暂停命令时，
+            // 这帧的现实耗时不会先被错误地记入余数；暂停状态下也永远不累计余数。
+            var ingress = AdvanceToCore(_state.GameTime);
+            if (ingress.Errors.Count > 0 || _isPaused)
             {
-                return AdvanceToCore(_state.GameTime);
+                return ingress;
             }
 
+            var gameTicks = ((decimal)realElapsed.Ticks / TimeSpan.TicksPerSecond) *
+                (decimal)GameHoursPerRealSecondAtSpeedOne * (decimal)_speed * TimeSpan.TicksPerHour;
+
             _realGameTickRemainder += gameTicks;
-            var wholeTicks = decimal.Truncate(_realGameTickRemainder);
-            _realGameTickRemainder -= wholeTicks;
-            var target = new GameTime(_state.GameTime.Value.AddTicks(checked((long)wholeTicks)));
-            return AdvanceToCore(target);
+            var startTime = _state.GameTime;
+            var requestedTicks = decimal.Truncate(_realGameTickRemainder);
+            var target = new GameTime(startTime.Value.AddTicks(checked((long)requestedTicks)));
+            var result = AdvanceToCore(target, fixedHourlyCommits: true);
+            var committedTicks = (decimal)(result.ReadModel.GameTime.Value - startTime.Value).Ticks;
+            _realGameTickRemainder -= committedTicks;
+            return MergeReports(ingress, result, startTime);
         }
+    }
+
+    private static GameTime NextRealtimeCommitBoundary(GameTime current)
+    {
+        var value = current.Value;
+        var hour = new DateTimeOffset(value.Year, value.Month, value.Day, value.Hour, 0, 0, TimeSpan.Zero);
+        return new GameTime(hour.Add(RealtimeCommitQuantum));
     }
 
     private RealtimeCommandReceipt Enqueue(RealtimeCommand command)
     {
         ArgumentNullException.ThrowIfNull(command);
-        if (string.IsNullOrWhiteSpace(command.CommandId) || command.CommandId.Length > 128)
+        lock (_writerGate)
         {
+            if (!IsValidId(command.CommandId))
+            {
                 return new RealtimeCommandReceipt(
                     command.CommandId,
                     false,
-                    "CommandId 必须为 1 到 128 个非空字符。",
-                    new ReadOnlyCollection<SimulationError>([new SimulationError("INVALID_COMMAND_ID", "CommandId 必须为 1 到 128 个非空字符。")]));
-        }
+                    "CommandId 必须为 1 到 128 个字母、数字或 -_.: 字符。",
+                    new ReadOnlyCollection<SimulationError>([new SimulationError("INVALID_COMMAND_ID", "CommandId 必须为 1 到 128 个字母、数字或 -_.: 字符。")]));
+            }
 
-        if (command.SubmittedAt.Offset != TimeSpan.Zero)
-        {
+            if (command.SubmittedAt.Offset != TimeSpan.Zero)
+            {
                 return new RealtimeCommandReceipt(
                     command.CommandId,
                     false,
                     "命令 SubmittedAt 必须使用 UTC。",
                     new ReadOnlyCollection<SimulationError>([new SimulationError("NON_UTC_COMMAND_TIME", "命令 SubmittedAt 必须使用 UTC。")]));
-        }
+            }
 
-        _inbox.Enqueue(command);
-        return new RealtimeCommandReceipt(command.CommandId, true, "命令已进入 Simulation 收件箱。", ReadOnlyCollection<SimulationError>.Empty);
+            _inbox.Enqueue(command);
+            return new RealtimeCommandReceipt(command.CommandId, true, "命令已进入 Simulation 收件箱。", ReadOnlyCollection<SimulationError>.Empty);
+        }
     }
 
     private List<RealtimeCommandResult> DrainInbox(List<DomainEvent> events)
@@ -469,7 +568,7 @@ public sealed class RealtimeSimulationRuntime
                     : Reject(command.CommandId, "同一命令编号不能携带不同的命令内容。", "IDEMPOTENCY_CONFLICT", ingressSequence,
                         candidate.State.GameTime, candidate.State.WorldVersion);
                 var duplicateEvents = new List<DomainEvent>();
-                duplicateEvents.Add(CreateEvent(candidate.State, command.CommandId, duplicate ? "CommandDeduplicated" : "CommandRejected",
+                duplicateEvents.Add(CreateEvent(candidate, command.CommandId, duplicate ? "CommandDeduplicated" : "CommandRejected",
                     candidate.State.GameTime, ("ingress_sequence", ingressSequence.ToString()), ("command_id", command.CommandId)));
                 candidate.Outbox.Add(duplicateEvents[^1]);
                 CommitWorkingCopy(candidate);
@@ -495,16 +594,24 @@ public sealed class RealtimeSimulationRuntime
     {
         var acceptedAt = candidate.State.GameTime;
         RealtimeCommandResult result;
-        if (command.ExpectedWorldVersion != candidate.State.WorldVersion)
+        if (!IsValidId(command.ActorId.Value))
+        {
+            result = Reject(command.CommandId, "命令中的角色编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+        else if (command.ExpectedWorldVersion != candidate.State.WorldVersion)
         {
             result = Reject(command.CommandId, "命令基于过期世界版本。", "STATE_VERSION_CONFLICT", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
         else
         {
+            candidate.PendingWorldVersion = candidate.State.WorldVersion + 1;
+            candidate.PendingCommitId = $"command-{ingressSequence}";
             result = command switch
             {
                 MoveArmyCommand move => ApplyMove(candidate, move, ingressSequence, acceptedAt, events),
                 CreateShipmentCommand shipment => ApplyShipment(candidate, shipment, ingressSequence, acceptedAt, events),
+                SetPausedCommand pause => ApplyPause(candidate, pause, ingressSequence, acceptedAt),
+                SetSimulationSpeedCommand speed => ApplySpeed(candidate, speed, ingressSequence, acceptedAt),
                 _ => Reject(command.CommandId, "未知实时命令类型。", "UNKNOWN_COMMAND", ingressSequence, acceptedAt, candidate.State.WorldVersion),
             };
         }
@@ -513,9 +620,14 @@ public sealed class RealtimeSimulationRuntime
         var resultingVersion = candidate.State.WorldVersion;
         if (result.Accepted)
         {
-            resultingVersion = CalculateWorldVersion(candidate, acceptedCommand: true);
+            resultingVersion = candidate.State.WorldVersion + 1;
             candidate.State.CommitRealtime(resultingVersion, commitId!);
             result = result with { ResultingWorldVersion = resultingVersion };
+        }
+        else
+        {
+            candidate.PendingWorldVersion = candidate.State.WorldVersion;
+            candidate.PendingCommitId = candidate.State.CommitId;
         }
 
         candidate.Outcomes[command.CommandId] = new CommandOutcome(
@@ -528,7 +640,7 @@ public sealed class RealtimeSimulationRuntime
             command.ExpectedWorldVersion,
             result.ResultingWorldVersion,
             commitId);
-        events.Add(CreateCommandEvent(candidate.State, command, result, ingressSequence, acceptedAt));
+        events.Add(CreateCommandEvent(candidate, command, result, ingressSequence, acceptedAt));
         candidate.Outbox.Add(events[^1]);
         return result;
     }
@@ -584,7 +696,7 @@ public sealed class RealtimeSimulationRuntime
                 ["destination_id"] = command.DestinationId.Value,
                 ["route_fingerprint"] = routeFingerprint,
             }, command.CommandId);
-        events.Add(CreateEvent(candidate.State, command.CommandId, "ArmyMarchStarted", acceptedAt,
+        events.Add(CreateEvent(candidate, command.CommandId, "ArmyMarchStarted", acceptedAt,
             ("army_id", army.Id.Value), ("from", army.LocationId.Value), ("to", command.DestinationId.Value), ("due_at", due.ToString())));
         candidate.Outbox.Add(events[^1]);
         return Accepted(command.CommandId, "行军命令已接纳。", ingressSequence, acceptedAt, candidate.State.WorldVersion);
@@ -625,11 +737,24 @@ public sealed class RealtimeSimulationRuntime
 
         var source = candidate.State.Logistics.Stockpiles[route.FromStockpileId];
         var destination = candidate.State.Logistics.Stockpiles[route.ToStockpileId];
-        if (!GrainLogisticsRules.HasEnoughSourceGrain(source, command.GrainQuantity) ||
-            !GrainLogisticsRules.FitsRouteCapacity(candidate.State.Logistics, route, command.GrainQuantity) ||
-            !GrainLogisticsRules.FitsDestinationCapacity(candidate.State.Logistics, destination, command.GrainQuantity))
+        if (!GrainLogisticsRules.HasEnoughSourceGrain(source, command.GrainQuantity))
         {
-            return Reject(command.CommandId, "粮运前置条件不满足。", "SHIPMENT_PRECONDITION_FAILED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(command.CommandId, "起点库存不足。", "INSUFFICIENT_GRAIN", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
+        if (!GrainLogisticsRules.FitsRouteCapacity(candidate.State.Logistics, route, command.GrainQuantity))
+        {
+            return Reject(command.CommandId, "路线在途容量不足。", "ROUTE_CAPACITY_EXCEEDED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
+        if (!GrainLogisticsRules.TryCalculateArrival(route, command.GrainQuantity, out var plannedDelivery, out _))
+        {
+            return Reject(command.CommandId, "运输损耗计算超出安全范围。", "LOSS_CALCULATION_OVERFLOW", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
+        if (!GrainLogisticsRules.FitsDestinationCapacity(candidate.State.Logistics, destination, plannedDelivery))
+        {
+            return Reject(command.CommandId, "目的地库存容量不足。", "DESTINATION_CAPACITY_EXCEEDED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (!source.TryTakeGrain(command.GrainQuantity))
@@ -639,11 +764,36 @@ public sealed class RealtimeSimulationRuntime
 
         candidate.State.Logistics.AddShipment(new ShipmentState(command.ShipmentId, route.Id, command.GrainQuantity, acceptedAt));
         Schedule(candidate, $"shipment-departure-{command.ShipmentId.Value}", acceptedAt, 0, 1, "ShipmentDeparture",
-            new Dictionary<string, string> { ["shipment_id"] = command.ShipmentId.Value }, command.CommandId);
-        events.Add(CreateEvent(candidate.State, command.CommandId, "ShipmentPlanned", acceptedAt,
+            new Dictionary<string, string>
+            {
+                ["shipment_id"] = command.ShipmentId.Value,
+                ["route_id"] = route.Id.Value,
+            }, command.CommandId);
+        events.Add(CreateEvent(candidate, command.CommandId, "ShipmentPlanned", acceptedAt,
             ("shipment_id", command.ShipmentId.Value), ("route_id", route.Id.Value), ("grain", command.GrainQuantity.ToString())));
         candidate.Outbox.Add(events[^1]);
         return Accepted(command.CommandId, "粮运计划已接纳。", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+    }
+
+    private RealtimeCommandResult ApplyPause(WorkingCopy candidate, SetPausedCommand command, long ingressSequence, GameTime acceptedAt)
+    {
+        candidate.IsPaused = command.Paused;
+        return Accepted(command.CommandId, "pause control accepted", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+    }
+
+    private RealtimeCommandResult ApplySpeed(WorkingCopy candidate, SetSimulationSpeedCommand command, long ingressSequence, GameTime acceptedAt)
+    {
+        try
+        {
+            ValidateSpeed(command.Speed);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return Reject(command.CommandId, "speed must be finite and between 0.25 and 5", "INVALID_SPEED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
+        candidate.Speed = command.Speed;
+        return Accepted(command.CommandId, "speed control accepted", ingressSequence, acceptedAt, candidate.State.WorldVersion);
     }
 
     private bool TryCommitScheduledEvent(ScheduledSimulationEvent scheduled, List<DomainEvent> events, out SimulationError? error)
@@ -654,6 +804,8 @@ public sealed class RealtimeSimulationRuntime
         try
         {
             candidate.State.AdvanceTo(scheduled.DueGameTime);
+            candidate.PendingWorldVersion = candidate.State.WorldVersion + 1;
+            candidate.PendingCommitId = $"event-{scheduled.CreationSequence}";
             ApplyScheduledEvent(candidate, scheduled, candidateEvents);
             var errors = new InvariantChecker().Check(candidate.State);
             if (errors.Count > 0)
@@ -663,7 +815,7 @@ public sealed class RealtimeSimulationRuntime
             }
 
             candidate.ProcessedScheduledEventCount++;
-            candidate.State.CommitRealtime(CalculateWorldVersion(candidate), $"event-{scheduled.CreationSequence}");
+            candidate.State.CommitRealtime(candidate.State.WorldVersion + 1, $"event-{scheduled.CreationSequence}");
             CommitWorkingCopy(candidate);
             events.AddRange(candidateEvents);
             error = null;
@@ -680,7 +832,7 @@ public sealed class RealtimeSimulationRuntime
     {
         if (scheduled.EventType == "DailyHeartbeat")
         {
-            events.Add(CreateEvent(candidate.State, scheduled.EventId, "DailySimulationTick", candidate.State.GameTime, ("tick", "daily")));
+            events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "DailySimulationTick", candidate.State.GameTime, ("tick", "daily")));
             candidate.Outbox.Add(events[^1]);
             ScheduleDailyHeartbeat(candidate.State, candidate.Scheduled, candidate);
             return;
@@ -700,8 +852,92 @@ public sealed class RealtimeSimulationRuntime
 
             army.ArriveAt(movement.Destination);
             candidate.State.RemoveMovement(armyId);
-            events.Add(CreateEvent(candidate.State, scheduled.EventId, "ArmyArrived", candidate.State.GameTime,
+            events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "ArmyArrived", candidate.State.GameTime,
                 ("army_id", armyId.Value), ("from", movement.Origin.Value), ("to", movement.Destination.Value)));
+            candidate.Outbox.Add(events[^1]);
+            return;
+        }
+
+        if (scheduled.EventType == "ShipmentDeparture")
+        {
+            var shipmentId = new ShipmentId(scheduled.Data["shipment_id"]);
+            if (!candidate.State.Logistics.Shipments.TryGetValue(shipmentId, out var shipment) ||
+                !candidate.State.Logistics.Routes.TryGetValue(shipment.RouteId, out var route) ||
+                route.Id != new RouteId(scheduled.Data.GetValueOrDefault("route_id", route.Id.Value)))
+            {
+                throw new InvalidOperationException("Shipment departure does not match the authoritative shipment state.");
+            }
+
+            if (shipment.Status != ShipmentStatus.Planned)
+            {
+                events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "ShipmentDepartureIgnored", candidate.State.GameTime,
+                    ("shipment_id", shipment.Id.Value), ("status", shipment.Status.ToString())));
+                candidate.Outbox.Add(events[^1]);
+                return;
+            }
+
+            shipment.MarkInTransit(candidate.State.GameTime);
+            var arrivalAt = candidate.State.GameTime.Add(TimeSpan.FromHours(route.TravelHours));
+            Schedule(candidate, $"shipment-arrival-{shipment.Id.Value}", arrivalAt, 1, 1, "ShipmentArrival",
+                new Dictionary<string, string>
+                {
+                    ["shipment_id"] = shipment.Id.Value,
+                    ["route_id"] = route.Id.Value,
+                }, scheduled.CausalCommandId);
+            events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "ShipmentDeparted", candidate.State.GameTime,
+                ("shipment_id", shipment.Id.Value), ("due_at", arrivalAt.ToString())));
+            candidate.Outbox.Add(events[^1]);
+            return;
+        }
+
+        if (scheduled.EventType == "ShipmentArrival")
+        {
+            var shipmentId = new ShipmentId(scheduled.Data["shipment_id"]);
+            if (!candidate.State.Logistics.Shipments.TryGetValue(shipmentId, out var shipment) ||
+                !candidate.State.Logistics.Routes.TryGetValue(shipment.RouteId, out var route) ||
+                route.Id != new RouteId(scheduled.Data.GetValueOrDefault("route_id", route.Id.Value)))
+            {
+                throw new InvalidOperationException("Shipment arrival does not match the authoritative shipment state.");
+            }
+
+            if (shipment.Status == ShipmentStatus.Arrived)
+            {
+                events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "ShipmentArrivalIgnored", candidate.State.GameTime,
+                    ("shipment_id", shipment.Id.Value), ("status", shipment.Status.ToString())));
+                candidate.Outbox.Add(events[^1]);
+                return;
+            }
+
+            if (shipment.Status != ShipmentStatus.InTransit)
+            {
+                throw new InvalidOperationException("Shipment arrival does not match the authoritative shipment state.");
+            }
+
+            var destination = candidate.State.Logistics.Stockpiles[route.ToStockpileId];
+            if (!GrainLogisticsRules.TryCalculateArrival(route, shipment.GrainQuantity, out var delivered, out var loss))
+            {
+                throw new InvalidOperationException("运输损耗计算超出安全范围。");
+            }
+
+            if (!destination.TryStoreGrain(delivered))
+            {
+                Schedule(candidate, $"shipment-arrival-retry-{shipment.Id.Value}-{candidate.State.GameTime.Value.UtcTicks}",
+                    candidate.State.GameTime.Add(TimeSpan.FromHours(1)), 1, 1, "ShipmentArrival",
+                    new Dictionary<string, string>
+                    {
+                        ["shipment_id"] = shipment.Id.Value,
+                        ["route_id"] = route.Id.Value,
+                    }, scheduled.CausalCommandId);
+                events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "ShipmentArrivalBlocked", candidate.State.GameTime,
+                    ("shipment_id", shipment.Id.Value), ("destination_id", destination.Id.Value)));
+                candidate.Outbox.Add(events[^1]);
+                return;
+            }
+
+            shipment.MarkArrived(candidate.State.GameTime, delivered, loss);
+            events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "ShipmentArrived", candidate.State.GameTime,
+                ("shipment_id", shipment.Id.Value), ("destination_id", destination.Id.Value),
+                ("delivered_grain", delivered.ToString()), ("loss_grain", loss.ToString())));
             candidate.Outbox.Add(events[^1]);
             return;
         }
@@ -714,21 +950,16 @@ public sealed class RealtimeSimulationRuntime
         var candidate = CreateWorkingCopy();
         var previous = candidate.State.GameTime;
         candidate.State.AdvanceTo(target);
-        var timeEvent = CreateEvent(candidate.State, $"time-{target.Value.UtcTicks}", "TimeAdvanced", target,
+        candidate.PendingWorldVersion = candidate.State.WorldVersion + 1;
+        candidate.PendingCommitId = $"time-{target.Value.UtcTicks}";
+        var timeEvent = CreateEvent(candidate, null, "TimeAdvanced", target,
             ("from", previous.ToString()), ("to", target.ToString()));
         candidate.Outbox.Add(timeEvent);
         events.Add(timeEvent);
         // 纯时间提交同样原子更新 GameTime、WorldVersion、CommitId 和 Scheduler；
         // 帧切分只影响余数累计，不影响这次明确目标提交的结果。
-        candidate.State.CommitRealtime(CalculateWorldVersion(candidate), $"time-{target.Value.UtcTicks}");
+        candidate.State.CommitRealtime(candidate.State.WorldVersion + 1, $"time-{target.Value.UtcTicks}");
         CommitWorkingCopy(candidate);
-    }
-
-    private long CalculateWorldVersion(WorkingCopy candidate, bool acceptedCommand = false)
-    {
-        var acceptedCommands = candidate.Outcomes.Values.LongCount(item => item.Accepted) + (acceptedCommand ? 1 : 0);
-        var timeBoundary = candidate.State.GameTime > _initialGameTime ? 1L : 0L;
-        return checked(_initialWorldVersion + acceptedCommands + candidate.ProcessedScheduledEventCount + timeBoundary);
     }
 
     private WorkingCopy CreateWorkingCopy() => new(
@@ -738,7 +969,10 @@ public sealed class RealtimeSimulationRuntime
         _outboxEvents.ToList(),
         _nextCreationSequence,
         _nextIngressSequence,
-        _processedScheduledEventCount);
+        _processedScheduledEventCount,
+        _isPaused,
+        _speed,
+        _nextEventSequence);
 
     private void CommitWorkingCopy(WorkingCopy candidate)
     {
@@ -749,6 +983,9 @@ public sealed class RealtimeSimulationRuntime
         _nextCreationSequence = candidate.NextCreationSequence;
         _nextIngressSequence = candidate.NextIngressSequence;
         _processedScheduledEventCount = candidate.ProcessedScheduledEventCount;
+        _isPaused = candidate.IsPaused;
+        _speed = candidate.Speed;
+        _nextEventSequence = candidate.NextEventSequence;
     }
 
     private RealtimeAdvanceResult Report(bool succeeded, List<DomainEvent> events, List<RealtimeCommandResult> commandResults,
@@ -768,11 +1005,65 @@ public sealed class RealtimeSimulationRuntime
             ComputeStateHash());
     }
 
+    private RealtimeAdvanceResult MergeReports(
+        RealtimeAdvanceResult ingress,
+        RealtimeAdvanceResult advancement,
+        GameTime startTime) =>
+        advancement with
+        {
+            Succeeded = ingress.Succeeded && advancement.Succeeded,
+            Events = new ReadOnlyCollection<DomainEvent>(ingress.Events.Concat(advancement.Events).ToArray()),
+            CommandResults = new ReadOnlyCollection<RealtimeCommandResult>(ingress.CommandResults.Concat(advancement.CommandResults).ToArray()),
+            Errors = new ReadOnlyCollection<SimulationError>(ingress.Errors.Concat(advancement.Errors).ToArray()),
+            GameTimeAdvanced = advancement.ReadModel.GameTime.Value - startTime.Value,
+            ProcessedScheduledEvents = ingress.ProcessedScheduledEvents + advancement.ProcessedScheduledEvents,
+        };
+
     private RealtimeReadModel BuildReadModel() => RealtimeReadModel.From(_state, _scheduledEvents, _commandOutcomes.Values, _outboxEvents.Count, ComputeStateHash());
 
-    private string ComputeStateHash() => CanonicalStateHasher.Compute(_state, _scheduledEvents, _nextCreationSequence, _nextIngressSequence,
+    private string ComputeStateHash(IEnumerable<string>? pendingCommandFingerprints = null) => CanonicalStateHasher.Compute(_state, _scheduledEvents, _nextCreationSequence, _nextIngressSequence,
         _commandOutcomes.Values, _randomState, _outboxEvents, _realGameTickRemainder, _initialGameTime, _initialWorldVersion,
-        _processedScheduledEventCount, _isPaused, _speed, _inbox.Select(Fingerprint));
+        _processedScheduledEventCount, _isPaused, _speed, pendingCommandFingerprints ?? _inbox.Select(Fingerprint), _nextEventSequence);
+
+    private string ComputePayloadChecksum(IReadOnlyList<RealtimeCommand> pendingCommands, IReadOnlyList<DomainEvent> outboxEvents, string stateHash)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, new UTF8Encoding(false), leaveOpen: true);
+        writer.Write(RealtimeSnapshotSchema.Version);
+        writer.Write(stateHash);
+        writer.Write(_nextCreationSequence);
+        writer.Write(_nextIngressSequence);
+        writer.Write(_nextEventSequence);
+        writer.Write(_processedScheduledEventCount);
+        writer.Write(_realGameTickRemainder.ToString("G29", CultureInfo.InvariantCulture));
+        writer.Write(_isPaused);
+        writer.Write(BitConverter.DoubleToInt64Bits(_speed));
+        writer.Write(_randomState);
+        foreach (var command in pendingCommands) writer.Write(Fingerprint(command));
+        foreach (var domainEvent in outboxEvents)
+        {
+            writer.Write(domainEvent.EventId);
+            writer.Write(domainEvent.WorldId.Value);
+            writer.Write(domainEvent.TurnNumber);
+            writer.Write(domainEvent.EventType);
+            writer.Write(domainEvent.Description);
+            writer.Write(domainEvent.OccurredAt.HasValue);
+            if (domainEvent.OccurredAt.HasValue) writer.Write(domainEvent.OccurredAt.Value.UtcTicks);
+            writer.Write(domainEvent.EventSequence);
+            writer.Write(domainEvent.WorldVersion);
+            writer.Write(domainEvent.CommitId);
+            writer.Write(domainEvent.CausalCommandId ?? string.Empty);
+            var data = domainEvent.Data.OrderBy(item => item.Key, StringComparer.Ordinal).ToArray();
+            writer.Write(data.Length);
+            foreach (var item in data)
+            {
+                writer.Write(item.Key);
+                writer.Write(item.Value);
+            }
+        }
+        writer.Flush();
+        return Convert.ToHexString(SHA256.HashData(stream.ToArray()));
+    }
 
     private static void Schedule(WorkingCopy candidate, string eventId, GameTime due, int phase, int priority, string eventType,
         IReadOnlyDictionary<string, string> data, string? causalCommandId)
@@ -786,12 +1077,13 @@ public sealed class RealtimeSimulationRuntime
         scheduled.Add(new ScheduledSimulationEvent($"daily-heartbeat-{nextMidnight.Value:yyyyMMdd}", nextMidnight, DailyHeartbeatPhase, 0, candidate.NextCreationSequence++, "DailyHeartbeat", new Dictionary<string, string>()));
     }
 
-    private static DomainEvent CreateEvent(WorldState state, string eventId, string eventType, GameTime time,
-        params (string Key, string Value)[] data) => new(eventId, state.Id, state.TurnNumber, eventType, eventType,
-        data.ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal), time.Value);
+    private static DomainEvent CreateEvent(WorkingCopy candidate, string? causalCommandId, string eventType, GameTime time,
+        params (string Key, string Value)[] data) => new($"event-{candidate.NextEventSequence++}", candidate.State.Id, candidate.State.TurnNumber, eventType, eventType,
+        data.ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal), time.Value,
+        candidate.NextEventSequence - 1, candidate.PendingWorldVersion, candidate.PendingCommitId, causalCommandId);
 
-    private static DomainEvent CreateCommandEvent(WorldState state, RealtimeCommand command, RealtimeCommandResult result,
-        long ingressSequence, GameTime acceptedAt) => CreateEvent(state, command.CommandId,
+    private static DomainEvent CreateCommandEvent(WorkingCopy candidate, RealtimeCommand command, RealtimeCommandResult result,
+        long ingressSequence, GameTime acceptedAt) => CreateEvent(candidate, command.CommandId,
         result.Accepted ? "CommandAccepted" : "CommandRejected", acceptedAt,
         ("ingress_sequence", ingressSequence.ToString()), ("command_id", command.CommandId),
         ("accepted", result.Accepted.ToString()), ("expected_world_version", command.ExpectedWorldVersion.ToString()));
@@ -828,6 +1120,22 @@ public sealed class RealtimeSimulationRuntime
                 writer.Write(shipment.SubmittedAt.UtcTicks);
                 writer.Write(shipment.ExpectedWorldVersion);
                 break;
+            case SetPausedCommand pause:
+                WriteFingerprintString(writer, "pause");
+                WriteFingerprintString(writer, pause.CommandId);
+                WriteFingerprintString(writer, pause.ActorId.Value);
+                writer.Write(pause.Paused);
+                writer.Write(pause.SubmittedAt.UtcTicks);
+                writer.Write(pause.ExpectedWorldVersion);
+                break;
+            case SetSimulationSpeedCommand speed:
+                WriteFingerprintString(writer, "speed");
+                WriteFingerprintString(writer, speed.CommandId);
+                WriteFingerprintString(writer, speed.ActorId.Value);
+                writer.Write(BitConverter.DoubleToInt64Bits(speed.Speed));
+                writer.Write(speed.SubmittedAt.UtcTicks);
+                writer.Write(speed.ExpectedWorldVersion);
+                break;
             default:
                 throw new InvalidOperationException("未知命令类型。");
         }
@@ -843,7 +1151,9 @@ public sealed class RealtimeSimulationRuntime
         writer.Write(bytes);
     }
 
-    private static bool IsValidId(string value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 128;
+    private static bool IsValidId(string value) =>
+        !string.IsNullOrWhiteSpace(value) && value.Length <= 128 &&
+        value.All(character => char.IsLetterOrDigit(character) || character is '-' or '_' or '.' or ':');
 
     private sealed class WorkingCopy(
         WorldState state,
@@ -852,7 +1162,10 @@ public sealed class RealtimeSimulationRuntime
         List<DomainEvent> outbox,
         long nextCreationSequence,
         long nextIngressSequence,
-        long processedScheduledEventCount)
+        long processedScheduledEventCount,
+        bool isPaused,
+        double speed,
+        long nextEventSequence)
     {
         public WorldState State { get; } = state;
         public List<ScheduledSimulationEvent> Scheduled { get; } = scheduled;
@@ -861,10 +1174,15 @@ public sealed class RealtimeSimulationRuntime
         public long NextCreationSequence { get; set; } = nextCreationSequence;
         public long NextIngressSequence { get; set; } = nextIngressSequence;
         public long ProcessedScheduledEventCount { get; set; } = processedScheduledEventCount;
+        public bool IsPaused { get; set; } = isPaused;
+        public double Speed { get; set; } = speed;
+        public long NextEventSequence { get; set; } = nextEventSequence;
+        public long PendingWorldVersion { get; set; } = state.WorldVersion;
+        public string PendingCommitId { get; set; } = state.CommitId;
     }
 }
 
 public static class RealtimeSnapshotSchema
 {
-    public const int Version = 4;
+    public const int Version = 5;
 }

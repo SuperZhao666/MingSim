@@ -15,7 +15,11 @@ public sealed record DomainEvent
         string eventType,
         string description,
         IReadOnlyDictionary<string, string> data,
-        DateTimeOffset? occurredAt = null)
+        DateTimeOffset? occurredAt = null,
+        long eventSequence = 0,
+        long worldVersion = 0,
+        string commitId = "unknown",
+        string? causalCommandId = null)
     {
         EventId = eventId;
         WorldId = worldId;
@@ -25,6 +29,10 @@ public sealed record DomainEvent
         Data = new ReadOnlyDictionary<string, string>(
             new Dictionary<string, string>(data, StringComparer.Ordinal));
         OccurredAt = occurredAt;
+        EventSequence = eventSequence;
+        WorldVersion = worldVersion;
+        CommitId = commitId;
+        CausalCommandId = causalCommandId;
     }
 
     public string EventId { get; }
@@ -40,4 +48,13 @@ public sealed record DomainEvent
     public IReadOnlyDictionary<string, string> Data { get; }
 
     public DateTimeOffset? OccurredAt { get; }
+
+    /// <summary>事件自己的单调序号；它与 CommandId 分离，避免业务事件复用命令身份。</summary>
+    public long EventSequence { get; }
+
+    public long WorldVersion { get; }
+
+    public string CommitId { get; }
+
+    public string? CausalCommandId { get; }
 }

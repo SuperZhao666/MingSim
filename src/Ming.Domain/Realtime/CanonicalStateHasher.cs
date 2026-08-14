@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Globalization;
 using MingSim.Domain.Events;
 using MingSim.Domain;
 
@@ -14,7 +15,7 @@ namespace MingSim.Domain.Realtime;
 /// </remarks>
 public static class CanonicalStateHasher
 {
-    public const int SchemaVersion = 2;
+    public const int SchemaVersion = 3;
 
     public static string Compute(
         WorldState state,
@@ -30,7 +31,8 @@ public static class CanonicalStateHasher
         long processedScheduledEventCount,
         bool isPaused,
         double speed,
-        IEnumerable<string> pendingCommandFingerprints)
+        IEnumerable<string> pendingCommandFingerprints,
+        long nextEventSequence = 0)
     {
         ArgumentNullException.ThrowIfNull(state);
         ArgumentNullException.ThrowIfNull(scheduledEvents);
@@ -92,6 +94,7 @@ public static class CanonicalStateHasher
 
         WriteInt64(writer, nextCreationSequence);
         WriteInt64(writer, nextIngressSequence);
+        WriteInt64(writer, nextEventSequence);
 
         var outcomes = commandOutcomes.OrderBy(item => item.CommandId, StringComparer.Ordinal).ToArray();
         WriteInt32(writer, outcomes.Length);
@@ -341,10 +344,9 @@ public static class CanonicalStateHasher
 
     private static void WriteDecimal(BinaryWriter writer, decimal value)
     {
-        foreach (var part in decimal.GetBits(value))
-        {
-            writer.Write(part);
-        }
+        // decimal 的 scale 会记录表达式历史（0 与 0.0 数值相同但位表示不同）。
+        // 规范化为不受拆帧运算影响的 InvariantCulture 文本，避免等价余数产生不同 hash。
+        WriteString(writer, value.ToString("G29", CultureInfo.InvariantCulture));
     }
 
     private static void WriteNullableInt32(BinaryWriter writer, int? value)

@@ -4,9 +4,11 @@ using MingSim.Domain.Authorization;
 using MingSim.Domain.Characters;
 using MingSim.Domain.Common;
 using MingSim.Domain.Economy;
+using MingSim.Domain.Events;
 using MingSim.Domain.Map;
 using MingSim.Domain.Military;
 using MingSim.Domain.Realtime;
+using MingSim.Persistence.InMemory;
 using MingSim.Simulation.Realtime;
 
 namespace MingSim.SmokeTests;
@@ -39,6 +41,20 @@ internal static class Program
             ShouldKeepCanonicalHashCompleteAndCollisionSafe();
             ShouldRestoreQueueAndIdempotencyFromSnapshot();
             ShouldRejectExpiredCommandByExpectedWorldVersion();
+            ShouldRejectInvalidApplicationKernelInjection();
+            ShouldEnforceStrictWorldVersionIncrement();
+            ShouldKeepSubhourDueEventExactAndFrameStreamStable();
+            ShouldKeepPausedRemainderFrozen();
+            ShouldCompleteGrainShipmentAndKeepLedgerBalanced();
+            ShouldRejectGrainShipmentPreconditionsWithoutMutation();
+            ShouldReplayGrainShipmentIdempotently();
+            ShouldRetryBlockedShipmentArrivalAfterCapacityRelease();
+            ShouldIgnoreDuplicateShipmentArrivalWithoutDoubleDelivery();
+            ShouldRestoreShipmentCheckpointsAndPendingInbox();
+            ShouldRejectTamperedSnapshotOutbox();
+            ShouldCaptureSnapshotsAtomicallyUnderConcurrency();
+            ShouldKeepEventIdentityAndCommitMetadataStable();
+            ShouldAuditPauseAndSpeedAsCommands();
             ShouldDisableLegacyTurnCommitPath();
             Console.WriteLine("MingSim 实时内核补审测试全部通过。");
             return 0;
@@ -106,7 +122,9 @@ internal static class Program
     {
         var runtime = new RealtimeSimulationRuntime(CreateWorld());
         runtime.SetPaused(true);
-        var before = runtime.ReadModel;
+        var control = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(control.CommandResults.Single().Accepted, "暂停控制命令必须经过安全点接纳");
+        var before = control.ReadModel;
         var result = runtime.AdvanceTo(new GameTime(before.GameTime.Value.AddDays(2)));
 
         Require(result.Succeeded, "暂停请求本身不是错误");
@@ -139,6 +157,13 @@ internal static class Program
             "现实帧切分不能改变累计后的 GameTime");
         Require(oneFrame.ReadModel.ScheduledActions.SequenceEqual(splitFrames.ReadModel.ScheduledActions),
             "现实帧切分不能改变 Scheduler");
+        Require(oneFrame.ReadModel.WorldVersion == splitFrames.ReadModel.WorldVersion &&
+                oneFrame.ReadModel.CommitId == splitFrames.ReadModel.CommitId,
+            "现实帧切分不能改变最终 Commit");
+        Require(oneFrame.StateHash == splitFrames.StateHash,
+            $"现实帧切分不能改变未来行为 hash：one={oneFrame.StateHash} split={splitFrames.StateHash} remainderOne={SnapshotRemainder(oneFrame)} remainderSplit={SnapshotRemainder(splitFrames)}");
+        Require(EventFingerprints(oneFrame.OutboxEvents).SequenceEqual(EventFingerprints(splitFrames.OutboxEvents)),
+            "现实帧切分不能改变完整 outbox/事件流");
     }
 
     private static void ShouldKeepFrameSplittingHashStableAcrossScheduledEvent()
@@ -156,6 +181,8 @@ internal static class Program
             "跨越到期事件时，帧切分不能改变最终 canonical hash");
         Require(oneFrame.ReadModel.WorldVersion == splitFrames.ReadModel.WorldVersion,
             "跨越到期事件时，帧切分不能改变最终 WorldVersion");
+        Require(EventFingerprints(oneFrame.OutboxEvents).SequenceEqual(EventFingerprints(splitFrames.OutboxEvents)),
+            "跨越到期事件时，帧切分不能改变 Commit/事件/outbox 流");
     }
 
     private static void ShouldAcceptOnlyOneMovementAndRecheckArrival()
@@ -285,6 +312,388 @@ internal static class Program
         Require(result.Errors.Any(error => error.Code == "LEGACY_TURN_PATH_DISABLED"), "旧回合路径必须明确返回封存错误");
     }
 
+    private static void ShouldRejectInvalidApplicationKernelInjection()
+    {
+        var orchestrator = new MingSim.Application.Workflows.TurnOrchestrator();
+        var result = orchestrator.ExecuteTurn(new WorldId("smoke-world"), []);
+        Require(!result.Committed && result.Errors.Any(error => error.Code == "LEGACY_TURN_PATH_DISABLED"),
+            "旧 Application 编排器必须只能返回隔离拒绝，不能注入可替换 Kernel 提交");
+        Require(typeof(MingSim.Application.Workflows.TurnOrchestrator).GetConstructors()
+                    .All(constructor => constructor.GetParameters().Length == 0),
+            "旧 Application 编排器不能再通过构造函数注入恶意 Kernel/Store");
+        Require(typeof(MingSim.Simulation.SimulationKernel).GetInterfaces().Length == 0,
+            "旧 SimulationKernel 不能再实现可替换 ISimulationKernel");
+    }
+
+    private static void ShouldEnforceStrictWorldVersionIncrement()
+    {
+        var world = CreateWorld();
+        RequireThrows<ArgumentOutOfRangeException>(() => InvokeCommitRealtime(world, 0, "same"));
+        RequireThrows<ArgumentOutOfRangeException>(() => InvokeCommitRealtime(world, 2, "skip"));
+        InvokeCommitRealtime(world, 1, "first");
+        Require(world.WorldVersion == 1 && world.CommitId == "first", "连续实时提交必须严格递增 1");
+    }
+
+    private static void ShouldKeepSubhourDueEventExactAndFrameStreamStable()
+    {
+        var oneFrame = new RealtimeSimulationRuntime(CreateWorld());
+        var splitFrames = new RealtimeSimulationRuntime(CreateWorld());
+        var dueAt = oneFrame.ReadModel.GameTime.Add(TimeSpan.FromMinutes(30));
+        AddScheduledHeartbeat(oneFrame, dueAt, "subhour-heartbeat");
+        AddScheduledHeartbeat(splitFrames, dueAt, "subhour-heartbeat");
+        var one = oneFrame.Advance(TimeSpan.FromSeconds(10));
+        var splitA = splitFrames.Advance(TimeSpan.FromSeconds(5));
+        var splitB = splitFrames.Advance(TimeSpan.FromSeconds(5));
+        Require(oneFrame.ReadModel.GameTime == splitFrames.ReadModel.GameTime, "同 elapsed 的帧切分必须得到同一游戏时间");
+        Require(oneFrame.ReadModel.StateHash == splitFrames.ReadModel.StateHash, "同 elapsed 的帧切分必须得到同一 hash");
+        Require(oneFrame.ReadModel.CommitId == splitFrames.ReadModel.CommitId &&
+                oneFrame.ReadModel.WorldVersion == splitFrames.ReadModel.WorldVersion,
+            "同 elapsed 的帧切分必须得到同一最终 Commit");
+        Require(EventFingerprints(oneFrame.OutboxEvents).SequenceEqual(EventFingerprints(splitFrames.OutboxEvents)),
+            "同 elapsed 的帧切分必须得到同一 outbox 流");
+        var subhourEvents = oneFrame.OutboxEvents.Where(item => item.EventType == "DailySimulationTick").ToArray();
+        Require(subhourEvents.Any(item => item.OccurredAt == dueAt.Value),
+            "小时边界内到期的离散事件必须在精确 DueAt 结算");
+        Require(splitA.Events.Concat(splitB.Events).Any(item => item.OccurredAt == dueAt.Value),
+            "拆帧推进也不能把小时内到期事件延迟到整点");
+    }
+
+    private static void ShouldKeepPausedRemainderFrozen()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        runtime.Advance(TimeSpan.FromMilliseconds(100));
+        var before = runtime.CaptureSnapshot();
+        runtime.SetPaused(true);
+        var paused = runtime.Advance(TimeSpan.FromSeconds(5));
+        Require(paused.CommandResults.Single().Accepted, "暂停必须在现实推进前作为命令接纳");
+        runtime.SetPaused(false);
+        var resumed = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(resumed.CommandResults.Single().Accepted, "恢复运行必须作为命令接纳");
+        var after = runtime.CaptureSnapshot();
+        var remainderProperty = typeof(RealtimeSnapshot).GetProperty("RealGameTickRemainder", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Require((decimal)remainderProperty.GetValue(after)! == (decimal)remainderProperty.GetValue(before)!, "暂停期间不能偷跑现实时间余数");
+    }
+
+    private static void ShouldCompleteGrainShipmentAndKeepLedgerBalanced()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateLogisticsWorld());
+        var before = runtime.ReadModel;
+        var beforeLedger = GrainLedgerTotal(before);
+        var command = CreateShipment(runtime, "grain-normal", 300);
+
+        Require(runtime.EnqueueCreateShipment(command).Queued, "正常粮运命令应该进入收件箱");
+        var departed = runtime.AdvanceTo(before.GameTime);
+        Require(departed.CommandResults.Single().Accepted, "正常粮运命令应该在安全点接纳");
+        Require(departed.Events.Any(item => item.EventType == "ShipmentDeparted"),
+            "ShipmentDeparture 必须恢复并可观察");
+        Require(departed.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
+            "出发后运输单必须进入在途状态");
+        Require(departed.ReadModel.Stockpiles.Single(item => item.Id == new StockpileId("capital-granary")).GrainQuantity == 700,
+            "计划粮运必须先扣除起点库存");
+        Require(GrainLedgerTotal(departed.ReadModel) == beforeLedger, "出发后粮食账本必须守恒");
+
+        var arrived = runtime.AdvanceTo(new GameTime(before.GameTime.Value.AddHours(2)));
+        var shipment = arrived.ReadModel.Shipments.Single();
+        Require(shipment.Status == ShipmentStatus.Arrived, "ShipmentArrival 必须恢复并完成抵达");
+        Require(shipment.DeliveredGrain == 270 && shipment.LossGrain == 30,
+            "300 粮食按 100‰ 损耗后应交付 270、损耗 30");
+        Require(arrived.ReadModel.Stockpiles.Single(item => item.Id == new StockpileId("ningyuan-granary")).GrainQuantity == 270,
+            "抵达后目的地必须收到实际交付量");
+        Require(GrainLedgerTotal(arrived.ReadModel) == beforeLedger, "抵达损耗也必须满足粮食守恒");
+        Require(arrived.Events.Any(item => item.EventType == "ShipmentArrived" &&
+                                           item.Data["delivered_grain"] == "270" &&
+                                           item.Data["loss_grain"] == "30"),
+            "抵达事件必须记录交付量和损耗量");
+    }
+
+    private static void ShouldRejectGrainShipmentPreconditionsWithoutMutation()
+    {
+        var insufficient = new RealtimeSimulationRuntime(CreateLogisticsWorld());
+        var insufficientBefore = insufficient.ReadModel;
+        Require(insufficient.EnqueueCreateShipment(CreateShipment(insufficient, "grain-short", 1_001)).Queued,
+            "库存不足命令应该进入收件箱等待安全点判定");
+        var insufficientResult = insufficient.AdvanceTo(insufficientBefore.GameTime);
+        Require(!insufficientResult.CommandResults.Single().Accepted &&
+                insufficientResult.CommandResults.Single().Errors.Any(item => item.Code == "INSUFFICIENT_GRAIN"),
+            "库存不足必须结构化拒绝");
+        Require(insufficient.ReadModel.Shipments.Count == 0 &&
+                insufficient.ReadModel.WorldVersion == insufficientBefore.WorldVersion,
+            "库存不足不能创建运输单或提交世界版本");
+
+        var routeCapacity = new RealtimeSimulationRuntime(CreateLogisticsWorld(routeCapacity: 500));
+        var routeBefore = routeCapacity.ReadModel;
+        Require(routeCapacity.EnqueueCreateShipment(CreateShipment(routeCapacity, "grain-route-capacity", 501)).Queued,
+            "路线容量测试命令应该进入收件箱");
+        var routeResult = routeCapacity.AdvanceTo(routeBefore.GameTime);
+        Require(routeResult.CommandResults.Single().Errors.Any(item => item.Code == "ROUTE_CAPACITY_EXCEEDED"),
+            "超过路线容量必须拒绝");
+        Require(routeCapacity.ReadModel.Stockpiles.Single(item => item.Id == new StockpileId("capital-granary")).GrainQuantity == 1_000,
+            "路线容量拒绝不能扣除起点库存");
+
+        var destinationCapacity = new RealtimeSimulationRuntime(CreateLogisticsWorld(destinationCapacity: 100));
+        var destinationBefore = destinationCapacity.ReadModel;
+        Require(destinationCapacity.EnqueueCreateShipment(CreateShipment(destinationCapacity, "grain-destination-capacity", 300)).Queued,
+            "目的地容量测试命令应该进入收件箱");
+        var destinationResult = destinationCapacity.AdvanceTo(destinationBefore.GameTime);
+        Require(destinationResult.CommandResults.Single().Errors.Any(item => item.Code == "DESTINATION_CAPACITY_EXCEEDED"),
+            "目的地容量不足必须拒绝");
+        Require(destinationCapacity.ReadModel.Shipments.Count == 0 &&
+                GrainLedgerTotal(destinationCapacity.ReadModel) == GrainLedgerTotal(destinationBefore),
+            "目的地容量拒绝不能改变账本");
+
+        var deliveredCapacity = new RealtimeSimulationRuntime(CreateLogisticsWorld(destinationCapacity: 270));
+        Require(deliveredCapacity.EnqueueCreateShipment(CreateShipment(deliveredCapacity, "grain-delivered-capacity", 300)).Queued,
+            "实际交付量容量测试命令应该进入收件箱");
+        var deliveredCapacityResult = deliveredCapacity.AdvanceTo(deliveredCapacity.ReadModel.GameTime);
+        Require(deliveredCapacityResult.CommandResults.Single().Accepted,
+            "目的地容量应按实际交付量而非含损耗毛量预留");
+
+        var splitLoss = new RealtimeSimulationRuntime(CreateLogisticsWorld(destinationCapacity: 20));
+        Require(splitLoss.EnqueueCreateShipment(CreateShipment(splitLoss, "grain-split-a", 1)).Queued,
+            "拆单损耗第一条命令应该进入收件箱");
+        splitLoss.AdvanceTo(splitLoss.ReadModel.GameTime);
+        Require(splitLoss.EnqueueCreateShipment(CreateShipment(splitLoss, "grain-split-b", 1)).Queued,
+            "拆单损耗第二条命令应该进入收件箱");
+        splitLoss.AdvanceTo(splitLoss.ReadModel.GameTime);
+        var splitArrived = splitLoss.AdvanceTo(new GameTime(splitLoss.ReadModel.GameTime.Value.AddHours(2)));
+        Require(splitArrived.ReadModel.Shipments.All(item => item.Status == ShipmentStatus.Arrived && item.LossGrain == 1),
+            "每单损耗取整必须不能通过拆单规避");
+
+        var denied = new RealtimeSimulationRuntime(CreateLogisticsWorld());
+        var deniedBefore = denied.ReadModel;
+        var deniedCommand = CreateShipment(denied, "grain-denied", 100, new CharacterId("war"));
+        Require(denied.EnqueueCreateShipment(deniedCommand).Queued, "越权命令应该进入收件箱等待判定");
+        var deniedResult = denied.AdvanceTo(deniedBefore.GameTime);
+        Require(deniedResult.CommandResults.Single().Errors.Any(item => item.Code == "TOOL_SCOPE_DENIED"),
+            "没有物流权限的角色不能创建粮运");
+        Require(denied.ReadModel.Shipments.Count == 0 && denied.ReadModel.WorldVersion == deniedBefore.WorldVersion,
+            "越权命令不能改变世界");
+    }
+
+    private static void ShouldReplayGrainShipmentIdempotently()
+    {
+        var first = new RealtimeSimulationRuntime(CreateLogisticsWorld());
+        var replay = new RealtimeSimulationRuntime(CreateLogisticsWorld());
+        var firstCommand = CreateShipment(first, "grain-replay", 200);
+        var replayCommand = CreateShipment(replay, "grain-replay", 200);
+        Require(first.EnqueueCreateShipment(firstCommand).Queued && replay.EnqueueCreateShipment(replayCommand).Queued,
+            "重放命令应该进入两个相同收件箱");
+
+        var firstDeparture = first.AdvanceTo(first.ReadModel.GameTime);
+        var replayDeparture = replay.AdvanceTo(replay.ReadModel.GameTime);
+        Require(EventFingerprints(firstDeparture.Events).SequenceEqual(EventFingerprints(replayDeparture.Events)),
+            "相同粮运输入的接纳/出发事件必须一致");
+
+        var firstDuplicate = first.EnqueueCreateShipment(firstCommand);
+        var replayDuplicate = replay.EnqueueCreateShipment(replayCommand);
+        var firstConflict = first.EnqueueCreateShipment(firstCommand with { GrainQuantity = 201 });
+        var replayConflict = replay.EnqueueCreateShipment(replayCommand with { GrainQuantity = 201 });
+        Require(firstDuplicate.Queued && replayDuplicate.Queued && firstConflict.Queued && replayConflict.Queued,
+            "幂等重试和冲突命令都应进入安全点判定");
+
+        var firstDuplicateResult = first.AdvanceTo(first.ReadModel.GameTime);
+        var replayDuplicateResult = replay.AdvanceTo(replay.ReadModel.GameTime);
+        Require(firstDuplicateResult.CommandResults.Select(item => $"{item.Accepted}:{string.Join(',', item.Errors.Select(error => error.Code))}")
+                    .SequenceEqual(replayDuplicateResult.CommandResults.Select(item => $"{item.Accepted}:{string.Join(',', item.Errors.Select(error => error.Code))}")),
+            "幂等重放必须返回同一 Outcome");
+
+        first.Advance(TimeSpan.FromSeconds(1));
+        replay.Advance(TimeSpan.FromMilliseconds(500));
+        replay.Advance(TimeSpan.FromMilliseconds(500));
+        Require(first.ReadModel.Shipments.Single().Status == ShipmentStatus.Arrived &&
+                replay.ReadModel.Shipments.Single().Status == ShipmentStatus.Arrived,
+            "重放不能改变运输终态");
+        Require(first.StateHash == replay.StateHash &&
+                EventFingerprints(first.OutboxEvents).SequenceEqual(EventFingerprints(replay.OutboxEvents)),
+            "相同命令、重试和帧切分必须得到同一 hash 与事件流");
+    }
+
+    private static void ShouldRetryBlockedShipmentArrivalAfterCapacityRelease()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateLogisticsWorld(destinationCapacity: 100));
+        var start = runtime.ReadModel.GameTime;
+        Require(runtime.EnqueueCreateShipment(CreateShipment(runtime, "grain-retry", 100)).Queued,
+            "重试测试命令应该进入收件箱");
+        runtime.AdvanceTo(start);
+
+        var destination = GetRuntimeState(runtime).Logistics.Stockpiles[new StockpileId("ningyuan-granary")];
+        Require(InvokeStockpileMutation(destination, "TryStoreGrain", 20), "测试需要先占用目的地剩余容量");
+        var blocked = runtime.AdvanceTo(new GameTime(start.Value.AddHours(2)));
+        Require(blocked.Events.Any(item => item.EventType == "ShipmentArrivalBlocked"),
+            "目的地满时必须保留在途状态并安排重试");
+        Require(blocked.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
+            "受阻抵达不能把运输单错误标记为已完成");
+
+        destination = GetRuntimeState(runtime).Logistics.Stockpiles[new StockpileId("ningyuan-granary")];
+        Require(InvokeStockpileMutation(destination, "TryTakeGrain", 20), "测试应释放目的地容量");
+        var retry = runtime.AdvanceTo(new GameTime(blocked.ReadModel.GameTime.Value.AddHours(1)));
+        Require(retry.Events.Any(item => item.EventType == "ShipmentArrived") &&
+                retry.ReadModel.Shipments.Single().Status == ShipmentStatus.Arrived,
+            "释放容量后下一次 ShipmentArrival 重试必须成功");
+        Require(GrainLedgerTotal(retry.ReadModel) == GrainLedgerTotal(new RealtimeSimulationRuntime(CreateLogisticsWorld()).ReadModel),
+            "重试成功后粮食账本仍必须守恒");
+    }
+
+    private static void ShouldIgnoreDuplicateShipmentArrivalWithoutDoubleDelivery()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateLogisticsWorld());
+        var start = runtime.ReadModel.GameTime;
+        Require(runtime.EnqueueCreateShipment(CreateShipment(runtime, "grain-duplicate-arrival", 100)).Queued,
+            "重复抵达测试命令应该进入收件箱");
+        runtime.AdvanceTo(start);
+
+        var actions = (List<ScheduledSimulationEvent>)typeof(RealtimeSimulationRuntime)
+            .GetField("_scheduledEvents", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(runtime)!;
+        var arrival = actions.Single(item => item.EventType == "ShipmentArrival");
+        var duplicate = new ScheduledSimulationEvent("duplicate-shipment-arrival", arrival.DueGameTime,
+            arrival.Phase, arrival.Priority, actions.Max(item => item.CreationSequence) + 1,
+            arrival.EventType, arrival.Data, arrival.CausalCommandId, arrival.SchemaVersion);
+        actions.Add(duplicate);
+
+        var result = runtime.AdvanceTo(new GameTime(start.Value.AddHours(2)));
+        Require(result.Events.Any(item => item.EventType == "ShipmentArrived") &&
+                result.Events.Any(item => item.EventType == "ShipmentArrivalIgnored"),
+            "重复抵达动作必须留下可审计的幂等忽略事件");
+        Require(result.ReadModel.Stockpiles.Single(item => item.Id == new StockpileId("ningyuan-granary")).GrainQuantity == 90,
+            "重复抵达不能二次入库");
+    }
+
+    private static void ShouldRestoreShipmentCheckpointsAndPendingInbox()
+    {
+        var planned = new RealtimeSimulationRuntime(CreateLogisticsWorld());
+        var plannedCommand = CreateShipment(planned, "checkpoint-planned", 200);
+        Require(planned.EnqueueCreateShipment(plannedCommand).Queued, "计划阶段命令应该进入收件箱");
+        var plannedSnapshot = planned.CaptureSnapshot();
+        var plannedRestored = RealtimeSimulationRuntime.Restore(plannedSnapshot);
+        Require(plannedRestored.StateHash == planned.StateHash, "恢复前的待处理收件箱 hash 必须一致");
+        var plannedOriginal = planned.AdvanceTo(planned.ReadModel.GameTime);
+        var plannedReplay = plannedRestored.AdvanceTo(plannedRestored.ReadModel.GameTime);
+        Require(plannedOriginal.ReadModel.StateHash == plannedReplay.ReadModel.StateHash &&
+                EventFingerprints(plannedOriginal.Events).SequenceEqual(EventFingerprints(plannedReplay.Events)),
+            "恢复后的计划运输必须按同一顺序接纳和出发");
+
+        var inTransitSnapshot = planned.CaptureSnapshot();
+        var inTransitRestored = RealtimeSimulationRuntime.Restore(inTransitSnapshot);
+        var target = new GameTime(planned.ReadModel.GameTime.Value.AddHours(2));
+        var originalArrival = planned.AdvanceTo(target);
+        var restoredArrival = inTransitRestored.AdvanceTo(target);
+        Require(originalArrival.ReadModel.StateHash == restoredArrival.ReadModel.StateHash &&
+                EventFingerprints(originalArrival.Events).SequenceEqual(EventFingerprints(restoredArrival.Events)),
+            "恢复后的在途运输必须按同一队列和幂等状态抵达");
+    }
+
+    private static void ShouldRejectTamperedSnapshotOutbox()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        Require(runtime.EnqueueMoveArmy(CreateMove(runtime, "snapshot-outbox", FixedUtc)).Queued,
+            "快照 outbox 测试命令应该进入收件箱");
+        runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        var snapshot = runtime.CaptureSnapshot();
+        var outbox = (DomainEvent[])typeof(RealtimeSnapshot)
+            .GetProperty("OutboxEvents", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(snapshot)!;
+        Require(outbox.Length > 0, "篡改测试必须有可验证的 outbox 事件");
+        var original = outbox[0];
+        outbox[0] = new DomainEvent(original.EventId, original.WorldId, original.TurnNumber, original.EventType,
+            original.Description + " tampered", original.Data, original.OccurredAt, original.EventSequence,
+            original.WorldVersion, original.CommitId, original.CausalCommandId);
+        RequireThrows<InvalidDataException>(() => RealtimeSimulationRuntime.Restore(snapshot));
+    }
+
+    private static void ShouldCaptureSnapshotsAtomicallyUnderConcurrency()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        RealtimeSnapshot? latest = null;
+        var captureTask = Task.Run(() =>
+        {
+            for (var index = 0; index < 80; index++)
+            {
+                latest = runtime.CaptureSnapshot();
+            }
+        });
+        var enqueueTasks = Enumerable.Range(0, 120)
+            .Select(index => Task.Run(() => runtime.EnqueueMoveArmy(CreateMove(runtime, $"concurrent-{index}", FixedUtc))))
+            .ToArray();
+        Task.WaitAll(enqueueTasks.Append(captureTask).ToArray());
+        Require(latest is not null, "并发快照线程必须至少捕获一次快照");
+        _ = RealtimeSimulationRuntime.Restore(latest!);
+
+        var finalSnapshot = runtime.CaptureSnapshot();
+        var restored = RealtimeSimulationRuntime.Restore(finalSnapshot);
+        Require(restored.StateHash == runtime.StateHash, "同一原子边界捕获的最终快照必须可恢复到同一 hash");
+    }
+
+    private static void ShouldKeepEventIdentityAndCommitMetadataStable()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        var command = CreateMove(runtime, "event-metadata", FixedUtc, 0, 1);
+        Require(runtime.EnqueueMoveArmy(command).Queued, "事件元数据测试命令应该进入收件箱");
+        runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddHours(1)));
+        var events = runtime.OutboxEvents;
+        Require(events.Count > 0 && events.Select(item => item.EventId).Distinct(StringComparer.Ordinal).Count() == events.Count,
+            "所有 DomainEvent 必须拥有唯一 EventId");
+        Require(events.Select(item => item.EventSequence).SequenceEqual(Enumerable.Range(0, events.Count).Select(index => (long)index)),
+            "EventJournal 序号必须由单写者连续分配");
+        Require(events.All(item => item.EventId != command.CommandId && item.WorldVersion > 0 && !string.IsNullOrWhiteSpace(item.CommitId)),
+            "业务事件不能复用 CommandId，且必须带 Commit 元数据");
+        Require(events.Single(item => item.EventType == "ArmyMarchStarted").CausalCommandId == command.CommandId &&
+                events.Single(item => item.EventType == "ArmyArrived").CausalCommandId == command.CommandId,
+            "Started/Arrived 必须保留原始命令因果链，而不是复用调度事件编号");
+
+        var journal = new InMemoryAuditJournal();
+        journal.Append(runtime.ReadModel.WorldId, events);
+        RequireThrows<InvalidOperationException>(() => journal.Append(runtime.ReadModel.WorldId, [events[0]]));
+    }
+
+    private static void ShouldAuditPauseAndSpeedAsCommands()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        runtime.Advance(TimeSpan.FromMilliseconds(100));
+        var before = runtime.ReadModel;
+        runtime.SetPaused(true);
+        var paused = runtime.Advance(TimeSpan.FromSeconds(5));
+        Require(paused.CommandResults.Single().Accepted && paused.IsPaused,
+            "暂停必须作为已接纳控制命令提交");
+        Require(paused.ReadModel.WorldVersion == before.WorldVersion + 1 &&
+                paused.Events.Any(item => item.EventType == "CommandAccepted"),
+            "暂停命令必须有 WorldVersion/Commit/Outcome/事件审计");
+
+        runtime.SetPaused(false);
+        var resumed = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(resumed.CommandResults.Single().Accepted && !resumed.IsPaused,
+            "恢复运行也必须经过唯一命令管线");
+
+        runtime.SetSpeed(2.0);
+        var speed = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(speed.CommandResults.Single().Accepted && speed.ReadModel.WorldVersion == resumed.ReadModel.WorldVersion + 1 &&
+                speed.Speed == 2.0 && speed.Events.Any(item => item.EventType == "CommandAccepted"),
+            "倍速切换必须作为可审计命令提交，而不能直接改运行时字段");
+        var remainderProperty = typeof(RealtimeSnapshot).GetProperty("RealGameTickRemainder", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var remainderBeforeSpeedElapsed = (decimal)remainderProperty.GetValue(runtime.CaptureSnapshot())!;
+        Require(remainderBeforeSpeedElapsed > 0, "倍速切换测试必须保留一个未提交的游戏时间余数");
+        var gameTimeBeforeSpeedElapsed = runtime.ReadModel.GameTime;
+        runtime.Advance(TimeSpan.FromMilliseconds(100));
+        var remainderAfterSpeedElapsed = (decimal)remainderProperty.GetValue(runtime.CaptureSnapshot())!;
+        Require(runtime.ReadModel.GameTime.Value == gameTimeBeforeSpeedElapsed.Value.AddHours(1) &&
+                remainderAfterSpeedElapsed > remainderBeforeSpeedElapsed,
+            "切换倍速后必须继续使用既有余数，并按新速度累计后再提交整小时");
+    }
+
+    private static void InvokeCommitRealtime(WorldState world, long version, string commitId)
+    {
+        try
+        {
+            typeof(WorldState).GetMethod("CommitRealtime", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(world, [version, commitId]);
+        }
+        catch (TargetInvocationException exception) when (exception.InnerException is not null)
+        {
+            throw exception.InnerException;
+        }
+    }
+
     private static MoveArmyCommand CreateMove(
         RealtimeSimulationRuntime runtime,
         string commandId,
@@ -292,6 +701,105 @@ internal static class Program
         long expectedVersion = 0,
         int travelHours = 2) =>
         new(commandId, new CharacterId("war"), new ArmyId("army-1"), new ProvinceId("capital"), submittedAt, expectedVersion, travelHours);
+
+    private static CreateShipmentCommand CreateShipment(
+        RealtimeSimulationRuntime runtime,
+        string commandId,
+        long grainQuantity,
+        CharacterId? actorId = null,
+        long? expectedVersion = null) =>
+        new(commandId,
+            actorId ?? new CharacterId("works"),
+            new ShipmentId($"shipment-{commandId}"),
+            new RouteId("capital-ningyuan-grain"),
+            grainQuantity,
+            runtime.ReadModel.GameTime.Value,
+            expectedVersion ?? runtime.ReadModel.WorldVersion);
+
+    private static WorldState GetRuntimeState(RealtimeSimulationRuntime runtime) =>
+        (WorldState)typeof(RealtimeSimulationRuntime)
+            .GetField("_state", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(runtime)!;
+
+    private static bool InvokeStockpileMutation(StockpileState stockpile, string methodName, long quantity) =>
+        (bool)typeof(StockpileState)
+            .GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(stockpile, [quantity])!;
+
+    private static void AddScheduledHeartbeat(RealtimeSimulationRuntime runtime, GameTime dueAt, string eventId)
+    {
+        var actions = (List<ScheduledSimulationEvent>)typeof(RealtimeSimulationRuntime)
+            .GetField("_scheduledEvents", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(runtime)!;
+        var nextSequence = actions.Count == 0 ? 0 : actions.Max(item => item.CreationSequence) + 1;
+        actions.Add(new ScheduledSimulationEvent(eventId, dueAt, 2, 0, nextSequence,
+            "DailyHeartbeat", new Dictionary<string, string>()));
+    }
+
+    private static IReadOnlyList<string> EventFingerprints(IEnumerable<DomainEvent> events) =>
+        events.Select(item => string.Join("\u001f", [
+            item.EventId,
+            item.EventSequence.ToString(),
+            item.EventType,
+            item.WorldVersion.ToString(),
+            item.CommitId,
+            item.CausalCommandId ?? "",
+            item.OccurredAt?.UtcTicks.ToString() ?? "",
+            string.Join("\u001e", item.Data.OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                .Select(pair => $"{pair.Key}={pair.Value}"))])).ToArray();
+
+    private static long GrainLedgerTotal(RealtimeReadModel model) => checked(
+        model.Stockpiles.Sum(item => item.GrainQuantity) +
+        model.Shipments.Where(item => item.Status != ShipmentStatus.Arrived).Sum(item => item.GrainQuantity) +
+        model.Shipments.Where(item => item.Status == ShipmentStatus.Arrived).Sum(item => item.LossGrain));
+
+    private static decimal SnapshotRemainder(RealtimeSimulationRuntime runtime) =>
+        (decimal)typeof(RealtimeSnapshot).GetProperty("RealGameTickRemainder", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(runtime.CaptureSnapshot())!;
+
+    private static WorldState CreateLogisticsWorld(
+        long destinationCapacity = 1_000,
+        long destinationGrain = 0,
+        long routeCapacity = 500,
+        int travelHours = 2,
+        int lossPerThousand = 100)
+    {
+        var map = new MapDefinition(
+            "logistics-map",
+            [
+                new ProvinceDefinition(new ProvinceId("capital"), "京师", [new ProvinceId("liaodong")]),
+                new ProvinceDefinition(new ProvinceId("liaodong"), "辽东", [new ProvinceId("capital")]),
+            ]);
+        return WorldState.CreateInitial(
+            new WorldId("logistics-world"),
+            1,
+            200_000,
+            map,
+            characters:
+            [
+                new CharacterState(new CharacterId("works"), "物流角色",
+                    new CharacterAttributes(80, 60, 30, 40, 70),
+                    new CharacterPersonality(true, false, true, true)),
+                new CharacterState(new CharacterId("war"), "无物流权限角色",
+                    new CharacterAttributes(60, 40, 80, 50, 60),
+                    new CharacterPersonality(true, true, true, false)),
+            ],
+            capabilityGrants:
+            [
+                new CapabilityGrant(new CharacterId("works"), GameCapability.PlanLogistics, "capital-ningyuan-grain"),
+            ],
+            stockpiles:
+            [
+                new StockpileState(new StockpileId("capital-granary"), new ProvinceId("capital"), 2_000, 1_000),
+                new StockpileState(new StockpileId("ningyuan-granary"), new ProvinceId("liaodong"), destinationCapacity, destinationGrain),
+            ],
+            routes:
+            [
+                new RouteState(new RouteId("capital-ningyuan-grain"),
+                    new StockpileId("capital-granary"), new StockpileId("ningyuan-granary"),
+                    routeCapacity, travelHours, lossPerThousand),
+            ]);
+    }
 
     private static WorldState CreateWorld(string worldId = "smoke-world", string characterName = "兵部角色")
     {

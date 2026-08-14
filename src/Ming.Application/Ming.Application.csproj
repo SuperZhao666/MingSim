@@ -4,6 +4,5 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Ming.Domain\Ming.Domain.csproj" />
-    <ProjectReference Include="..\Ming.Simulation\Ming.Simulation.csproj" />
   </ItemGroup>
 </Project>

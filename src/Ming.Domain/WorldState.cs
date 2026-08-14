@@ -186,9 +186,9 @@ public sealed class WorldState
             throw new ArgumentException("提交身份不能为空。", nameof(commitId));
         }
 
-        if (worldVersion < WorldVersion)
+        if (WorldVersion == long.MaxValue || worldVersion != WorldVersion + 1)
         {
-            throw new ArgumentOutOfRangeException(nameof(worldVersion), "世界版本不能倒退。");
+            throw new ArgumentOutOfRangeException(nameof(worldVersion), "世界版本必须恰好递增 1，不能同号或跳号。");
         }
 
         WorldVersion = worldVersion;

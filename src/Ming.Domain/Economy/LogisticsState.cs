@@ -84,6 +84,8 @@ public sealed class StockpileState
 /// <summary>一条固定的粮运路线，同时定义在途容量、行程时间和损耗率。</summary>
 public sealed record RouteState
 {
+    public const int MaxTravelHours = 24 * 365;
+
     public RouteState(
         RouteId id,
         StockpileId fromStockpileId,
@@ -107,9 +109,9 @@ public sealed record RouteState
             throw new ArgumentOutOfRangeException(nameof(capacity), "路线容量必须为正数。");
         }
 
-        if (travelHours <= 0)
+        if (travelHours is <= 0 or > MaxTravelHours)
         {
-            throw new ArgumentOutOfRangeException(nameof(travelHours), "路线行程必须至少一小时。");
+            throw new ArgumentOutOfRangeException(nameof(travelHours), $"路线行程必须在 1 到 {MaxTravelHours} 小时之间。");
         }
 
         if (lossPerThousand is < 0 or > 1000)
@@ -136,6 +138,38 @@ public sealed record RouteState
     public int TravelHours { get; }
 
     public int LossPerThousand { get; }
+
+    /// <summary>按每单向上取整损耗，使用分解乘法避免 long 中间值溢出。</summary>
+    public bool TryCalculateDeliveredGrain(long quantity, out long delivered, out long loss)
+    {
+        delivered = 0;
+        loss = 0;
+        if (quantity <= 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            var wholeLoss = checked((quantity / 1000) * (long)LossPerThousand);
+            var remainderProduct = checked((quantity % 1000) * (long)LossPerThousand);
+            var remainderLoss = (remainderProduct + 999) / 1000;
+            loss = checked(wholeLoss + remainderLoss);
+            if (loss > quantity)
+            {
+                loss = quantity;
+            }
+
+            delivered = quantity - loss;
+            return true;
+        }
+        catch (OverflowException)
+        {
+            delivered = 0;
+            loss = 0;
+            return false;
+        }
+    }
 }
 
 /// <summary>一次粮运的权威状态；货物在抵达前仍由 Shipment 账本持有。</summary>
@@ -271,17 +305,49 @@ public sealed class LogisticsState
         }
     }
 
-    public long InTransitGrain(RouteId routeId) =>
-        _shipments.Values
-            .Where(shipment => shipment.RouteId == routeId && shipment.Status != ShipmentStatus.Arrived)
-            .Sum(shipment => shipment.GrainQuantity);
+    public long InTransitGrain(RouteId routeId)
+    {
+        long total = 0;
+        foreach (var shipment in _shipments.Values.Where(shipment =>
+                     shipment.RouteId == routeId && shipment.Status != ShipmentStatus.Arrived))
+        {
+            if (total > long.MaxValue - shipment.GrainQuantity)
+            {
+                return long.MaxValue;
+            }
 
-    public long ReservedIncomingGrain(StockpileId stockpileId) =>
-        _shipments.Values
-            .Where(shipment => shipment.Status != ShipmentStatus.Arrived &&
-                               _routes.TryGetValue(shipment.RouteId, out var route) &&
-                               route.ToStockpileId == stockpileId)
-            .Sum(shipment => shipment.GrainQuantity);
+            total += shipment.GrainQuantity;
+        }
+
+        return total;
+    }
+
+    /// <summary>目的地容量只预留最终可交付粮食，损耗不占用目的地库存。</summary>
+    public long ReservedIncomingGrain(StockpileId stockpileId)
+    {
+        long total = 0;
+        foreach (var shipment in _shipments.Values.Where(shipment => shipment.Status != ShipmentStatus.Arrived))
+        {
+            if (!_routes.TryGetValue(shipment.RouteId, out var route) || route.ToStockpileId != stockpileId)
+            {
+                continue;
+            }
+
+            if (!route.TryCalculateDeliveredGrain(shipment.GrainQuantity, out var delivered, out _))
+            {
+                return long.MaxValue;
+            }
+
+            if (total > long.MaxValue - delivered)
+            {
+                return long.MaxValue;
+            }
+
+            total += delivered;
+        }
+
+        return total;
+    }
 
     /// <summary>库存、在途货物和已经损耗的货物之和；用于证明闭环没有凭空增减粮食。</summary>
     public long GrainLedgerTotal() =>
