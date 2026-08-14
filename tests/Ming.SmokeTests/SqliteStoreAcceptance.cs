@@ -1,4 +1,5 @@
 using System.Text;
+using Microsoft.Data.Sqlite;
 using MingSim.Domain.Common;
 using MingSim.Domain.Economy;
 using MingSim.Domain.Realtime;

@@ -31,5 +31,10 @@
 `-p:MingSimEnableSqliteStore=true` 时启用：启用才引入该包并编译 `SqliteCommitStore.cs`
 与 `tests/Ming.SmokeTests/SqliteStoreAcceptance.cs`。本地离线构建保持 0 警告 0 错误，
 SQLite 验收由联网 CI 执行；本地已运行快照编解码等价验收（SnapshotCodecAcceptance）。
-删除方案：不需要 SQLite 时移除上述属性、PackageReference 与 `Sqlite\SqliteCommitStore.cs` 即可，
+
+另外显式固定 `SQLitePCLRaw.bundle_e_sqlite3 2.1.12`（Apache-2.0）：Microsoft.Data.Sqlite 10.0.0
+的传递依赖 2.1.11 携带高危漏洞 CVE-2025-6965（GHSA-2m69-gcr7-jv3q），2.1.12 内置 SQLite 3.53.3
+已修复；直接引用覆盖传递版本，消除 NU1903。
+
+删除方案：不需要 SQLite 时移除上述属性、两个 PackageReference 与 `Sqlite\SqliteCommitStore.cs` 即可，
 其余代码不受影响。

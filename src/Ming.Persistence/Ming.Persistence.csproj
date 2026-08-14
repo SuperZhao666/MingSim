@@ -21,6 +21,13 @@
   </ItemGroup>
   <ItemGroup Condition="'$(MingSimEnableSqliteStore)' == 'true'">
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <!--
+      显式固定 SQLitePCLRaw.bundle_e_sqlite3 2.1.12（Apache-2.0）：
+      Microsoft.Data.Sqlite 10.0.0 的传递依赖 2.1.11 携带已知高危漏洞 CVE-2025-6965
+      （GHSA-2m69-gcr7-jv3q，SQLite < 3.50.2 聚合项内存损坏）；2.1.12 内置 SQLite 3.53.3 已修复。
+      直接引用会覆盖传递版本，消除 NU1903。删除方案：移除本行后随 SQLite 适配器一起删除。
+    -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="Sqlite\SqliteCommitStore.cs" Condition="'$(MingSimEnableSqliteStore)' != 'true'" />
