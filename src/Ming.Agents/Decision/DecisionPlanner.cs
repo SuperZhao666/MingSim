@@ -15,7 +15,7 @@ namespace MingSim.Agents.Decision;
 /// 1. 配置了 IModelProvider 时，先做预算闸门预检（预算耗尽→0 次调用，直接回退规则）；
 /// 2. 通过闸门后尝试让模型产出白名单意图 JSON，计时并记录审计；
 /// 3. 解析成功且结果未过期（AcceptedGameTime &lt; Deadline）→ 采用模型意图；
-/// 4. 解析失败、模型失败/超时或结果已过期 → 一律丢弃模型结果，回退规则决策。
+/// 4. 解析失败、解析器未预期异常、模型失败/超时或结果已过期 → 一律丢弃模型结果，回退规则决策。
 ///
 /// 不配置 Provider（provider 为 null）时 0 次模型调用即可完整决策；
 /// 模型故障只影响本次可选的模型路径，不会暂停世界主循环（doc 07 §13.4）。
@@ -43,25 +43,28 @@ public sealed class DecisionPlanner
     private readonly ModelBudgetTracker? _budget;
     private readonly ModelAuditLog? _auditLog;
     private readonly string _providerName;
-    private readonly ModelDecisionParser _parser = new();
+    private readonly ModelDecisionParser _parser;
 
     /// <summary>
     /// 创建规划器。ruleSource 是规则回退（通常是 Utility AI）；
     /// provider 为空表示关闭模型路径，始终走规则决策；
     /// budget 为空表示不限预算；auditLog 为空表示不记录审计；providerName 仅用于审计摘要。
+    /// parser 供契约测试注入"必然抛异常"的解析器，证明解析 try 回退防线（P2-1）；生产代码不传。
     /// </summary>
     public DecisionPlanner(
         IAgentDecisionSource ruleSource,
         IModelProvider? provider = null,
         ModelBudgetTracker? budget = null,
         ModelAuditLog? auditLog = null,
-        string providerName = "model")
+        string providerName = "model",
+        ModelDecisionParser? parser = null)
     {
         _ruleSource = ruleSource ?? throw new ArgumentNullException(nameof(ruleSource));
         _provider = provider;
         _budget = budget;
         _auditLog = auditLog;
         _providerName = string.IsNullOrWhiteSpace(providerName) ? "model" : providerName;
+        _parser = parser ?? new ModelDecisionParser();
     }
 
     /// <summary>
@@ -131,7 +134,29 @@ public sealed class DecisionPlanner
 
         var responseTokens = TokenEstimation.FromText(response.Content);
         RecordUsage(estimatedRequestTokens, responseTokens);
-        var parsed = _parser.Parse(request, context, response.Content, acceptedGameTime);
+
+        // 解析步骤整体纳入 try 回退（P2-1）：解析器是"模型输出不可信"的最后一道硬防线，
+        // 任何未预期异常（未来 schema 版本、解析器缺陷等）都必须回退规则路径并记 ParseFailed 审计，
+        // 绝不能把模型输出引发的异常抛给调用方阻塞世界（doc 07 §13.4）。
+        ModelParseResult parsed;
+        try
+        {
+            parsed = _parser.Parse(request, context, response.Content, acceptedGameTime);
+        }
+        catch (Exception)
+        {
+            AppendAudit(new ModelAuditEntry(
+                request.DecisionId,
+                _providerName,
+                ModelCallOutcome.ParseFailed,
+                estimatedRequestTokens,
+                responseTokens,
+                CostFor(estimatedRequestTokens + responseTokens),
+                stopwatch.Elapsed,
+                DateTimeOffset.UtcNow));
+            return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.ParseFailed);
+        }
+
         if (parsed.Succeeded && !request.IsExpired(acceptedGameTime))
         {
             AppendAudit(new ModelAuditEntry(
