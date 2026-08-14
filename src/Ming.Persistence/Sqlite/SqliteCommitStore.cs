@@ -30,7 +30,16 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
     /// <summary>SQLite schema 版本；schema 变更必须迁移而不是原地改表。</summary>
     private const int SchemaVersion = 1;
 
-    private const string ChecksumMagic = "mingsim-commit-v1";
+    /// <summary>当前整库校验和布局（v2）：覆盖全部内容行元数据 + state_blob/event_blob/snapshot_blob 字节。</summary>
+    private const string ChecksumMagicV2 = "mingsim-commit-v2";
+
+    /// <summary>v1 时代整库校验和布局（#35 之前写入的旧档）：只覆盖元数据列，不覆盖任何 blob 字节。
+    /// 恢复侧先按 v2 重算比对，失败再按 v1 重算比对——真实旧档必须能继续被读取（迁移路径）。</summary>
+    private const string ChecksumMagicV1 = "mingsim-commit-v1";
+
+    /// <summary>快照载荷格式版本（与 SnapshotCodec 的 FormatVersion/FormatVersionV1 一致；恢复路径用它选择解码或迁移）。</summary>
+    private const byte SnapshotPayloadFormatV2 = 2;
+    private const byte SnapshotPayloadFormatV1 = 1;
 
     private readonly SqliteConnection _connection;
     private readonly string _databasePath;
@@ -39,6 +48,14 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
     private WorldState? _pendingState;
     private IReadOnlyList<DomainEvent>? _pendingEvents;
     private SnapshotPreparation? _pendingSnapshot;
+
+    /// <summary>整库校验和分类结果：当前布局（含 blob）完好 / 旧版布局（真实旧档）完好 / 失配（篡改或损坏）。</summary>
+    private enum ArchiveChecksumState
+    {
+        IntactNewLayout,
+        LegacyLayout,
+        Mismatched,
+    }
 
     public SqliteCommitStore(string databasePath, WorldId worldId)
     {
@@ -64,14 +81,30 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
         }
     }
 
-    /// <summary>IWorldStore：读取当前已提交状态（快速加载路径；完整校验在恢复路径）。</summary>
+    /// <summary>
+    /// IWorldStore：读取当前已提交状态（快速加载路径）。与恢复路径一样受整库校验和门禁
+    /// （v2 布局覆盖 state_blob 字节；旧版布局仅限真实 v1 旧档），并交叉验证解码状态的身份字段
+    /// 与行/meta 一致（P1-PERSIST-05/06：任何内容字节被篡改都在返回状态前抛异常，fail-closed）。
+    /// </summary>
     public WorldState Load(WorldId worldId)
     {
         lock (_gate)
         {
+            var meta = ReadMetaRow(_connection, worldId);
+            if (meta is null)
+            {
+                throw new KeyNotFoundException($"世界 {worldId} 不存在或尚未提交。");
+            }
+
+            var checksumState = ClassifyChecksum(_connection, worldId, meta.TotalChecksum);
+            if (checksumState == ArchiveChecksumState.Mismatched)
+            {
+                throw new InvalidDataException("存档内容校验失败：数据库可能被篡改或损坏。");
+            }
+
             using var command = _connection.CreateCommand();
             command.CommandText = """
-                SELECT ws.state_blob, m.current_world_version
+                SELECT ws.state_blob, ws.world_version, ws.commit_id
                 FROM world_meta AS m
                 JOIN world_state AS ws
                   ON ws.world_id = m.world_id AND ws.world_version = m.current_world_version
@@ -85,9 +118,14 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             }
 
             var state = SnapshotCodec.DeserializeWorld(reader.GetFieldValue<byte[]>(0));
-            if (state.Id != worldId)
+            var rowWorldVersion = reader.GetInt64(1);
+            var rowCommitId = reader.GetString(2);
+            if (state.Id != worldId ||
+                state.WorldVersion != rowWorldVersion ||
+                !StringComparer.Ordinal.Equals(state.CommitId, rowCommitId) ||
+                state.WorldVersion != meta.CurrentWorldVersion)
             {
-                throw new InvalidDataException("状态行中的世界编号与请求不一致。");
+                throw new InvalidDataException("状态行内容与版本元数据不一致，存档损坏。");
             }
 
             return state;
@@ -188,11 +226,94 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
     }
 
     /// <summary>
-    /// 单事务原子提交：当前状态 + 事件日志增量 + 校验快照（含指针切换）在同一个
-    /// BEGIN IMMEDIATE ... COMMIT 中完成；任何一步失败整体回滚，数据库保持上一个提交。
+    /// 单事务原子提交（ICommitStore 的真正唯一入口，P1-PERSIST-01）：从 CommitPackage 的权威快照
+    /// 取 full snapshot 事实，JournalEvents 只作 delta append，拒绝结果（Outcome）一并落盘——
+    /// state / delta events / snapshot / outcome / meta 在同一个 BEGIN IMMEDIATE ... COMMIT 中完成；
+    /// 任何一步失败整体回滚，数据库保持上一个完整提交。本方法不再调用语义不同的旧 public staging API
+    /// （Commit/Append/Prepare/Promote），也不把 JournalEvents 当作整本日志重复写入。
     /// </summary>
-    /// <param name="snapshot">Runtime 原子捕获的完整快照；其规范化字节写入快照表，
-    /// StateHash/PayloadChecksum 写入清单，供崩溃后完整恢复与校验。</param>
+    public CommitReceipt CommitWorld(CommitPackage package)
+    {
+        ArgumentNullException.ThrowIfNull(package);
+        lock (_gate)
+        {
+            try
+            {
+                var state = SnapshotReflection.GetState(package.Snapshot);
+                ValidateJournalDeltaMatchesOutbox(package.JournalEvents, SnapshotReflection.GetOutboxEvents(package.Snapshot));
+                var version = CommitCore(package.Snapshot, state, package.JournalEvents, package.Outcome);
+                RunCheckpoint();
+                return new CommitReceipt(true, version, null);
+            }
+            catch (Exception exception)
+            {
+                return new CommitReceipt(false, -1, exception.Message);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 单事务提交核心：写状态行 + 事件日志增量 + 快照行 + meta（+ 可选拒绝结果），
+    /// 计算并回写覆盖全部内容行与 blob 字节的整库校验和，然后 COMMIT。幂等重提交（同一版本
+    /// 且快照字节完全相同）直接 no-op。提交序列（snapshot_seq）独立于 WorldVersion 单调推进。
+    /// </summary>
+    private long CommitCore(RealtimeSnapshot snapshot, WorldState state, IReadOnlyList<DomainEvent> journalEvents, InputOutcome? outcome)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(journalEvents);
+        var payload = SnapshotCodec.Serialize(snapshot);
+        var stateHash = snapshot.StateHash;
+        var payloadChecksum = snapshot.PayloadChecksum;
+
+        using var transaction = _connection.BeginTransaction(deferred: false);
+        try
+        {
+            var current = ReadCurrentMeta();
+            var currentVersion = current?.CurrentWorldVersion ?? -1;
+            if (state.WorldVersion < currentVersion)
+            {
+                throw new InvalidOperationException(
+                    $"提交版本回退：库中当前版本 {currentVersion}，试图写入 {state.WorldVersion}。");
+            }
+
+            var isIdenticalRecommit = current is not null &&
+                state.WorldVersion == currentVersion &&
+                IsIdenticalLatestSnapshot(payload, current!.CurrentSnapshotSeq);
+            if (isIdenticalRecommit)
+            {
+                // 幂等重提交：同一版本且快照字节完全相同，什么都不写，直接结束本次提交。
+                transaction.Commit();
+                return state.WorldVersion;
+            }
+
+            WriteStateRow(state, stateHash);
+            AppendJournalDelta(journalEvents);
+            var snapshotSeq = WriteSnapshotRow(payload, state, stateHash, payloadChecksum);
+            // 先写 meta 占位、再计算校验和、最后回写：校验和布局从不包含 total_checksum 列本身，
+            // 避免"为了校验 meta 又要先知道 meta 里的校验和"的自引用（提交/恢复两侧布局必须完全一致）。
+            WriteMeta(state, stateHash, payloadChecksum, snapshotSeq, totalChecksum: "");
+            if (outcome is not null)
+            {
+                WriteOutcomeRow(outcome);
+            }
+
+            var totalChecksum = ComputeTotalChecksum();
+            UpdateTotalChecksum(totalChecksum);
+            transaction.Commit();
+            return state.WorldVersion;
+        }
+        catch
+        {
+            transaction.Rollback();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// 旧 public staging 路径（接口兼容 + 既有测试）：暂存 → 单事务落盘。语义与 CommitWorld 一致，
+    /// 但走"先暂存再 CommitAll"的旧调用面；新代码应使用 CommitWorld 单入口。
+    /// </summary>
     public void CommitAll(RealtimeSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
@@ -204,46 +325,10 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
                     "提交前必须先通过端口暂存：Commit(状态)、Append(事件日志)、Prepare/Promote(快照清单)。");
             }
 
-            VerifyStagedFacetsMatchSnapshot(snapshot);
-            var payload = SnapshotCodec.Serialize(snapshot);
-            var stateHash = snapshot.StateHash;
-            var payloadChecksum = snapshot.PayloadChecksum;
-
-            using var transaction = _connection.BeginTransaction(deferred: false);
             try
             {
-                var current = ReadCurrentMeta();
-                var currentVersion = current?.CurrentWorldVersion ?? -1;
-                if (_pendingState.WorldVersion < currentVersion)
-                {
-                    throw new InvalidOperationException(
-                        $"提交版本回退：库中当前版本 {currentVersion}，试图写入 {_pendingState.WorldVersion}。");
-                }
-
-                var isIdenticalRecommit = current is not null &&
-                    _pendingState.WorldVersion == currentVersion &&
-                    IsIdenticalLatestSnapshot(payload, current!.CurrentSnapshotSeq);
-                if (isIdenticalRecommit)
-                {
-                    // 幂等重提交：同一版本且快照字节完全相同，什么都不写，直接结束本次提交。
-                    transaction.Commit();
-                    return;
-                }
-
-                WriteStateRow(_pendingState!, stateHash);
-                AppendJournalDelta(_pendingEvents!);
-                var snapshotSeq = WriteSnapshotRow(payload, _pendingState!, stateHash, payloadChecksum);
-                // 先写 meta 占位、再计算校验和、最后回写：校验和布局从不包含 total_checksum 列本身，
-                // 避免"为了校验 meta 又要先知道 meta 里的校验和"的自引用（提交/恢复两侧布局必须完全一致）。
-                WriteMeta(_pendingState, stateHash, payloadChecksum, snapshotSeq, totalChecksum: "");
-                var totalChecksum = ComputeTotalChecksum();
-                UpdateTotalChecksum(totalChecksum);
-                transaction.Commit();
-            }
-            catch
-            {
-                transaction.Rollback();
-                throw;
+                VerifyStagedFacetsMatchSnapshot(snapshot);
+                CommitCore(snapshot, _pendingState, _pendingEvents, outcome: null);
             }
             finally
             {
@@ -251,24 +336,32 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             }
 
             // COMMIT 之后做一次显式 checkpoint，让 .db 主文件自洽（等价于导出存档前的安全状态）。
-            using (var checkpoint = _connection.CreateCommand())
-            {
-                checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
-                checkpoint.ExecuteNonQuery();
-            }
+            RunCheckpoint();
         }
     }
 
+    /// <summary>COMMIT 之后做一次显式 checkpoint，让 .db 主文件自洽（等价于导出存档前的安全状态）。</summary>
+    private void RunCheckpoint()
+    {
+        using var checkpoint = _connection.CreateCommand();
+        checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+        checkpoint.ExecuteNonQuery();
+    }
+
     /// <summary>
-    /// 崩溃恢复：只读打开库，重算覆盖全部内容行的校验和，校验事件日志连续性，
-    /// 返回最新已提交快照。任何字节篡改都会抛异常，绝不发布半状态。
-    /// 返回的快照仍需交给 <see cref="RealtimeSimulationRuntime.Restore"/> 做权威校验后才能使用。
+    /// 崩溃恢复（只读）：先分类整库校验和（v2 含 blob 字节 / v1 旧布局 / 失配），再读取当前快照并
+    /// 逐项交叉验证解码内容与行/meta 一致（P1-PERSIST-06），最后校验事件日志连续性并逐条比对
+    /// 事件内容（P2-09）。任何内容字节被篡改都不会被静默发布；返回的快照仍需交给
+    /// <see cref="RealtimeSimulationRuntime.Restore"/> 做权威哈希校验后才能使用。
     /// </summary>
     /// <remarks>
-    /// 快照回退（doc 08 §15）：meta 指向的当前快照若不可读（迁移或解码失败），
-    /// 按快照序列降序回退到上一个 READY 快照并返回它，绝不发布半状态；
-    /// 全部快照都不可读时抛异常（fail-closed，迁移失败也不例外——不可读的旧档
-    /// 绝不会被静默当作成功恢复）。v1 旧档先迁移到 v2 再读取（迁移只做 v1→v2 一条路径）。
+    /// fail-closed 语义（P1-PERSIST-05/06）：
+    /// - 校验和失配 + 当前快照本体完好 → 篡改发生在事件/状态/历史行/元数据 → 抛异常，绝不发布；
+    /// - 当前快照不可用（解码失败、迁移校验失败、或解码内容与行/meta 不一致——包括"另一份合法
+    ///   payload 整体替换"）→ 按快照序列降序回退到上一个 READY 快照（doc 08 §15），
+    ///   替换内容绝不作为 current 发布；没有可用 READY 则抛异常；
+    /// - 旧版 v1 布局校验和（#35 之前写入的真实旧档）→ 允许继续读取并走 v1→v2 迁移；
+    ///   其余任何校验和失配一律 fail-closed。
     /// 注：回退后的世界版本落后于 meta.current_world_version，可加载/恢复/检查，
     /// 但下一次提交会因"版本回退"守卫被拒——完整续玩需要显式修复存档指针，超出本方法职责
     /// （恢复必须只读，绝不覆盖原档）。
@@ -283,91 +376,170 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
         // Pooling=false：恢复是只读的一次性操作，Dispose 后必须立即释放文件句柄（与写路径一致）。
         using var connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadOnly;Pooling=false");
         connection.Open();
-        using (var command = connection.CreateCommand())
+        var meta = ReadMetaRow(connection, worldId)
+            ?? throw new InvalidDataException($"世界 {worldId} 没有已提交的提交记录。");
+        if (!StringComparer.Ordinal.Equals(meta.WorldId, worldId.Value))
         {
-            command.CommandText = "SELECT world_id, current_world_version, current_snapshot_seq, total_checksum FROM world_meta WHERE world_id = $world;";
-            command.Parameters.AddWithValue("$world", worldId.Value);
-            using var reader = command.ExecuteReader();
-            if (!reader.Read())
-            {
-                throw new InvalidDataException($"世界 {worldId} 没有已提交的提交记录。");
-            }
+            throw new InvalidDataException("存档中的世界编号与请求不一致。");
+        }
 
-            var storedWorldId = reader.GetString(0);
-            var currentWorldVersion = reader.GetInt64(1);
-            var currentSnapshotSeq = reader.GetInt64(2);
-            var storedChecksum = reader.GetString(3);
-            if (storedWorldId != worldId.Value)
-            {
-                throw new InvalidDataException("存档中的世界编号与请求不一致。");
-            }
+        var checksumState = ClassifyChecksum(connection, worldId, meta.TotalChecksum);
+        var (snapshot, fellBack) = ReadCurrentOrFallback(connection, worldId, meta, checksumState);
 
-            var payload = ReadSnapshotPayload(connection, worldId, currentSnapshotSeq);
-            var actualChecksum = ComputeTotalChecksum(connection, worldId);
-            if (!StringComparer.Ordinal.Equals(actualChecksum, storedChecksum))
+        VerifyJournalContinuity(connection, worldId);
+        VerifyJournalMatchesSnapshot(connection, worldId, snapshot, allowJournalLongerThanOutbox: fellBack);
+        return snapshot;
+    }
+
+    /// <summary>整库校验和分类：v2（含 blob 字节）→ 旧版 v1 布局（真实旧档）→ 失配。</summary>
+    private static ArchiveChecksumState ClassifyChecksum(SqliteConnection connection, WorldId worldId, string storedChecksum)
+    {
+        if (StringComparer.Ordinal.Equals(ComputeTotalChecksumV2(connection, worldId), storedChecksum))
+        {
+            return ArchiveChecksumState.IntactNewLayout;
+        }
+
+        if (StringComparer.Ordinal.Equals(ComputeLegacyTotalChecksum(connection, worldId), storedChecksum))
+        {
+            return ArchiveChecksumState.LegacyLayout;
+        }
+
+        return ArchiveChecksumState.Mismatched;
+    }
+
+    /// <summary>
+    /// 读取当前快照并交叉验证；不可用时按序列降序回退到上一个 READY 快照（doc 08 §15）。
+    /// 校验和失配 + 当前快照本体完好 = 篡改发生在其他内容 → fail-closed 抛异常。
+    /// </summary>
+    private static (RealtimeSnapshot Snapshot, bool FellBack) ReadCurrentOrFallback(
+        SqliteConnection connection, WorldId worldId, MetaRowFull meta, ArchiveChecksumState checksumState)
+    {
+        var current = TryReadCandidate(connection, worldId, meta, meta.CurrentSnapshotSeq, validateAgainstMeta: true);
+        if (current is not null)
+        {
+            if (checksumState == ArchiveChecksumState.Mismatched)
             {
+                // 当前快照本体完好且与行/meta 一致，但整库校验和失配 → 篡改发生在
+                // event_blob/state_blob/历史行/元数据 → 绝不发布（fail-closed）。
                 throw new InvalidDataException("存档内容校验失败：数据库可能被篡改或损坏。");
             }
 
-            VerifyJournalContinuity(connection, worldId);
-            var (snapshot, fellBack) = ReadSnapshotWithFallback(connection, worldId, currentSnapshotSeq, payload);
-            VerifyJournalMatchesSnapshot(connection, worldId, snapshot, allowJournalLongerThanOutbox: fellBack);
-            return snapshot;
+            return (current, false);
         }
-    }
 
-    /// <summary>
-    /// 读取当前快照；损坏时按序列降序回退到上一个 READY 快照（doc 08 §15：Current 损坏
-    /// → 选择最新 READY Snapshot）。候选的 v1 旧档先迁移到 v2；迁移失败与解码失败同等对待——
-    /// 都意味着该快照不可读，尝试更早的 READY。全部候选都不可读时最后抛出（fail-closed，
-    /// 绝不发布半状态、绝不把不可读的存档静默当作成功恢复）。
-    /// </summary>
-    private static (RealtimeSnapshot Snapshot, bool FellBack) ReadSnapshotWithFallback(
-        SqliteConnection connection, WorldId worldId, long currentSnapshotSeq, byte[] currentPayload)
-    {
-        var seq = currentSnapshotSeq;
-        var payload = currentPayload;
-        while (true)
+        // 当前快照不可用（解码失败 / 迁移校验失败 / 内容与行或 meta 不一致）：回退到上一个 READY。
+        for (var seq = meta.CurrentSnapshotSeq - 1; seq >= 0; seq--)
         {
-            try
+            var candidate = TryReadCandidate(connection, worldId, meta, seq, validateAgainstMeta: false);
+            if (candidate is not null)
             {
-                var snapshot = SnapshotCodec.Deserialize(SnapshotCodec.MigrateV1ToV2(payload));
-                return (snapshot, seq < currentSnapshotSeq);
-            }
-            catch (Exception exception) when (exception is InvalidDataException or EndOfStreamException && seq > 0)
-            {
-                // 当前（或回退候选）快照载荷损坏：尝试上一个 READY 快照；绝不发布半状态。
-                seq--;
-                payload = ReadSnapshotPayload(connection, worldId, seq);
+                return (candidate, true);
             }
         }
+
+        throw new InvalidDataException("当前快照不可用且没有可用的历史 READY 快照，拒绝恢复（fail-closed）。");
     }
 
     /// <summary>
-    /// ICommitStore：把"暂存 → 单事务原子落盘"的既有流程包装成端口的一次调用。
-    /// 失败时返回失败回执，不抛出（调用方据此决定是否中止推进）；数据库始终保持上一个完整提交。
+    /// 读取并解码第 seq 个快照，交叉验证解码内容与行/meta 一致（P1-PERSIST-06）：
+    /// - 内容字段（WorldId/WorldVersion/CommitId/GameTime）必须与快照行一致；当前快照还须与 meta 一致；
+    /// - StateHash/PayloadChecksum 与行/meta 一致（仅对非迁移载荷——v1 载荷迁移后按当前规则 re-seal，
+    ///   与 v1 时代行值必然不同，其校验由迁移机制（<see cref="SnapshotCodec.MigrateV1ToV2"/>）
+    ///   与 <see cref="RealtimeSimulationRuntime.Restore"/> 承担）。
+    /// 任何不一致都视为该快照不可用（返回 null），绝不静默发布。
     /// </summary>
-    public CommitReceipt CommitWorld(CommitPackage package)
+    private static RealtimeSnapshot? TryReadCandidate(
+        SqliteConnection connection, WorldId worldId, MetaRowFull meta, long seq, bool validateAgainstMeta)
     {
-        ArgumentNullException.ThrowIfNull(package);
+        byte[] payload;
         try
         {
-            var state = SnapshotReflection.GetState(package.Snapshot);
-            Commit(state);
-            Append(_worldId, package.JournalEvents);
-            Promote(Prepare(state, package.JournalEvents));
-            CommitAll(package.Snapshot);
-            return new CommitReceipt(true, state.WorldVersion, null);
+            payload = ReadSnapshotPayload(connection, worldId, seq);
         }
-        catch (Exception exception)
+        catch (InvalidDataException)
         {
-            return new CommitReceipt(false, -1, exception.Message);
+            return null;
+        }
+
+        var row = ReadSnapshotRow(connection, worldId, seq);
+        if (row is null)
+        {
+            return null;
+        }
+
+        if (!TryDecode(payload, out var snapshot, out var migrated))
+        {
+            return null;
+        }
+
+        var state = SnapshotReflection.GetState(snapshot);
+        if (!StringComparer.Ordinal.Equals(state.Id.Value, worldId.Value) ||
+            state.WorldVersion != row.WorldVersion ||
+            !StringComparer.Ordinal.Equals(state.CommitId, row.CommitId))
+        {
+            return null;
+        }
+
+        if (validateAgainstMeta &&
+            (state.WorldVersion != meta.CurrentWorldVersion ||
+             !StringComparer.Ordinal.Equals(state.CommitId, meta.CurrentCommitId) ||
+             state.GameTime.Value.UtcTicks != meta.CurrentGameTimeTicks))
+        {
+            return null;
+        }
+
+        if (!migrated)
+        {
+            if (!StringComparer.Ordinal.Equals(snapshot.StateHash, row.StateHash) ||
+                !StringComparer.Ordinal.Equals(snapshot.PayloadChecksum, row.PayloadChecksum))
+            {
+                return null;
+            }
+
+            if (validateAgainstMeta &&
+                (!StringComparer.Ordinal.Equals(snapshot.StateHash, meta.CurrentStateHash) ||
+                 !StringComparer.Ordinal.Equals(snapshot.PayloadChecksum, meta.CurrentPayloadChecksum)))
+            {
+                return null;
+            }
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>解码快照载荷：按格式版本选择直接解码或先迁移 v1→v2；任何结构/校验失败都视为不可用。</summary>
+    private static bool TryDecode(byte[] payload, out RealtimeSnapshot snapshot, out bool migrated)
+    {
+        snapshot = null!;
+        migrated = false;
+        try
+        {
+            var format = SnapshotCodec.PeekFormatVersion(payload);
+            if (format == SnapshotPayloadFormatV2)
+            {
+                snapshot = SnapshotCodec.Deserialize(payload);
+                migrated = false;
+                return true;
+            }
+
+            if (format == SnapshotPayloadFormatV1)
+            {
+                snapshot = SnapshotCodec.Deserialize(SnapshotCodec.MigrateV1ToV2(payload));
+                migrated = true;
+                return true;
+            }
+
+            return false;
+        }
+        catch (Exception exception) when (exception is InvalidDataException or EndOfStreamException)
+        {
+            return false;
         }
     }
 
     /// <summary>
-    /// ICommitStore：把未改变世界的拒绝/过期结果写进 command_outcomes 表（同一写连接、单条 INSERT）。
-    /// 世界版本不变，重试同一命令时恢复路径可按 command_id 找到同一结论。
+    /// ICommitStore 保留的独立写结果 API（Reject 已纯化，不再调用它；供外部/诊断显式记录结果使用）。
+    /// 单条 INSERT，独立事务；世界版本不变。
     /// </summary>
     public CommitReceipt RecordOutcome(InputOutcome outcome)
     {
@@ -377,18 +549,7 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             using var transaction = _connection.BeginTransaction();
             try
             {
-                using var command = _connection.CreateCommand();
-                command.Transaction = transaction;
-                command.CommandText = """
-                    INSERT OR REPLACE INTO command_outcomes (world_id, command_id, outcome_code, message, world_version)
-                    VALUES ($world, $commandId, $code, $message, $version);
-                    """;
-                command.Parameters.AddWithValue("$world", _worldId.Value);
-                command.Parameters.AddWithValue("$commandId", outcome.CommandId);
-                command.Parameters.AddWithValue("$code", outcome.OutcomeCode);
-                command.Parameters.AddWithValue("$message", outcome.Message);
-                command.Parameters.AddWithValue("$version", outcome.WorldVersion);
-                command.ExecuteNonQuery();
+                WriteOutcomeRow(outcome);
                 transaction.Commit();
                 return new CommitReceipt(true, outcome.WorldVersion, null);
             }
@@ -396,6 +557,44 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             {
                 transaction.Rollback();
                 return new CommitReceipt(false, outcome.WorldVersion, exception.Message);
+            }
+        }
+    }
+
+    /// <summary>把拒绝/过期结果写入 command_outcomes 表（必须在调用方事务内执行）。</summary>
+    private void WriteOutcomeRow(InputOutcome outcome)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText = """
+            INSERT OR REPLACE INTO command_outcomes (world_id, command_id, outcome_code, message, world_version)
+            VALUES ($world, $commandId, $code, $message, $version);
+            """;
+        command.Parameters.AddWithValue("$world", _worldId.Value);
+        command.Parameters.AddWithValue("$commandId", outcome.CommandId);
+        command.Parameters.AddWithValue("$code", outcome.OutcomeCode);
+        command.Parameters.AddWithValue("$message", outcome.Message);
+        command.Parameters.AddWithValue("$version", outcome.WorldVersion);
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>事件日志增量必须是快照 outbox 的尾部（防止调用方把无关/乱序事件当 delta 提交）。</summary>
+    private static void ValidateJournalDeltaMatchesOutbox(
+        IReadOnlyList<DomainEvent> journalDelta,
+        IReadOnlyList<DomainEvent> snapshotOutbox)
+    {
+        if (journalDelta.Count > snapshotOutbox.Count)
+        {
+            throw new InvalidOperationException("事件日志增量不能超过快照 outbox 长度。");
+        }
+
+        for (var index = 0; index < journalDelta.Count; index++)
+        {
+            var journalEvent = journalDelta[index];
+            var outboxEvent = snapshotOutbox[snapshotOutbox.Count - journalDelta.Count + index];
+            if (journalEvent.EventSequence != outboxEvent.EventSequence ||
+                !StringComparer.Ordinal.Equals(journalEvent.EventId, outboxEvent.EventId))
+            {
+                throw new InvalidOperationException("事件日志增量不是快照 outbox 的尾部，拒绝提交。");
             }
         }
     }
@@ -688,38 +887,45 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
         return new SnapshotPreparation(state.Id, state.TurnNumber, snapshot.StateHash, true, state, events);
     }
 
-    /// <summary>覆盖本世界全部内容行的校验和：meta（不含 total_checksum 列）+ 所有状态行 + 所有日志行 + 所有快照行。</summary>
+    /// <summary>覆盖本世界全部内容行的整库校验和（当前布局 v2：元数据列 + state_blob/event_blob/snapshot_blob 字节）。</summary>
     /// <remarks>
-    /// 布局约定（提交与恢复必须完全一致）：meta 行的第 10 列固定为字面量 ''，绝不写入
-    /// total_checksum 列本身——否则"恢复时用 meta 里的校验和去校验 meta"构成自引用，
-    /// 未篡改的库也会因提交/恢复两侧布局不一致而永远失败（复审 P0）。CommitAll 先写占位
+    /// 布局约定（提交与恢复必须完全一致）：meta 行的第 10 列固定为字面量 ''、第 11 列为零长 blob，
+    /// 绝不写入 total_checksum 列本身——否则"恢复时用 meta 里的校验和去校验 meta"构成自引用，
+    /// 未篡改的库也会因提交/恢复两侧布局不一致而永远失败（复审 P0）。CommitCore 先写占位
     /// meta、计算本哈希、再回写 total_checksum，恢复侧用同一布局重算比对。
     /// 为什么覆盖全部行而不是只覆盖当前行：恢复路径要求"篡改库中任一内容字节 → 恢复失败"，
     /// 历史行虽然不参与当前指针读取，但仍在库内，同样纳入校验。代价是恢复时 O(总行数)，
     /// MVP 规模可接受；日志量增长后应改为链式/分片校验（见 PR 剩余风险）。
+    /// 为什么 v2 覆盖 blob 本体（P1-PERSIST-05）：旧布局只覆盖元数据列，"用另一份合法 blob
+    /// 整体替换"不会被校验和发现（替换内容的内部哈希自洽，恢复会静默发布）；v2 把三个 blob
+    /// 的原始字节纳入哈希，任何字节变化都会导致校验失配。v1 时代旧档（#35 之前写入）仍按
+    /// <see cref="ComputeLegacyTotalChecksum"/> 的旧布局校验，保证迁移路径可读。
     /// </remarks>
-    private string ComputeTotalChecksum()
+    private string ComputeTotalChecksum() => ComputeTotalChecksumV2(_connection, _worldId);
+
+    /// <summary>恢复侧重算整库校验和（v2 布局，含 blob 字节）：与提交侧完全一致。</summary>
+    private static string ComputeTotalChecksumV2(SqliteConnection connection, WorldId worldId)
     {
-        using var command = _connection.CreateCommand();
+        using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT 'meta', world_id, schema_version, current_world_version, current_commit_id,
                    current_game_time_ticks, current_state_hash, current_payload_checksum,
-                   current_snapshot_seq, ''
+                   current_snapshot_seq, '', x''
             FROM world_meta WHERE world_id = $world
             UNION ALL
-            SELECT 'state', world_id, world_version, 0, commit_id, game_time_ticks, state_hash, '', 0, ''
+            SELECT 'state', world_id, world_version, 0, commit_id, game_time_ticks, state_hash, '', 0, '', state_blob
             FROM world_state WHERE world_id = $world
             UNION ALL
-            SELECT 'journal', world_id, event_sequence, 0, event_id, 0, '', '', 0, ''
+            SELECT 'journal', world_id, event_sequence, 0, event_id, 0, '', '', 0, '', event_blob
             FROM event_journal WHERE world_id = $world
             UNION ALL
-            SELECT 'snapshot', world_id, snapshot_seq, 0, commit_id, 0, state_hash, payload_checksum, 0, ''
+            SELECT 'snapshot', world_id, snapshot_seq, 0, commit_id, 0, state_hash, payload_checksum, 0, '', snapshot_blob
             FROM snapshots WHERE world_id = $world;
             """;
-        command.Parameters.AddWithValue("$world", _worldId.Value);
+        command.Parameters.AddWithValue("$world", worldId.Value);
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream, new UTF8Encoding(false), leaveOpen: true);
-        writer.Write(ChecksumMagic);
+        writer.Write(ChecksumMagicV2);
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
@@ -733,14 +939,21 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             writer.Write(reader.GetString(7));
             writer.Write(reader.GetInt64(8));
             writer.Write(reader.GetString(9));
+            var blob = reader.GetFieldValue<byte[]>(10);
+            writer.Write(blob.Length);
+            writer.Write(blob);
         }
 
         writer.Flush();
         return Convert.ToHexString(SHA256.HashData(stream.ToArray()));
     }
 
-    /// <summary>恢复侧重算校验和：布局与提交侧完全一致（meta 行不含 total_checksum 列，第 10 列固定 ''）。</summary>
-    private static string ComputeTotalChecksum(SqliteConnection connection, WorldId worldId)
+    /// <summary>
+    /// v1 时代整库校验和（#35 之前写入的旧档布局）：只覆盖元数据列、不含任何 blob 字节。
+    /// 恢复侧在 v2 失配时按本布局重算比对——真实旧档仍可读取并走迁移路径（fail-open 仅限
+    /// 于"校验和布局可验证为旧版"这一种情况；其余任何失配都 fail-closed）。
+    /// </summary>
+    private static string ComputeLegacyTotalChecksum(SqliteConnection connection, WorldId worldId)
     {
         using var command = connection.CreateCommand();
         command.CommandText = """
@@ -761,7 +974,7 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
         command.Parameters.AddWithValue("$world", worldId.Value);
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream, new UTF8Encoding(false), leaveOpen: true);
-        writer.Write(ChecksumMagic);
+        writer.Write(ChecksumMagicV1);
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
@@ -849,9 +1062,11 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             }
         }
 
-        // 真正的日志/outbox 交叉校验（独立审查 P2-1）：按 EventSequence 读回日志中与 outbox
-        // 同序号的每条事件，逐条与快照 outbox 比对 EventId 与世界版本——仅 count + 序号连续
-        // 校验不足以证明 outbox 确实是日志前缀，事件内容被替换/错位必须在这里暴露。
+        // 真正的日志/outbox 交叉校验（独立审查 P2-1 + P2-09）：按 EventSequence 读回日志中与 outbox
+        // 同序号的每条事件，逐条与快照 outbox 比对 EventSequence/EventId/完整事件内容
+        // （解码后的规范化字节逐字节一致，覆盖 WorldId/EventType/Data/OccurredAt/WorldVersion/CommitId/
+        // CausalCommandId 等全部字段）——仅 count + 序号连续校验不足以证明 outbox 确实是日志前缀，
+        // 事件内容被替换/错位必须在这里暴露。
         using (var crossCommand = connection.CreateCommand())
         {
             crossCommand.CommandText = """
@@ -868,13 +1083,15 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             {
                 var journalSequence = crossReader.GetInt64(1);
                 var journalEvent = SnapshotCodec.DeserializeEvent(crossReader.GetFieldValue<byte[]>(0));
+                var outboxEvent = outbox[index];
                 if (journalSequence != index ||
-                    !StringComparer.Ordinal.Equals(journalEvent.EventId, outbox[index].EventId) ||
-                    journalEvent.WorldVersion != outbox[index].WorldVersion ||
-                    journalEvent.EventSequence != index)
+                    journalEvent.EventSequence != index ||
+                    !StringComparer.Ordinal.Equals(journalEvent.EventId, outboxEvent.EventId) ||
+                    !SnapshotCodec.SerializeEvent(journalEvent).AsSpan()
+                        .SequenceEqual(SnapshotCodec.SerializeEvent(outboxEvent)))
                 {
                     throw new InvalidDataException(
-                        $"事件日志与快照 outbox 在第 {index} 条事件处不一致（序号/EventId/WorldVersion），存档损坏。");
+                        $"事件日志与快照 outbox 在第 {index} 条事件处不一致（EventSequence/EventId/事件内容），存档损坏。");
                 }
 
                 index++;
@@ -886,6 +1103,66 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             }
         }
     }
+
+    /// <summary>读取完整 meta 行（恢复与快速加载用；不含行则返回 null）。</summary>
+    private static MetaRowFull? ReadMetaRow(SqliteConnection connection, WorldId worldId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT world_id, current_world_version, current_commit_id, current_game_time_ticks,
+                   current_state_hash, current_payload_checksum, current_snapshot_seq, total_checksum
+            FROM world_meta WHERE world_id = $world;
+            """;
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new MetaRowFull(
+            reader.GetString(0),
+            reader.GetInt64(1),
+            reader.GetString(2),
+            reader.GetInt64(3),
+            reader.GetString(4),
+            reader.GetString(5),
+            reader.GetInt64(6),
+            reader.GetString(7));
+    }
+
+    /// <summary>读取快照行的身份字段（恢复交叉验证用；不含行则返回 null）。</summary>
+    private static SnapshotRow? ReadSnapshotRow(SqliteConnection connection, WorldId worldId, long snapshotSeq)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT world_version, commit_id, state_hash, payload_checksum
+            FROM snapshots WHERE world_id = $world AND snapshot_seq = $seq;
+            """;
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        command.Parameters.AddWithValue("$seq", snapshotSeq);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new SnapshotRow(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3));
+    }
+
+    /// <summary>meta 行完整字段（恢复路径的交叉校验基准）。</summary>
+    private sealed record MetaRowFull(
+        string WorldId,
+        long CurrentWorldVersion,
+        string CurrentCommitId,
+        long CurrentGameTimeTicks,
+        string CurrentStateHash,
+        string CurrentPayloadChecksum,
+        long CurrentSnapshotSeq,
+        string TotalChecksum);
+
+    /// <summary>快照行身份字段（回退候选的交叉校验基准）。</summary>
+    private sealed record SnapshotRow(long WorldVersion, string CommitId, string StateHash, string PayloadChecksum);
 
     private sealed record MetaRow(long CurrentWorldVersion, string CurrentCommitId, long CurrentSnapshotSeq);
 }

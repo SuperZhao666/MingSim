@@ -43,6 +43,18 @@ public static class SnapshotCodec
     /// <summary>对任意字节计算 SHA-256 十六进制校验和；用于快照载荷与整库提交校验。</summary>
     public static string ComputeChecksum(ReadOnlySpan<byte> data) => Convert.ToHexString(SHA256.HashData(data));
 
+    /// <summary>只读载荷的格式版本字节（1 = v1 旧档、2 = 当前格式、-1 = 缺少 MSNAP 魔数或载荷过短）。
+    /// 供恢复路径在"直接解码 vs 先迁移"之间选择，不解析其余内容。</summary>
+    public static int PeekFormatVersion(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < Magic.Length + 1 || !payload[..Magic.Length].SequenceEqual(Magic))
+        {
+            return -1;
+        }
+
+        return payload[Magic.Length];
+    }
+
     /// <summary>把一次捕获的完整快照编码为规范化字节。同一快照编码结果稳定可复现。</summary>
     public static byte[] Serialize(RealtimeSnapshot snapshot)
     {

@@ -684,7 +684,7 @@ public sealed class RealtimeSimulationRuntime
                     ? new RealtimeCommandResult(previous.Accepted, command.CommandId, "命令已按幂等记录处理。",
                         previous.ErrorCodes.Select(code => new SimulationError(code, code)).ToArray(), previous.IngressSequence,
                         previous.AcceptedGameTime, previous.ResultingWorldVersion)
-                    : Reject(command.CommandId, "同一命令编号不能携带不同的命令内容。", "IDEMPOTENCY_CONFLICT", ingressSequence,
+                    : Reject(candidate, command.CommandId, "同一命令编号不能携带不同的命令内容。", "IDEMPOTENCY_CONFLICT", ingressSequence,
                         candidate.State.GameTime, candidate.State.WorldVersion);
                 var duplicateEvents = new List<DomainEvent>();
                 duplicateEvents.Add(CreateEvent(candidate, command.CommandId, duplicate ? "CommandDeduplicated" : "CommandRejected",
@@ -717,11 +717,11 @@ public sealed class RealtimeSimulationRuntime
         RealtimeCommandResult result;
         if (!IsValidId(command.ActorId.Value))
         {
-            result = Reject(command.CommandId, "命令中的角色编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            result = Reject(candidate, command.CommandId, "命令中的角色编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
         else if (command.ExpectedWorldVersion != candidate.State.WorldVersion)
         {
-            result = Reject(command.CommandId, "命令基于过期世界版本。", "STATE_VERSION_CONFLICT", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            result = Reject(candidate, command.CommandId, "命令基于过期世界版本。", "STATE_VERSION_CONFLICT", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
         else
         {
@@ -734,7 +734,7 @@ public sealed class RealtimeSimulationRuntime
                 CreateDecreeCommand decree => ApplyDecree(candidate, decree, ingressSequence, acceptedAt, events),
                 SetPausedCommand pause => ApplyPause(candidate, pause, ingressSequence, acceptedAt),
                 SetSimulationSpeedCommand speed => ApplySpeed(candidate, speed, ingressSequence, acceptedAt),
-                _ => Reject(command.CommandId, "未知实时命令类型。", "UNKNOWN_COMMAND", ingressSequence, acceptedAt, candidate.State.WorldVersion),
+                _ => Reject(candidate, command.CommandId, "未知实时命令类型。", "UNKNOWN_COMMAND", ingressSequence, acceptedAt, candidate.State.WorldVersion),
             };
         }
 
@@ -776,33 +776,33 @@ public sealed class RealtimeSimulationRuntime
     {
         if (!IsValidId(command.ActorId.Value) || !IsValidId(command.ArmyId.Value) || !IsValidId(command.DestinationId.Value))
         {
-            return Reject(command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (!candidate.State.Military.Armies.TryGetValue(command.ArmyId, out var army))
         {
-            return Reject(command.CommandId, $"军队 {command.ArmyId} 不存在。", "ARMY_NOT_FOUND", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, $"军队 {command.ArmyId} 不存在。", "ARMY_NOT_FOUND", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (candidate.State.Movements.ContainsKey(command.ArmyId))
         {
-            return Reject(command.CommandId, "该军队已经在执行另一条行军。", "ARMY_ALREADY_IN_TRANSIT", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "该军队已经在执行另一条行军。", "ARMY_ALREADY_IN_TRANSIT", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         var authorization = _authorizer.Check(candidate.State, command.ActorId, GameCapability.MoveArmy, command.ArmyId.Value);
         if (!authorization.Allowed)
         {
-            return Reject(command.CommandId, authorization.Reason, "TOOL_SCOPE_DENIED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, authorization.Reason, "TOOL_SCOPE_DENIED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (command.TravelHours <= 0 || command.TravelHours > 24 * 365)
         {
-            return Reject(command.CommandId, "行军时间必须在 1 小时到 365 天之间。", "INVALID_TRAVEL_TIME", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "行军时间必须在 1 小时到 365 天之间。", "INVALID_TRAVEL_TIME", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (!candidate.State.Map.Contains(command.DestinationId) || !candidate.State.Map.IsAdjacent(army.LocationId, command.DestinationId))
         {
-            return Reject(command.CommandId, "目标地区必须存在且与军队当前地区相邻。", "PROVINCE_NOT_ADJACENT", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "目标地区必须存在且与军队当前地区相邻。", "PROVINCE_NOT_ADJACENT", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         var due = acceptedAt.Add(TimeSpan.FromHours(command.TravelHours));
@@ -833,60 +833,60 @@ public sealed class RealtimeSimulationRuntime
     {
         if (!IsValidId(command.ActorId.Value) || !IsValidId(command.ShipmentId.Value) || !IsValidId(command.RouteId.Value))
         {
-            return Reject(command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (command.GrainQuantity <= 0)
         {
-            return Reject(command.CommandId, "运输粮食数量必须为正数。", "INVALID_GRAIN_QUANTITY", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "运输粮食数量必须为正数。", "INVALID_GRAIN_QUANTITY", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (candidate.State.Logistics.Shipments.ContainsKey(command.ShipmentId))
         {
-            return Reject(command.CommandId, "运输单编号已经存在。", "SHIPMENT_ALREADY_EXISTS", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "运输单编号已经存在。", "SHIPMENT_ALREADY_EXISTS", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (!candidate.State.Logistics.Routes.TryGetValue(command.RouteId, out var route))
         {
-            return Reject(command.CommandId, "路线不存在。", "ROUTE_NOT_FOUND", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "路线不存在。", "ROUTE_NOT_FOUND", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         var authorization = _authorizer.Check(candidate.State, command.ActorId, GameCapability.PlanLogistics, command.RouteId.Value);
         if (!authorization.Allowed)
         {
-            return Reject(command.CommandId, authorization.Reason, "TOOL_SCOPE_DENIED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, authorization.Reason, "TOOL_SCOPE_DENIED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (command.Escort && candidate.State.Economy.Treasury.Silver < ScenarioState.DesignEscortCostSilver)
         {
-            return Reject(command.CommandId, "国库银两不足以支付护卫费用。", "ESCORT_BUDGET_INSUFFICIENT", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "国库银两不足以支付护卫费用。", "ESCORT_BUDGET_INSUFFICIENT", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         var source = candidate.State.Logistics.Stockpiles[route.FromStockpileId];
         var destination = candidate.State.Logistics.Stockpiles[route.ToStockpileId];
         if (!GrainLogisticsRules.HasEnoughSourceGrain(source, command.GrainQuantity))
         {
-            return Reject(command.CommandId, "起点库存不足。", "INSUFFICIENT_GRAIN", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "起点库存不足。", "INSUFFICIENT_GRAIN", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (!GrainLogisticsRules.FitsRouteCapacity(candidate.State.Logistics, route, command.GrainQuantity))
         {
-            return Reject(command.CommandId, "路线在途容量不足。", "ROUTE_CAPACITY_EXCEEDED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "路线在途容量不足。", "ROUTE_CAPACITY_EXCEEDED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (!GrainLogisticsRules.TryCalculateArrival(route, command.GrainQuantity, out var plannedDelivery, out _))
         {
-            return Reject(command.CommandId, "运输损耗计算超出安全范围。", "LOSS_CALCULATION_OVERFLOW", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "运输损耗计算超出安全范围。", "LOSS_CALCULATION_OVERFLOW", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (!GrainLogisticsRules.FitsDestinationCapacity(candidate.State.Logistics, destination, plannedDelivery))
         {
-            return Reject(command.CommandId, "目的地库存容量不足。", "DESTINATION_CAPACITY_EXCEEDED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "目的地库存容量不足。", "DESTINATION_CAPACITY_EXCEEDED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (!source.TryTakeGrain(command.GrainQuantity))
         {
-            return Reject(command.CommandId, "起点库存扣减失败。", "INSUFFICIENT_GRAIN", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "起点库存扣减失败。", "INSUFFICIENT_GRAIN", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         // 每次调粮都动用地方车马征发：地方负担升高（DESIGN，doc 03 §7.1）；只在场景规则启用时生效。
@@ -918,7 +918,7 @@ public sealed class RealtimeSimulationRuntime
         if (!IsValidId(command.CommandId) || !IsValidId(command.ActorId.Value) ||
             !IsValidId(command.DecreeId.Value) || !IsValidId(command.ResponsibleActorId.Value))
         {
-            return Reject(command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (string.IsNullOrWhiteSpace(command.Goal))
@@ -1013,7 +1013,7 @@ public sealed class RealtimeSimulationRuntime
         events.Add(CreateEvent(candidate, command.CommandId, "DecreeRejected", acceptedAt,
             ("decree_id", command.DecreeId.Value), ("code", code), ("reason", message)));
         candidate.Outbox.Add(events[^1]);
-        return Reject(command.CommandId, message, code, ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        return Reject(candidate, command.CommandId, message, code, ingressSequence, acceptedAt, candidate.State.WorldVersion);
     }
 
     private RealtimeCommandResult ApplyPause(WorkingCopy candidate, SetPausedCommand command, long ingressSequence, GameTime acceptedAt)
@@ -1030,7 +1030,7 @@ public sealed class RealtimeSimulationRuntime
         }
         catch (ArgumentOutOfRangeException)
         {
-            return Reject(command.CommandId, "speed must be finite and between 0.25 and 5", "INVALID_SPEED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "speed must be finite and between 0.25 and 5", "INVALID_SPEED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         candidate.Speed = command.Speed;
@@ -1429,7 +1429,9 @@ public sealed class RealtimeSimulationRuntime
         // 让上层把整个会话视为致命错误（数据库始终保持上一个完整提交，绝不写半状态）。
         if (_commitStore is not null)
         {
-            var receipt = _commitStore.CommitWorld(new CommitPackage(CaptureSnapshot(), newEvents));
+            // 拒绝/过期结果随同一 CommitPackage 与 snapshot/outbox 单事务落盘（P1-PERSIST-01）：
+            // Reject 本身不再执行任何 DB I/O，只把 InputOutcome 挂在 WorkingCopy 上交给本方法。
+            var receipt = _commitStore.CommitWorld(new CommitPackage(CaptureSnapshot(), newEvents, candidate.PendingOutcome));
             if (!receipt.Success)
             {
                 throw new InvalidOperationException($"提交商店写入失败，中止推进：{receipt.Error}");
@@ -1502,10 +1504,14 @@ public sealed class RealtimeSimulationRuntime
     private static RealtimeCommandResult Accepted(string commandId, string message, long ingress, GameTime acceptedAt, long version) =>
         new(true, commandId, message, NoErrors, ingress, acceptedAt, version);
 
-    private RealtimeCommandResult Reject(string commandId, string message, string code, long ingress, GameTime acceptedAt, long version)
+    /// <summary>
+    /// 纯结果构造（P1-PERSIST-01：Reject 不得自行执行任何 DB I/O）：把拒绝结果挂在候选提交的
+    /// PendingOutcome 上，由 CommitWorkingCopy 随 CommitPackage 与 snapshot/outbox 同一事务落盘。
+    /// 世界不变，重试同一命令得到同一结论（doc 08 §5）。
+    /// </summary>
+    private RealtimeCommandResult Reject(WorkingCopy candidate, string commandId, string message, string code, long ingress, GameTime acceptedAt, long version)
     {
-        // 未改变世界的拒绝也要持久化（doc 08 §5）：重试同一命令必须得到同一结论。
-        _commitStore?.RecordOutcome(new InputOutcome(commandId, code, message, version));
+        candidate.PendingOutcome = new InputOutcome(commandId, code, message, version);
         return new(false, commandId, message, new ReadOnlyCollection<SimulationError>([new SimulationError(code, message)]), ingress, acceptedAt, version);
     }
 
@@ -1537,6 +1543,9 @@ public sealed class RealtimeSimulationRuntime
         public long NextEventSequence { get; set; } = nextEventSequence;
         public long PendingWorldVersion { get; set; } = state.WorldVersion;
         public string PendingCommitId { get; set; } = state.CommitId;
+
+        /// <summary>本次提交携带的拒绝/过期结果（Reject 纯化后不再自行做持久化，随 CommitPackage 同事务落盘）。</summary>
+        public InputOutcome? PendingOutcome { get; set; }
     }
 }
 

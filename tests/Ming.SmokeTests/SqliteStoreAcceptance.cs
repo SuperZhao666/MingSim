@@ -28,6 +28,10 @@ internal static class SqliteStoreAcceptance
         SqliteV1SingleByteContentCorruptionFailsClosed();
         SqliteCorruptedNewSnapshotFallsBackToPreviousReady();
         SqliteMigrationFailureFailsClosed();
+        SqliteCommitWorldThreeVersionsRestoreConsistent();
+        SqliteLegalPayloadSwapNeverPublished();
+        SqliteBlobBodyTamperingFailsClosed();
+        SqliteRejectedOutcomeAtomicWithSnapshot();
     }
 
     private static void SqliteCommitPersistsStateJournalAndSnapshotAtomically()
@@ -317,9 +321,12 @@ internal static class SqliteStoreAcceptance
                 StageAndCommit(store, worldId, snapshot);
             }
 
-            // 把最新快照行替换为"真实 v1 档"（schema4 哈希 + v1 布局；snapshot_blob 不在整库校验和覆盖列内）。
+            // 把最新快照行替换为"真实 v1 档"（schema4 哈希 + v1 布局），并把整库校验和
+            // 重算为 v1 时代布局（不覆盖 blob 的旧布局）——真实 v1 档由 v1 时代代码写入，
+            // 其 total_checksum 只覆盖元数据列；替换后必须自洽，恢复才能走"旧布局校验 → 迁移"路径。
             var realV1 = Program.BuildRealV1Fixture(snapshot, "MSNAP"u8.ToArray(), snapshot.StateHash, snapshot.PayloadChecksum);
             ReplaceSnapshotBlob(dbPath, worldId, LatestSnapshotSeq(dbPath, worldId), realV1);
+            ResealArchiveAsLegacy(dbPath, worldId);
 
             var restored = RealtimeSimulationRuntime.Restore(SqliteCommitStore.RestoreLatest(dbPath, worldId));
             Program.Require(restored.StateHash == runtime.StateHash,
@@ -478,6 +485,298 @@ internal static class SqliteStoreAcceptance
         }
     }
 
+    /// <summary>
+    /// P1-PERSIST-01 验收：真实 runtime 注入 SqliteCommitStore，连续 3 次不同 WorldVersion 提交
+    /// （不走 StageAndCommit 辅助，全部经 CommitWorld 单事务入口），从新连接恢复后
+    /// canonical hash / outbox 事件流 / WorldVersion 必须与提交时完全一致；
+    /// 且提交序列（snapshot_seq）独立于 WorldVersion 单调推进。
+    /// </summary>
+    private static void SqliteCommitWorldThreeVersionsRestoreConsistent()
+    {
+        var worldId = new WorldId("ningyuan-1629");
+        var dbPath = CreateDbPath();
+        try
+        {
+            string originalHash;
+            long finalVersion;
+            string[] originalFingerprints;
+            long latestSnapshotSeq;
+            long metaWorldVersion;
+            using (var store = new SqliteCommitStore(dbPath, worldId))
+            {
+                var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld(), store);
+                // 连续 3 次不同 WorldVersion 的提交全部经真实 runtime → CommitWorld 落盘（不走 StageAndCommit）。
+                // 提交都在同一安全点（GameTime 不变）完成——避开 #35 已知 P2 债务
+                // "场景起点未序列化 → 时间推进后的快照往返哈希漂移"（恢复时间推进档须先修该债务，
+                // 见 PR 风险节；本任务只验收单事务入口与完整性链）。
+                // 最后一次提交必须是"非命令提交"（运输出发的即时调度事件提交，收件箱为空）：
+                // 命令提交的快照按设计携带"正在提交的那条命令"（出队在提交之后），恢复实例需重放
+                // 幂等收敛，瞬时哈希/outbox 与提交实例不同；以空收件箱的最终提交做一致性基准。
+                runtime.SetPaused(true);
+                runtime.AdvanceTo(runtime.ReadModel.GameTime);
+                var version1 = runtime.ReadModel.WorldVersion;
+                runtime.SetPaused(false);
+                runtime.AdvanceTo(runtime.ReadModel.GameTime);
+                var version2 = runtime.ReadModel.WorldVersion;
+                Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "e2e-sqlite-1", 5_000)).Queued,
+                    "端到端调粮命令应进入收件箱");
+                var final = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+                Program.Require(final.Succeeded, "最后一次推进必须成功");
+                var version3 = runtime.ReadModel.WorldVersion;
+                Program.Require(version1 < version2 && version2 < version3,
+                    "连续 3 次提交必须产生严格递增的 WorldVersion");
+
+                originalHash = runtime.StateHash;
+                finalVersion = runtime.ReadModel.WorldVersion;
+                originalFingerprints = Program.EventFingerprints(runtime.OutboxEvents).ToArray();
+            }
+
+            // 新连接（新的只读连接）恢复，验证 hash/outbox/version 一致
+            var restored = RealtimeSimulationRuntime.Restore(SqliteCommitStore.RestoreLatest(dbPath, worldId));
+            Program.Require(restored.StateHash == originalHash,
+                "新连接恢复后 canonical hash 必须与提交时一致");
+            Program.Require(restored.ReadModel.WorldVersion == finalVersion,
+                "新连接恢复后 WorldVersion 必须一致");
+            Program.Require(Program.EventFingerprints(restored.OutboxEvents).SequenceEqual(originalFingerprints),
+                "新连接恢复后事件流（outbox）必须一致");
+
+            // 提交序列与 WorldVersion 区分：snapshot_seq 单调推进，meta 指向最新版本
+            latestSnapshotSeq = LatestSnapshotSeq(dbPath, worldId);
+            metaWorldVersion = ReadMetaWorldVersion(dbPath, worldId);
+            Program.Require(latestSnapshotSeq >= 3, "三次提交必须留下至少 3 个快照行（提交序列独立于 WorldVersion 推进）");
+            Program.Require(metaWorldVersion == finalVersion, "meta.current_world_version 必须指向最新提交版本");
+        }
+        finally
+        {
+            DeleteDbFiles(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// P1-PERSIST-05/06 验收：合法 save B 的 snapshot_blob 被另一份合法 payload（不同存档内容）
+    /// 整体替换后，RestoreLatest 必须拒绝或回退到上一个 READY，绝不把替换内容当 current 发布。
+    /// </summary>
+    private static void SqliteLegalPayloadSwapNeverPublished()
+    {
+        var worldId = new WorldId("ningyuan-1629");
+        var dbPath = CreateDbPath();
+        try
+        {
+            // 另一份"合法存档"的 payload：不同世界内容（不同命令/数量），但自洽（内部哈希一致）。
+            var foreignPayload = BuildForeignLegalPayload("swap-foreign");
+
+            // 存档 B：两次提交（READY A1 → READY A2）
+            var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
+            Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "swap-b1", 5_000)).Queued,
+                "B 档首批命令应进入收件箱");
+            runtime.AdvanceTo(runtime.ReadModel.GameTime);
+            using (var store = new SqliteCommitStore(dbPath, worldId))
+            {
+                StageAndCommit(store, worldId, runtime.CaptureSnapshot());
+            }
+
+            var previousHash = RealtimeSimulationRuntime.Restore(SqliteCommitStore.RestoreLatest(dbPath, worldId)).StateHash;
+            runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddHours(1)));
+            using (var store = new SqliteCommitStore(dbPath, worldId))
+            {
+                StageAndCommit(store, worldId, runtime.CaptureSnapshot());
+            }
+
+            // 用另一份合法 payload 整体替换最新快照行
+            ReplaceSnapshotBlob(dbPath, worldId, LatestSnapshotSeq(dbPath, worldId), foreignPayload);
+
+            RealtimeSnapshot restored;
+            try
+            {
+                restored = SqliteCommitStore.RestoreLatest(dbPath, worldId);
+            }
+            catch (InvalidDataException)
+            {
+                return; // 拒绝（fail-closed）也是合法结果
+            }
+
+            Program.Require(restored.StateHash == previousHash,
+                "合法 payload 整体替换后绝不把替换内容当 current 发布：必须回退到上一个 READY（或拒绝）");
+            var restoredVersion = RealtimeSimulationRuntime.Restore(restored).ReadModel.WorldVersion;
+            Program.Require(restoredVersion != runtime.ReadModel.WorldVersion,
+                "回退结果不得是替换 payload 的世界版本（替换内容绝不能发布）");
+        }
+        finally
+        {
+            DeleteDbFiles(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// P1-PERSIST-05 验收：state_blob / event_blob 任意字节篡改必须 fail-closed——
+    /// RestoreLatest 抛异常，绝不把篡改后的 blob 当 current 发布（即使快照本体仍可解码）。
+    /// </summary>
+    private static void SqliteBlobBodyTamperingFailsClosed()
+    {
+        var worldId = new WorldId("ningyuan-1629");
+        var dbPath = CreateDbPath();
+        try
+        {
+            var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
+            Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "blob-tamper", 5_000)).Queued,
+                "篡改测试命令应进入收件箱");
+            runtime.AdvanceTo(runtime.ReadModel.GameTime);
+            using (var store = new SqliteCommitStore(dbPath, worldId))
+            {
+                StageAndCommit(store, worldId, runtime.CaptureSnapshot());
+            }
+
+            // (a) event_blob 篡改：翻转日志行 blob 的最后一个字节
+            var eventBlob = ReadEventBlob(dbPath, worldId, 0);
+            var tamperedEvent = (byte[])eventBlob.Clone();
+            tamperedEvent[^1] ^= 0x01;
+            UpdateEventBlob(dbPath, worldId, 0, tamperedEvent);
+            Program.RequireThrowsAny(() => SqliteCommitStore.RestoreLatest(dbPath, worldId));
+            UpdateEventBlob(dbPath, worldId, 0, eventBlob); // 还原
+
+            // (b) state_blob 篡改：翻转状态行 blob 的最后一个字节
+            var currentVersion = runtime.ReadModel.WorldVersion;
+            var stateBlob = ReadStateBlob(dbPath, worldId, currentVersion);
+            var tamperedState = (byte[])stateBlob.Clone();
+            tamperedState[^1] ^= 0x01;
+            UpdateStateBlob(dbPath, worldId, currentVersion, tamperedState);
+            Program.RequireThrowsAny(() => SqliteCommitStore.RestoreLatest(dbPath, worldId));
+        }
+        finally
+        {
+            DeleteDbFiles(dbPath);
+        }
+    }
+
+    /// <summary>
+    /// P1-PERSIST-01 验收：拒绝命令的 outcome 与 snapshot 同一事务——
+    /// 单点崩溃后 command_outcomes 表行与快照内 CommandOutcomes 必须同时存在且一致。
+    /// </summary>
+    private static void SqliteRejectedOutcomeAtomicWithSnapshot()
+    {
+        // CreateLogisticsWorld 的世界编号是 logistics-world（含无物流权限的 "war" 角色）；
+        // 存储的世界编号必须与快照内世界一致，否则行/校验和会写进错位世界。
+        var worldId = new WorldId("logistics-world");
+        var dbPath = CreateDbPath();
+        try
+        {
+            using (var store = new SqliteCommitStore(dbPath, worldId))
+            {
+                var runtime = new RealtimeSimulationRuntime(Program.CreateLogisticsWorld(), store);
+                var denied = new CreateShipmentCommand(
+                    "sqlite-denied", new CharacterId("war"), new ShipmentId("shipment-sqlite-denied"),
+                    new RouteId("capital-ningyuan-grain"), 300, Program.FixedUtc, runtime.ReadModel.WorldVersion);
+                Program.Require(runtime.EnqueueCreateShipment(denied).Queued, "被拒命令应进入收件箱");
+                var result = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+                Program.Require(!result.CommandResults.Single().Accepted, "无物流权限的角色必须被拒绝");
+            }
+
+            // 崩溃后从新连接恢复：两个持久化面必须都包含同一拒绝结果（同事务保证）
+            var outcomeRow = ReadOutcomeRow(dbPath, worldId, "sqlite-denied");
+            Program.Require(outcomeRow is not null, "command_outcomes 表必须持久化拒绝结果");
+            var persistedOutcome = outcomeRow!.Value;
+            Program.Require(persistedOutcome.Code == "TOOL_SCOPE_DENIED", "outcome 行必须保留结构化错误码");
+
+            var restored = RealtimeSimulationRuntime.Restore(SqliteCommitStore.RestoreLatest(dbPath, worldId));
+            var outcome = restored.CommandOutcomes.SingleOrDefault(item => item.CommandId == "sqlite-denied");
+            Program.Require(outcome is not null && !outcome.Accepted && outcome.ErrorCodes.Contains("TOOL_SCOPE_DENIED"),
+                "快照内 CommandOutcomes 必须包含同一拒绝结果（与 command_outcomes 表同事务一致）");
+            Program.Require(persistedOutcome.Version == outcome!.ResultingWorldVersion,
+                "outcome 行与快照内 outcome 的世界版本必须一致");
+        }
+        finally
+        {
+            DeleteDbFiles(dbPath);
+        }
+    }
+
+    /// <summary>构造另一份自洽合法存档的 snapshot payload（内容与本存档不同，用于整体替换测试）。</summary>
+    private static byte[] BuildForeignLegalPayload(string commandId)
+    {
+        var other = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
+        Program.Require(other.EnqueueCreateShipment(Program.CreateShipment(other, commandId, 7_000)).Queued,
+            "外来合法 payload 命令应进入收件箱");
+        other.AdvanceTo(other.ReadModel.GameTime);
+        other.SetPaused(true);
+        other.AdvanceTo(other.ReadModel.GameTime);
+        return SnapshotCodec.Serialize(other.CaptureSnapshot());
+    }
+
+    private static byte[] ReadEventBlob(string dbPath, WorldId worldId, long eventSequence)
+    {
+        using var connection = new SqliteConnection($"Data Source={dbPath};Pooling=false");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT event_blob FROM event_journal WHERE world_id = $world AND event_sequence = $seq;";
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        command.Parameters.AddWithValue("$seq", eventSequence);
+        return command.ExecuteScalar() as byte[] ?? throw new InvalidDataException("事件行不存在。");
+    }
+
+    private static void UpdateEventBlob(string dbPath, WorldId worldId, long eventSequence, byte[] blob)
+    {
+        using var connection = new SqliteConnection($"Data Source={dbPath};Pooling=false");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE event_journal SET event_blob = $blob WHERE world_id = $world AND event_sequence = $seq;";
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        command.Parameters.AddWithValue("$seq", eventSequence);
+        command.Parameters.AddWithValue("$blob", blob);
+        command.ExecuteNonQuery();
+        connection.Close();
+    }
+
+    private static byte[] ReadStateBlob(string dbPath, WorldId worldId, long worldVersion)
+    {
+        using var connection = new SqliteConnection($"Data Source={dbPath};Pooling=false");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT state_blob FROM world_state WHERE world_id = $world AND world_version = $version;";
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        command.Parameters.AddWithValue("$version", worldVersion);
+        return command.ExecuteScalar() as byte[] ?? throw new InvalidDataException("状态行不存在。");
+    }
+
+    private static void UpdateStateBlob(string dbPath, WorldId worldId, long worldVersion, byte[] blob)
+    {
+        using var connection = new SqliteConnection($"Data Source={dbPath};Pooling=false");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE world_state SET state_blob = $blob WHERE world_id = $world AND world_version = $version;";
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        command.Parameters.AddWithValue("$version", worldVersion);
+        command.Parameters.AddWithValue("$blob", blob);
+        command.ExecuteNonQuery();
+        connection.Close();
+    }
+
+    private static (string Code, string Message, long Version)? ReadOutcomeRow(string dbPath, WorldId worldId, string commandId)
+    {
+        using var connection = new SqliteConnection($"Data Source={dbPath};Pooling=false");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT outcome_code, message, world_version FROM command_outcomes WHERE world_id = $world AND command_id = $commandId;";
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        command.Parameters.AddWithValue("$commandId", commandId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return (reader.GetString(0), reader.GetString(1), reader.GetInt64(2));
+    }
+
+    private static long ReadMetaWorldVersion(string dbPath, WorldId worldId)
+    {
+        using var connection = new SqliteConnection($"Data Source={dbPath};Pooling=false");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT current_world_version FROM world_meta WHERE world_id = $world;";
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        return Convert.ToInt64(command.ExecuteScalar());
+    }
+
     private static long LatestSnapshotSeq(string dbPath, WorldId worldId)
     {
         using var connection = new SqliteConnection($"Data Source={dbPath};Pooling=false");
@@ -559,5 +858,69 @@ internal static class SqliteStoreAcceptance
         }
 
         return -1;
+    }
+
+    /// <summary>
+    /// 测试夹具：把存档重算为"v1 时代布局"（legacy checksum，只覆盖元数据列、magic
+    /// mingsim-commit-v1）并写回 meta.total_checksum——模拟真实 v1 档由 v1 时代代码写入的自洽校验和。
+    /// 布局必须与生产代码 <c>ComputeLegacyTotalChecksum</c> 逐字节一致（提交/恢复两侧布局约定）。
+    /// </summary>
+    private static void ResealArchiveAsLegacy(string dbPath, WorldId worldId)
+    {
+        using var connection = new SqliteConnection($"Data Source={dbPath};Pooling=false");
+        connection.Open();
+        var totalChecksum = ComputeLegacyTotalChecksum(connection, worldId);
+        using (var update = connection.CreateCommand())
+        {
+            update.CommandText = "UPDATE world_meta SET total_checksum = $total WHERE world_id = $world;";
+            update.Parameters.AddWithValue("$world", worldId.Value);
+            update.Parameters.AddWithValue("$total", totalChecksum);
+            update.ExecuteNonQuery();
+        }
+
+        connection.Close();
+    }
+
+    /// <summary>v1 时代整库校验和（元数据列全覆盖、不含任何 blob 字节）：与生产 legacy 布局逐字节一致。</summary>
+    private static string ComputeLegacyTotalChecksum(SqliteConnection connection, WorldId worldId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT 'meta', world_id, schema_version, current_world_version, current_commit_id,
+                   current_game_time_ticks, current_state_hash, current_payload_checksum,
+                   current_snapshot_seq, ''
+            FROM world_meta WHERE world_id = $world
+            UNION ALL
+            SELECT 'state', world_id, world_version, 0, commit_id, game_time_ticks, state_hash, '', 0, ''
+            FROM world_state WHERE world_id = $world
+            UNION ALL
+            SELECT 'journal', world_id, event_sequence, 0, event_id, 0, '', '', 0, ''
+            FROM event_journal WHERE world_id = $world
+            UNION ALL
+            SELECT 'snapshot', world_id, snapshot_seq, 0, commit_id, 0, state_hash, payload_checksum, 0, ''
+            FROM snapshots WHERE world_id = $world;
+            """;
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream, new UTF8Encoding(false), leaveOpen: true);
+        // 与生产布局逐字节一致：BinaryWriter.Write(string) 写 7-bit 长度前缀 + UTF-8 字节。
+        writer.Write("mingsim-commit-v1");
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            writer.Write(reader.GetString(0));
+            writer.Write(reader.GetString(1));
+            writer.Write(reader.GetInt64(2));
+            writer.Write(reader.GetInt64(3));
+            writer.Write(reader.GetString(4));
+            writer.Write(reader.GetInt64(5));
+            writer.Write(reader.GetString(6));
+            writer.Write(reader.GetString(7));
+            writer.Write(reader.GetInt64(8));
+            writer.Write(reader.GetString(9));
+        }
+
+        writer.Flush();
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream.ToArray()));
     }
 }

@@ -2123,10 +2123,14 @@ internal static class Program
             "经提交商店恢复后事件流必须一致");
     }
 
-    /// <summary>ICommitStore 端口：未改变世界的拒绝结果也要持久化（doc 08 §5 重试得到同一结论）。</summary>
+    /// <summary>
+    /// Reject 纯化（P1-PERSIST-01）：拒绝/过期结果不再由 Reject 单独调用 RecordOutcome（独立 DB I/O），
+    /// 而是随 CommitPackage.Outcome 与 snapshot/outbox 同一事务落盘（doc 08 §5 重试得到同一结论）。
+    /// 本测试用 spy store 证明：拒绝路径绝不触发 RecordOutcome，InputOutcome 只经 CommitWorld 传递。
+    /// </summary>
     private static void ShouldPersistRejectedOutcomeThroughCommitStore()
     {
-        var store = new InMemoryCommitStore();
+        var store = new OutcomeSpyStore();
         var runtime = new RealtimeSimulationRuntime(CreateLogisticsWorld(), store);
         var denied = new CreateShipmentCommand(
             "store-denied", new CharacterId("war"), new ShipmentId("shipment-store-denied"),
@@ -2134,9 +2138,34 @@ internal static class Program
         Require(runtime.EnqueueCreateShipment(denied).Queued, "被拒命令应进入收件箱");
         var result = runtime.AdvanceTo(runtime.ReadModel.GameTime);
         Require(!result.CommandResults.Single().Accepted, "无物流权限的角色必须被拒绝");
-        Require(store.Outcomes.ContainsKey("store-denied"), "被拒绝命令的终态 Outcome 必须持久化");
-        Require(store.Outcomes["store-denied"].OutcomeCode == "TOOL_SCOPE_DENIED",
-            "持久化的拒绝结果必须保留结构化错误码");
+        Require(store.RecordOutcomeCalls == 0,
+            "Reject 不得再直接调用 RecordOutcome——拒绝结果必须随 CommitPackage 同事务落盘");
+        Require(store.LastPackage?.Outcome is not null &&
+                store.LastPackage.Outcome.OutcomeCode == "TOOL_SCOPE_DENIED" &&
+                store.LastPackage.Outcome.CommandId == "store-denied",
+            "拒绝结果必须作为 InputOutcome 随 CommitPackage 与 snapshot/outbox 一起传递");
+    }
+
+    /// <summary>验证 Reject 纯化的 spy store：记录 RecordOutcome 调用次数并捕获最后一次 CommitPackage。</summary>
+    private sealed class OutcomeSpyStore : ICommitStore
+    {
+        public int RecordOutcomeCalls { get; private set; }
+
+        public CommitPackage? LastPackage { get; private set; }
+
+        public CommitReceipt CommitWorld(CommitPackage package)
+        {
+            LastPackage = package;
+            return new CommitReceipt(true, GetSnapshotState(package.Snapshot).WorldVersion, null);
+        }
+
+        public CommitReceipt RecordOutcome(InputOutcome outcome)
+        {
+            RecordOutcomeCalls++;
+            return new CommitReceipt(true, outcome.WorldVersion, null);
+        }
+
+        public LoadedWorld? LoadCommittedWorld() => null;
     }
 
     /// <summary>场景装配：world.json 装配出 6 库存/5 路线/5 授权，且前线场景规则启用。</summary>
