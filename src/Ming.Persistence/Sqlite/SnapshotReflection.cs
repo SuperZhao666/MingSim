@@ -174,6 +174,33 @@ internal static class SnapshotReflection
         ]);
 
     /// <summary>
+    /// 用重新计算的 StateHash/PayloadChecksum 重建同一内容的快照（迁移 re-seal）。
+    /// 快照内容（世界、调度、收件箱、outbox、序列等）原样保留，只替换两个校验字段；
+    /// 快照 schemaVersion 归一化为当前 <see cref="RealtimeSnapshotSchema.Version"/>——迁移重建的
+    /// 对象就是当前布局（旧档携带的旧 schema 编号不再适用，否则 Runtime.Restore 的版本门禁会拒绝）。
+    /// </summary>
+    public static RealtimeSnapshot Reseal(RealtimeSnapshot snapshot, string stateHash, string payloadChecksum) =>
+        CreateSnapshot(
+            RealtimeSnapshotSchema.Version,
+            GetState(snapshot),
+            GetScheduledEvents(snapshot),
+            GetPendingCommands(snapshot),
+            GetNextCreationSequence(snapshot),
+            GetNextIngressSequence(snapshot),
+            GetCommandOutcomes(snapshot),
+            GetRandomState(snapshot),
+            GetOutboxEvents(snapshot),
+            GetRealGameTickRemainder(snapshot),
+            stateHash,
+            payloadChecksum,
+            GetInitialGameTime(snapshot),
+            GetInitialWorldVersion(snapshot),
+            GetProcessedScheduledEventCount(snapshot),
+            GetIsPaused(snapshot),
+            GetSpeed(snapshot),
+            GetNextEventSequence(snapshot));
+
+    /// <summary>
     /// 反序列化重建 WorldState 后，把时间、版本、CommitId 写回。
     /// WorldVersion/CommitId 是 private set，GameTime 由 private set 持有；这些写入口
     /// 在 Domain 中不公开，这里仅用于把规范化字节恢复成与提交时完全相同的对象。

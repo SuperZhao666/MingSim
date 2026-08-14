@@ -22,15 +22,19 @@ namespace MingSim.Persistence.Sqlite;
 /// 为什么不用 JSON/反射序列化器：权威恢复要求字节级往返一致与版本可控，任何文化格式、
 /// 字典枚举顺序或反射字段名变化都会破坏确定性。这里沿用 CanonicalStateHasher 的编码风格
 /// （NFC 归一化、长度前缀、显式端序、集合稳定排序），保证"写入库里的字节 == 恢复出来的对象"。
-/// 格式带版本头：未来字段变化时递增版本，旧存档按旧版本读取，未知更高版本明确拒绝。
+/// 格式带版本头：未来字段变化时递增版本，未知更高版本明确拒绝。
+/// 格式版本 1→2 只存在一条真实差异：WorldState 末尾新增 AppointmentState 段（#28 引入）。
+/// 对 v1 旧档先尝试迁移（<see cref="MigrateV1ToV2"/>：读 v1 段 → 写 v2 段，任命为空），
+/// 迁移失败即拒绝（fail-closed），绝不把旧档按新格式静默误读；不预造版本注册表。
 /// 反序列化会重建 WorldState 等对象，但不会绕过 RealtimeSimulationRuntime.Restore 的
 /// canonical hash / payload checksum 校验，调用方拿到的仍是未验证的候选快照。
 /// </remarks>
 public static class SnapshotCodec
 {
     // 格式版本 1→2：WorldState 编码新增 AppointmentState 段（任命必须随快照持久化）。
-    // 版本递增让旧存档被显式拒绝而不是静默误读（fail-closed）；旧存档需迁移或重建。
+    // v1 旧档先尝试迁移到 v2（任命为空）再读取，未知更高版本仍显式拒绝（fail-closed）。
     private const byte FormatVersion = 2;
+    private const byte FormatVersionV1 = 1;
 
     private static readonly byte[] Magic = "MSNAP"u8.ToArray();
     private static readonly byte[] WorldMagic = "MSWLD"u8.ToArray();
@@ -88,7 +92,7 @@ public static class SnapshotCodec
         }
 
         var schemaVersion = ReadInt32(reader);
-        var state = ReadWorldState(reader);
+        var state = ReadWorldState(reader, readAppointments: true);
         var scheduledEvents = ReadScheduledEvents(reader);
         var pendingCommands = ReadPendingCommands(reader);
         var nextCreationSequence = ReadInt64(reader);
@@ -131,6 +135,108 @@ public static class SnapshotCodec
             nextEventSequence);
     }
 
+    /// <summary>
+    /// 快照载荷格式迁移：v1 → v2（读 v1 段 → 写 v2 段）。
+    /// </summary>
+    /// <remarks>
+    /// 只实现真实存在的 v1→v2 一条路径，不预造版本注册表：
+    /// - v1 载荷：按 v1 布局读取全部段（WorldState 无任命段，任命为空），再用当前格式重新序列化；
+    /// - 已是 v2 的载荷原样返回（幂等，调用方无需先探版本）；
+    /// - 未知更高版本抛异常（fail-closed），绝不把旧档按新格式静默误读。
+    /// 先验证、再 re-seal（独立审查 P1/P1-1）：
+    /// 1. P1：v1 时代载荷携带的 StateHash/PayloadChecksum 由旧哈希规则（schema4、无任命段）计算，
+    ///    当前运行时按 schema5 重算必然失配，迁移后必须用当前规则重算二者（<see cref="RealtimeSnapshotHash"/>）
+    ///    才能通过 <see cref="RealtimeSimulationRuntime.Restore"/> 的权威校验；
+    /// 2. P1-1：丢弃载荷自带校验字段前，先用 schema4 规则对解码出的内容重算 StateHash/PayloadChecksum
+    ///    并与载荷自带值逐字节比对——内容损坏但结构可解码的 v1 档会在这里失配而被拒绝（fail-closed，
+    ///    交给调用方回退链处理），绝不带病 re-seal 静默通过（相对 v1 时代 fail-closed 的严格性回归）。
+    /// </remarks>
+    public static byte[] MigrateV1ToV2(byte[] payload)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        using var stream = new MemoryStream(payload, writable: false);
+        using var reader = new BinaryReader(stream, new UTF8Encoding(false), leaveOpen: true);
+        if (!reader.ReadBytes(Magic.Length).AsSpan().SequenceEqual(Magic))
+        {
+            throw new InvalidDataException("快照载荷缺少 MSNAP 魔数，不是本适配器写入的格式。");
+        }
+
+        var formatVersion = reader.ReadByte();
+        if (formatVersion == FormatVersion)
+        {
+            return payload;
+        }
+
+        if (formatVersion != FormatVersionV1)
+        {
+            throw new InvalidDataException($"不支持快照载荷格式版本 {formatVersion}（当前支持 {FormatVersion}）。");
+        }
+
+        // 读 v1 段（ReadString 使用严格 UTF-8 解码，非法字节即抛）。
+        var migrated = ReadV1Snapshot(reader);
+
+        // P1-1：先按 v1 记录版本（schema4）重算校验字段并与载荷自带值比对，不一致即拒绝。
+        var (v1StateHash, v1Checksum) = RealtimeSnapshotHash.ComputeV1Hashes(migrated);
+        if (!StringComparer.Ordinal.Equals(migrated.StateHash, v1StateHash) ||
+            !StringComparer.Ordinal.Equals(migrated.PayloadChecksum, v1Checksum))
+        {
+            throw new InvalidDataException(
+                "v1 存档内容校验失败：内容哈希与载荷自带校验字段不一致（可能被篡改或损坏）。");
+        }
+
+        // re-seal：校验通过后，用当前规则重算 StateHash/PayloadChecksum 并写 v2 段（fail-closed）。
+        var (stateHash, payloadChecksum) = RealtimeSnapshotHash.ComputeHashes(migrated);
+        return Serialize(SnapshotReflection.Reseal(migrated, stateHash, payloadChecksum));
+    }
+
+    /// <summary>按 v1 布局读取 v1 快照载荷的剩余段（WorldState 无任命段，任命为空）。</summary>
+    private static RealtimeSnapshot ReadV1Snapshot(BinaryReader reader)
+    {
+        // 写入顺序与 Deserialize 完全一致，仅 WorldState 段按 v1 布局读取（无任命段）。
+        var schemaVersion = ReadInt32(reader);
+        var state = ReadWorldState(reader, readAppointments: false);
+        var scheduledEvents = ReadScheduledEvents(reader);
+        var pendingCommands = ReadPendingCommands(reader);
+        var nextCreationSequence = ReadInt64(reader);
+        var nextIngressSequence = ReadInt64(reader);
+        var commandOutcomes = ReadCommandOutcomes(reader);
+        var randomState = ReadString(reader);
+        var outboxEvents = ReadOutboxEvents(reader);
+        var realGameTickRemainder = ReadDecimal(reader);
+        var initialGameTime = new GameTime(new DateTimeOffset(ReadInt64(reader), TimeSpan.Zero));
+        var initialWorldVersion = ReadInt64(reader);
+        var processedScheduledEventCount = ReadInt64(reader);
+        var isPaused = reader.ReadBoolean();
+        var speed = BitConverter.Int64BitsToDouble(ReadInt64(reader));
+        var stateHash = ReadString(reader);
+        var payloadChecksum = ReadString(reader);
+        var nextEventSequence = ReadInt64(reader);
+        if (reader.BaseStream.Position != reader.BaseStream.Length)
+        {
+            throw new InvalidDataException("v1 快照载荷末尾存在多余字节，迁移失败（fail-closed）。");
+        }
+
+        return SnapshotReflection.CreateSnapshot(
+            schemaVersion,
+            state,
+            scheduledEvents,
+            pendingCommands,
+            nextCreationSequence,
+            nextIngressSequence,
+            commandOutcomes,
+            randomState,
+            outboxEvents,
+            realGameTickRemainder,
+            stateHash,
+            payloadChecksum,
+            initialGameTime,
+            initialWorldVersion,
+            processedScheduledEventCount,
+            isPaused,
+            speed,
+            nextEventSequence);
+    }
+
     /// <summary>只编码 WorldState（world_state 表使用）；与快照内嵌的状态编码完全一致。</summary>
     public static byte[] SerializeWorld(WorldState state)
     {
@@ -145,6 +251,7 @@ public static class SnapshotCodec
     }
 
     /// <summary>从 world_state 行字节恢复 WorldState；结构损坏直接抛异常。</summary>
+    /// <remarks>格式版本 1（v1 存档的状态行）按 v1 布局读取：WorldState 无任命段，任命为空。</remarks>
     public static WorldState DeserializeWorld(byte[] payload)
     {
         ArgumentNullException.ThrowIfNull(payload);
@@ -155,12 +262,18 @@ public static class SnapshotCodec
             throw new InvalidDataException("状态载荷缺少 MSWLD 魔数。");
         }
 
-        if (reader.ReadByte() != FormatVersion)
+        var formatVersion = reader.ReadByte();
+        if (formatVersion == FormatVersionV1)
         {
-            throw new InvalidDataException("状态载荷格式版本不支持。");
+            return ReadWorldState(reader, readAppointments: false);
         }
 
-        return ReadWorldState(reader);
+        if (formatVersion != FormatVersion)
+        {
+            throw new InvalidDataException($"状态载荷格式版本 {formatVersion} 不支持。");
+        }
+
+        return ReadWorldState(reader, readAppointments: true);
     }
 
     /// <summary>只编码一条 DomainEvent（event_journal 行使用）；与快照内嵌的事件编码一致。</summary>
@@ -177,6 +290,8 @@ public static class SnapshotCodec
     }
 
     /// <summary>从 event_journal 行字节恢复 DomainEvent；结构损坏直接抛异常。</summary>
+    /// <remarks>事件段编码在格式 1→2 之间未变化（#28 只改了 WorldState 的任命段），
+    /// v1 存档的事件行仅版本字节不同，按同一布局读取。</remarks>
     public static DomainEvent DeserializeEvent(byte[] payload)
     {
         ArgumentNullException.ThrowIfNull(payload);
@@ -187,9 +302,10 @@ public static class SnapshotCodec
             throw new InvalidDataException("事件载荷缺少 MSEVT 魔数。");
         }
 
-        if (reader.ReadByte() != FormatVersion)
+        var formatVersion = reader.ReadByte();
+        if (formatVersion is not (FormatVersionV1 or FormatVersion))
         {
-            throw new InvalidDataException("事件载荷格式版本不支持。");
+            throw new InvalidDataException($"事件载荷格式版本 {formatVersion} 不支持。");
         }
 
         return ReadEvent(reader);
@@ -410,7 +526,7 @@ public static class SnapshotCodec
         }
     }
 
-    private static WorldState ReadWorldState(BinaryReader reader)
+    private static WorldState ReadWorldState(BinaryReader reader, bool readAppointments)
     {
         var worldId = new WorldId(ReadString(reader));
         var turnNumber = ReadInt32(reader);
@@ -580,19 +696,10 @@ public static class SnapshotCodec
                 ReadString(reader)));
         }
 
-        // 任命段（格式版本 2 起）：写入顺序 personId、officeId、scope、limit、effectiveFrom、effectiveTo
-        var appointmentCount = ReadInt32(reader);
-        var appointments = new List<AppointmentState>(appointmentCount);
-        for (var index = 0; index < appointmentCount; index++)
-        {
-            appointments.Add(new AppointmentState(
-                new CharacterId(ReadString(reader)),
-                new InstitutionId(ReadString(reader)),
-                ReadNullableString(reader),
-                ReadNullableInt64(reader),
-                new GameTime(new DateTimeOffset(ReadInt64(reader), TimeSpan.Zero)),
-                ReadNullableTicks(reader)));
-        }
+        // 任命段（格式版本 2 起）：写入顺序 personId、officeId、scope、limit、effectiveFrom、effectiveTo。
+        // v1 布局（readAppointments=false）没有该段，任命为空——与 v1 时代的世界语义一致。
+        var appointments = readAppointments ? ReadAppointments(reader) : [];
+
 
         var world = WorldState.CreateInitial(
             worldId,
@@ -638,6 +745,25 @@ public static class SnapshotCodec
 
         SnapshotReflection.SetWorldCommitState(world, new GameTime(new DateTimeOffset(gameTimeTicks, TimeSpan.Zero)), worldVersion, commitId);
         return world;
+    }
+
+    /// <summary>读取任命段（格式版本 2 起）；写入顺序 personId、officeId、scope、limit、effectiveFrom、effectiveTo。</summary>
+    private static IReadOnlyList<AppointmentState> ReadAppointments(BinaryReader reader)
+    {
+        var appointmentCount = ReadInt32(reader);
+        var appointments = new List<AppointmentState>(appointmentCount);
+        for (var index = 0; index < appointmentCount; index++)
+        {
+            appointments.Add(new AppointmentState(
+                new CharacterId(ReadString(reader)),
+                new InstitutionId(ReadString(reader)),
+                ReadNullableString(reader),
+                ReadNullableInt64(reader),
+                new GameTime(new DateTimeOffset(ReadInt64(reader), TimeSpan.Zero)),
+                ReadNullableTicks(reader)));
+        }
+
+        return appointments;
     }
 
     private static void WriteScheduledEvents(BinaryWriter writer, IReadOnlyList<ScheduledSimulationEvent> scheduledEvents)
@@ -876,6 +1002,10 @@ public static class SnapshotCodec
         writer.Write(bytes);
     }
 
+    // 严格 UTF-8 解码（throwOnInvalidBytes）：v1 读取也必须抛错而非替换字符静默接受损坏
+    // （独立审查 P1-1）；正常写入的字符串恒为合法 UTF-8，因此对合法往返无影响。
+    private static readonly UTF8Encoding StrictUtf8 = new(false, throwOnInvalidBytes: true);
+
     private static string ReadString(BinaryReader reader)
     {
         var length = ReadInt32(reader);
@@ -884,7 +1014,14 @@ public static class SnapshotCodec
             throw new InvalidDataException("字符串长度不能为负数。");
         }
 
-        return Encoding.UTF8.GetString(reader.ReadBytes(length));
+        try
+        {
+            return StrictUtf8.GetString(reader.ReadBytes(length));
+        }
+        catch (DecoderFallbackException exception)
+        {
+            throw new InvalidDataException("字符串包含非法 UTF-8 字节，载荷损坏。", exception);
+        }
     }
 
     private static void WriteNullableString(BinaryWriter writer, string? value)
