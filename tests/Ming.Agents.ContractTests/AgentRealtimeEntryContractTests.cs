@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using MingSim.Agents.Decision;
+using MingSim.Agents.Providers;
 using MingSim.Agents.Realtime;
 using MingSim.Agents.Runtime;
 using MingSim.Domain;
@@ -10,6 +11,7 @@ using MingSim.Domain.Economy;
 using MingSim.Domain.Intents;
 using MingSim.Domain.Map;
 using MingSim.Domain.Military;
+using MingSim.Domain.Realtime;
 using MingSim.Simulation.Realtime;
 
 namespace MingSim.Agents.ContractTests;
@@ -32,7 +34,7 @@ internal static partial class Program
         var entry = new AgentRealtimeEntry(runtime);
         var intents = new AgentRuntime().CollectDecisions(
             world,
-            [new AgentRegistration(new CharacterId("works"), new RuleBasedMinisterAgent(MinisterFocus.Logistics))]);
+            [new AgentRegistration(new CharacterId("works"), new UtilityMinisterAgent(MinisterFocus.Logistics))]);
         var before = runtime.ReadModel;
 
         var results = entry.Submit(world, intents);
@@ -226,6 +228,171 @@ internal static partial class Program
             $"Agent 入口源码/测试出现秘密或绝对路径：{Environment.NewLine}{string.Join(Environment.NewLine, hits)}");
     }
 
+    /// <summary>
+    /// 效用打分确定性：同一上下文重复决策必须得到同一意图；
+    /// 三个白名单意图都可用时，分数 = 权重 × 条件，取分数最高的那个（专注方向决定权重）。
+    /// </summary>
+    private static void ShouldChooseDeterministicallyByUtilityScoring()
+    {
+        var world = CreateUtilityScoringWorld();
+        var context = new AgentContextCompiler().Compile(world, new CharacterId("works"));
+
+        var industry = new UtilityMinisterAgent(MinisterFocus.Industry).Decide(context);
+        var military = new UtilityMinisterAgent(MinisterFocus.Military).Decide(context);
+        var logistics = new UtilityMinisterAgent(MinisterFocus.Logistics).Decide(context);
+        Require(industry.Single() is BuildFacilityIntent, "工业专注在条件齐备时必须选建厂意图");
+        Require(military.Single() is ConvertArmyIntent, "军事专注在条件齐备时必须选改编意图");
+        Require(logistics.Single() is PlanLogisticsIntent, "物流专注在条件齐备时必须选粮运意图");
+
+        var industryAgain = new UtilityMinisterAgent(MinisterFocus.Industry).Decide(context);
+        Require(industry.SequenceEqual(industryAgain), "同状态同选择：重复决策必须返回相同意图");
+
+        // 白名单之外的能力缺失时条件为 0：没有建厂/改编授权的大臣只剩粮运可用。
+        var limitedWorld = CreateEntryLogisticsWorld();
+        var limitedContext = new AgentContextCompiler().Compile(limitedWorld, new CharacterId("works"));
+        var limited = new UtilityMinisterAgent(MinisterFocus.Industry).Decide(limitedContext);
+        Require(limited.Single() is PlanLogisticsIntent,
+            "条件不成立的高权重意图不得被选，只能选条件成立的低分白名单意图");
+    }
+
+    /// <summary>
+    /// 模型路径 happy path：fake Provider 产出白名单粮运 JSON，解析成功且未过期时
+    /// 采用模型意图，并经 AgentRealtimeEntry 提交到内核。
+    /// </summary>
+    private static void ShouldSubmitFreshModelDecisionThroughKernel()
+    {
+        var world = CreateEntryLogisticsWorld();
+        var runtime = new RealtimeSimulationRuntime(world);
+        var entry = new AgentRealtimeEntry(runtime);
+        var context = new AgentContextCompiler().Compile(world, new CharacterId("works"));
+        var now = runtime.ReadModel.GameTime;
+        var request = new DecisionRequest(
+            "decision-model-fresh", new CharacterId("works"), world.WorldVersion, now,
+            now.Add(TimeSpan.FromHours(1)));
+        var provider = new FakeModelProvider(
+            """{"schema_version":1,"intent_type":"logistics.request_shipment","parameters":{"route_id":"capital-ningyuan-grain","grain_quantity":200}}""");
+        var planner = new DecisionPlanner(new UtilityMinisterAgent(MinisterFocus.Logistics), provider);
+        var before = runtime.ReadModel;
+
+        var result = planner.PlanAsync(request, context, now.Add(TimeSpan.FromMinutes(30))).GetAwaiter().GetResult();
+
+        Require(result.Source == DecisionSource.Model, "未过期且解析成功的模型结果必须被采用");
+        var modelIntent = result.Intents.Single();
+        Require(modelIntent is PlanLogisticsIntent && modelIntent.IdempotencyKey == "decision-model-fresh-1",
+            "模型意图的幂等键必须由 DecisionId + 序号派生");
+
+        var submit = entry.Submit(world, result.Intents).Single();
+        Require(submit.Accepted, "模型意图必须经入口预检进入收件箱");
+        var advanced = runtime.AdvanceTo(before.GameTime);
+        Require(advanced.CommandResults.Single().Accepted, "内核必须在安全点受理模型意图");
+        Require(advanced.CommandResults.Single().CommandId == "decision-model-fresh-1",
+            "模型意图的命令编号必须稳定且幂等");
+        Require(advanced.ReadModel.Shipments.Any(item => item.Id.Value == "shipment-decision-model-fresh-1"),
+            "内核必须创建模型意图对应的运输单");
+    }
+
+    /// <summary>
+    /// 过期模型结果必须被丢弃：即使模型返回了合法意图，只要 AcceptedGameTime 达到截止时刻
+    /// （半开区间，AcceptedGameTime &gt;= Deadline 即过期），也一律回退规则路径，且不产生任何副作用。
+    /// </summary>
+    private static void ShouldDiscardExpiredModelResultAndFallBackToRules()
+    {
+        var world = CreateEntryLogisticsWorld();
+        var runtime = new RealtimeSimulationRuntime(world);
+        var entry = new AgentRealtimeEntry(runtime);
+        var context = new AgentContextCompiler().Compile(world, new CharacterId("works"));
+        var now = runtime.ReadModel.GameTime;
+        var request = new DecisionRequest(
+            "decision-expired", new CharacterId("works"), world.WorldVersion, now,
+            now.Add(TimeSpan.FromHours(1)));
+        var provider = new FakeModelProvider(
+            """{"schema_version":1,"intent_type":"logistics.request_shipment","parameters":{"route_id":"capital-ningyuan-grain","grain_quantity":500}}""");
+        var planner = new DecisionPlanner(new UtilityMinisterAgent(MinisterFocus.Logistics), provider);
+        var before = runtime.ReadModel;
+
+        // 模型返回时世界已推进到截止时刻之后 1 小时 → 半开区间语义下已过期。
+        var result = planner.PlanAsync(request, context, now.Add(TimeSpan.FromHours(2))).GetAwaiter().GetResult();
+
+        Require(!request.IsExpired(now.Add(TimeSpan.FromMinutes(30))), "截止之前到达必须有效（半开区间左端开）");
+        Require(request.IsExpired(request.Deadline), "半开区间：AcceptedGameTime 恰好等于截止也必须过期");
+        Require(request.IsExpired(now.Add(TimeSpan.FromHours(2))), "截止之后到达必须过期");
+        Require(result.Source == DecisionSource.Rules, "过期模型结果必须被丢弃并回退规则路径");
+        var ruleIntent = result.Intents.Single();
+        Require(ruleIntent is PlanLogisticsIntent && ruleIntent.IdempotencyKey == "turn-1-logistics-ningyuan-300",
+            "回退必须采用规则（Utility AI）路径的意图");
+
+        var submit = entry.Submit(world, result.Intents).Single();
+        Require(submit.Accepted && submit.CommandId == "turn-1-logistics-ningyuan-300",
+            "规则回退意图必须经入口提交");
+        var advanced = runtime.AdvanceTo(before.GameTime);
+        Require(advanced.CommandResults.Single().CommandId == "turn-1-logistics-ningyuan-300" &&
+                advanced.CommandResults.Single().Accepted,
+            "被采纳的命令只能是规则回退意图，过期模型意图不得出现");
+        Require(advanced.ReadModel.Shipments.Count == 1 &&
+                advanced.ReadModel.Shipments.Single().Id.Value == "shipment-turn-1-logistics-ningyuan-300",
+            "过期模型结果不能产生任何运输单副作用");
+    }
+
+    /// <summary>
+    /// 模型文本不改状态：模型输出非法 JSON、未知意图类型或模型失败时自动回退规则路径；
+    /// 模型文本本身不产生任何提交或世界变化。
+    /// </summary>
+    private static void ShouldFallBackToRulesWhenModelOutputIsInvalid()
+    {
+        var world = CreateEntryLogisticsWorld();
+        var runtime = new RealtimeSimulationRuntime(world);
+        var entry = new AgentRealtimeEntry(runtime);
+        var context = new AgentContextCompiler().Compile(world, new CharacterId("works"));
+        var now = runtime.ReadModel.GameTime;
+        var request = new DecisionRequest(
+            "decision-invalid", new CharacterId("works"), world.WorldVersion, now,
+            now.Add(TimeSpan.FromHours(1)));
+
+        var invalidJson = plannerResult(new FakeModelProvider("这不是 JSON"), request, context, now);
+        Require(invalidJson.Source == DecisionSource.Rules, "非法 JSON 必须回退规则路径");
+        Require(invalidJson.Intents.Single().IdempotencyKey == "turn-1-logistics-ningyuan-300",
+            "非法 JSON 回退必须采用规则意图");
+        var invalidSubmit = entry.Submit(world, invalidJson.Intents).Single();
+        Require(invalidSubmit.Accepted, "规则回退意图必须可提交");
+        var invalidAdvanced = runtime.AdvanceTo(now);
+        Require(invalidAdvanced.ReadModel.Shipments.Count == 1 &&
+                invalidAdvanced.ReadModel.Shipments.Single().Id.Value == "shipment-turn-1-logistics-ningyuan-300",
+            "模型文本不能改变世界，只有规则回退意图生效");
+
+        var unknownIntent = plannerResult(
+            new FakeModelProvider("""{"schema_version":1,"intent_type":"world.modify_state","parameters":{}}"""),
+            request, context, now);
+        Require(unknownIntent.Source == DecisionSource.Rules, "未知意图类型必须被拒绝并回退规则路径");
+
+        var failedProvider = plannerResult(new FakeModelProvider("", succeeded: false), request, context, now);
+        Require(failedProvider.Source == DecisionSource.Rules, "模型失败/超时必须回退规则路径");
+
+        static DecisionResult plannerResult(FakeModelProvider provider, DecisionRequest request, AgentContext context, GameTime now)
+        {
+            var planner = new DecisionPlanner(new UtilityMinisterAgent(MinisterFocus.Logistics), provider);
+            return planner.PlanAsync(request, context, now.Add(TimeSpan.FromMinutes(30))).GetAwaiter().GetResult();
+        }
+    }
+
+    /// <summary>
+    /// 0 次模型调用完整可玩：不配置 Provider 时，决策始终走规则路径。
+    /// </summary>
+    private static void ShouldRunRulesPathWithoutModelCalls()
+    {
+        var world = CreateEntryLogisticsWorld();
+        var context = new AgentContextCompiler().Compile(world, new CharacterId("works"));
+        var now = world.GameTime;
+        var request = new DecisionRequest(
+            "decision-no-provider", new CharacterId("works"), world.WorldVersion, now,
+            now.Add(TimeSpan.FromHours(1)));
+        var planner = new DecisionPlanner(new UtilityMinisterAgent(MinisterFocus.Logistics));
+
+        var result = planner.PlanAsync(request, context, now.Add(TimeSpan.FromMinutes(30))).GetAwaiter().GetResult();
+
+        Require(result.Source == DecisionSource.Rules, "无 Provider 时必须走规则路径");
+        Require(result.Intents.Single() is PlanLogisticsIntent, "规则路径必须产出粮运意图");
+    }
+
     private static bool IsSecretMemberName(string name) =>
         name.Contains("ApiKey", StringComparison.Ordinal) ||
         name.Contains("Secret", StringComparison.Ordinal) ||
@@ -318,5 +485,52 @@ internal static partial class Program
             [
                 new ArmyState(new ArmyId("army-1"), "测试军", new ProvinceId("frontier"), 10_000, 3_000),
             ]);
+    }
+
+    /// <summary>效用打分测试世界：works 同时拥有建厂/改编/粮运授权，条件全部成立。</summary>
+    private static WorldState CreateUtilityScoringWorld()
+    {
+        var map = new MapDefinition(
+            "utility-scoring-map",
+            [
+                new ProvinceDefinition(new ProvinceId("capital"), "京师", [new ProvinceId("liaodong")]),
+                new ProvinceDefinition(new ProvinceId("liaodong"), "辽东", [new ProvinceId("capital")]),
+            ]);
+        return WorldState.CreateInitial(
+            new WorldId("utility-scoring"),
+            1,
+            200_000, // 银两满足建厂预算条件
+            map,
+            characters:
+            [
+                new CharacterState(new CharacterId("works"), "全能大臣",
+                    new CharacterAttributes(80, 60, 30, 40, 70),
+                    new CharacterPersonality(true, false, true, true)),
+            ],
+            capabilityGrants:
+            [
+                new CapabilityGrant(new CharacterId("works"), GameCapability.BuildIndustry),
+                new CapabilityGrant(new CharacterId("works"), GameCapability.ConvertArmy),
+                new CapabilityGrant(new CharacterId("works"), GameCapability.PlanLogistics, "capital-ningyuan-grain"),
+            ],
+            armies:
+            [
+                new ArmyState(new ArmyId("army-1"), "边军", new ProvinceId("capital"), 1_000, 0),
+            ]);
+    }
+
+    /// <summary>
+    /// 契约测试用的假 Provider：只返回预先写好的文本，不联网、不携带任何密钥；
+    /// succeeded 为 false 时模拟模型失败/超时。
+    /// </summary>
+    private sealed class FakeModelProvider(string content, bool succeeded = true) : IModelProvider
+    {
+        public Task<ModelResponse> GenerateAsync(
+            ModelRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new ModelResponse(succeeded, content));
+        }
     }
 }
