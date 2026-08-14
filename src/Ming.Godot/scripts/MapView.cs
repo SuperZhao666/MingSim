@@ -8,6 +8,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Ming.Godot.ReadModels;
 
 namespace Ming.Godot;
 
@@ -173,6 +174,17 @@ public partial class MapView : Control
     private Vector2 _dragStart;
     private string _loadError = "地图清单不可用；已停止显示。";
     private MapMode _mode = MapMode.DeskOverview;
+    // 粮运层只保存注入的只读快照与纯表现插值进度；不缓存任何可写状态，也不推进时间。
+    private MapFleetReadModel? _fleetModel;
+    private readonly Dictionary<string, float> _shipmentDisplayProgress = new(StringComparer.Ordinal);
+    private const float FleetEaseTimeConstantSeconds = 0.25f;
+    // 表现层未闭合的山海关、觉华岛（places.json warning）只在本切片作为玩法节点存在；
+    // 坐标按同一 web-mercator 投影（map-manifest.json projection 段）计算，是 DESIGN 呈现位置，不是史实城址。
+    private static readonly Dictionary<string, Vector2> FleetFallbackNodePositions = new(StringComparer.Ordinal)
+    {
+        ["shanhaiguan"] = new(1355.3107f, 725.6179f),
+        ["juehuadao"] = new(1377.4064f, 711.9965f),
+    };
     // UI 纸色图是玩家真正看到的像素，不能只验证正式研究底图后再偷偷替换。
     // 路径、字节 SHA 和固定画布都在代码侧构成权威契约；manifest 不能自报一套新尺寸/哈希来绕过。
     private static readonly Dictionary<string, PresentationRasterContract> PresentationPhysicalTextures = new(StringComparer.Ordinal)
@@ -219,6 +231,70 @@ public partial class MapView : Control
     public int VisibleLabelCount => TryGetMapViewportTransform(out var transform)
         ? BuildVisibleLabelLayout(transform).Count
         : 0;
+
+    // ===== 粮运层（M3）：只读模型注入与公开只读表面 =====
+    // 只经 SetFleetReadModel 接收 MapFleetReadModel（Presenter 折叠 ReadModel 的产物）；
+    // 本类不引用 Ming.Simulation/Ming.Domain，也不推进时间。
+    public bool FleetLayerVisible => _fleetModel != null;
+    public int FleetStockpileCount => _fleetModel?.Stockpiles.Count ?? 0;
+    public int FleetRouteCount => _fleetModel?.Routes.Count ?? 0;
+    public int FleetShipmentCount => _fleetModel?.Shipments.Count ?? 0;
+    public int FleetInTransitCount => _fleetModel?.Shipments.Count(shipment => shipment.Status == "InTransit") ?? 0;
+    public int FleetCriticalStockpileCount => _fleetModel?.Stockpiles.Count(stockpile => stockpile.AlertLevel == "Critical") ?? 0;
+    public int FleetWarningStockpileCount => _fleetModel?.Stockpiles.Count(stockpile => stockpile.AlertLevel == "Warning") ?? 0;
+
+    /// <summary>库存告急级别（Normal/Warning/Critical），未知库存点返回空串。</summary>
+    public string FleetStockpileAlertLevel(string stockpileId) =>
+        _fleetModel?.Stockpiles.FirstOrDefault(stockpile =>
+            string.Equals(stockpile.StockpileId, stockpileId, StringComparison.Ordinal))?.AlertLevel ?? "";
+
+    /// <summary>第 index 批粮队的权威目标显示进度（0..1）；越界返回 -1。</summary>
+    public double GetFleetShipmentTargetProgress(int index) =>
+        _fleetModel != null && index >= 0 && index < _fleetModel.Shipments.Count
+            ? _fleetModel.Shipments[index].VisualProgress
+            : -1.0;
+
+    /// <summary>第 index 批粮队当前的纯表现插值进度；越界返回 -1。</summary>
+    public double GetFleetShipmentDisplayProgress(int index)
+    {
+        if (_fleetModel == null || index < 0 || index >= _fleetModel.Shipments.Count) return -1.0;
+        var shipment = _fleetModel.Shipments[index];
+        return _shipmentDisplayProgress.TryGetValue(shipment.ShipmentId, out var displayed)
+            ? displayed
+            : shipment.VisualProgress;
+    }
+
+    /// <summary>
+    /// 注入一份只读粮运快照（生产接线由持有 runtime 的宿主每帧把 ReadModel 经
+    /// MapFleetReadModel.Create 折叠后调用；本方法只消费只读 DTO）。传 null 隐藏粮运层。
+    /// 首次见到的在途粮队从起点出发（视觉沿路线前进），已抵达/计划批直接落在终点/起点。
+    /// </summary>
+    public void SetFleetReadModel(MapFleetReadModel? model)
+    {
+        _fleetModel = model;
+        if (model is null)
+        {
+            _shipmentDisplayProgress.Clear();
+            QueueRedraw();
+            return;
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var shipment in model.Shipments)
+        {
+            seen.Add(shipment.ShipmentId);
+            if (_shipmentDisplayProgress.ContainsKey(shipment.ShipmentId)) continue;
+            _shipmentDisplayProgress[shipment.ShipmentId] =
+                shipment.Status == "InTransit" ? 0f : (float)shipment.VisualProgress;
+        }
+        foreach (var gone in _shipmentDisplayProgress.Keys.Where(id => !seen.Contains(id)).ToArray())
+            _shipmentDisplayProgress.Remove(gone);
+        QueueRedraw();
+    }
+
+    /// <summary>只供 headless 验收注入固定样本；正式接线使用 SetFleetReadModel。</summary>
+    public void InjectFleetAcceptanceSample(int shipmentCount) =>
+        SetFleetReadModel(MapFleetReadModel.CreateAcceptanceSample(shipmentCount));
 
     public override void _Ready()
     {
@@ -510,6 +586,8 @@ public partial class MapView : Control
             DrawString(ThemeDB.FallbackFont, layout.Baseline, place.NameZh!, HorizontalAlignment.Left, -1, layout.FontSize, ink);
         }
 
+        DrawFleetLayer(mapTransform);
+
         var legendWidth = Mathf.Max(120f, Mathf.Min(Size.X - 36f, 1180f));
         DrawStyleBox(MakePanel(new Color(0.86f, 0.80f, 0.63f, 0.90f), new Color("#5E5040"), 1, 2), new Rect2(18, Size.Y - 96, legendWidth, 78));
         var geometryDate = string.IsNullOrWhiteSpace(GeometryDepictDate) ? "OPEN" : GeometryDepictDate;
@@ -518,6 +596,119 @@ public partial class MapView : Control
         DrawString(ThemeDB.FallbackFont, new Vector2(32, Size.Y - 52), RouteSemanticLegend, HorizontalAlignment.Left, -1, 11, new Color("#332B20"));
         DrawString(ThemeDB.FallbackFont, new Vector2(32, Size.Y - 31), SelectedPlaceSummary, HorizontalAlignment.Left, -1, 11, new Color("#332B20"));
     }
+
+    /// <summary>
+    /// 每帧只做纯表现插值：把粮队显示进度向只读快照给出的目标进度指数趋近。
+    /// 目标来自 Status/GameTime/到货时刻的纯函数（Presenter 计算），这里从不写回
+    /// 任何模拟状态，也不推进时间；暂停后快照不再变化，插值收敛到最后一帧目标即停。
+    /// </summary>
+    public override void _Process(double delta)
+    {
+        if (_fleetModel is null || delta <= 0) return;
+        var changed = false;
+        foreach (var shipment in _fleetModel.Shipments)
+        {
+            var target = (float)shipment.VisualProgress;
+            if (!_shipmentDisplayProgress.TryGetValue(shipment.ShipmentId, out var current))
+            {
+                _shipmentDisplayProgress[shipment.ShipmentId] = target;
+                continue;
+            }
+            if (Mathf.Abs(target - current) < 0.0005f) continue;
+            var factor = 1.0f - Mathf.Exp((float)(-delta / FleetEaseTimeConstantSeconds));
+            _shipmentDisplayProgress[shipment.ShipmentId] = current + (target - current) * factor;
+            changed = true;
+        }
+        if (changed) QueueRedraw();
+    }
+
+    /// <summary>粮运层（M3）：库存节点、粮运路线与在途粮队插值图标。全部只读消费 DTO。</summary>
+    private void DrawFleetLayer(MapViewportTransform mapTransform)
+    {
+        if (_fleetModel is null) return;
+        var transform = mapTransform.MapToViewport;
+
+        if (_routesVisible)
+        {
+            // 同一走廊已由 manifest 拓扑线绘制时跳过粮运补给线，避免两条虚线重影。
+            var manifestRouteIds = new HashSet<string>(_manifest?.Routes?.Select(route => route.Id ?? "") ?? Array.Empty<string>(), StringComparer.Ordinal);
+            foreach (var route in _fleetModel.Routes)
+            {
+                if (manifestRouteIds.Contains(route.RouteId)) continue;
+                if (!TryGetFleetNodePoint(route.FromLocationId, out var fromMap) ||
+                    !TryGetFleetNodePoint(route.ToLocationId, out var toMap)) continue;
+                var from = transform * fromMap;
+                var to = transform * toMap;
+                // 粮运补给线沿用 DESIGN 虚线风格（PR #13 纸墨方向），用青墨色区别于拓扑虚线。
+                DrawDashedLine(from, to, new Color(0.36f, 0.48f, 0.42f, 0.72f), Mathf.Clamp(1.1f * _zoom, 1.0f, 1.8f), 6.0f, true);
+            }
+        }
+
+        foreach (var stockpile in _fleetModel.Stockpiles)
+        {
+            if (!TryGetFleetNodePoint(stockpile.LocationId, out var mapPoint)) continue;
+            var point = transform * mapPoint;
+            var alert = FleetAlertColor(stockpile.AlertLevel);
+            if (_placesById.ContainsKey(stockpile.LocationId))
+            {
+                // 已有 manifest 节点的库存用告急色细环标注，不复制第二个节点标记。
+                var ringRadius = Mathf.Clamp(4.4f * _zoom, 4.4f, 8.2f) + 3.4f;
+                DrawArc(point, ringRadius, 0, Mathf.Tau, 24, alert, 1.6f, true);
+            }
+            else
+            {
+                // 表现层未闭合的玩法节点（山海关/觉华岛）补画最小标记。
+                var radius = Mathf.Clamp(3.4f * _zoom, 3.2f, 6.0f);
+                DrawCircle(point, radius + 1.8f, new Color(0.12f, 0.10f, 0.07f, 0.88f));
+                DrawCircle(point, radius, alert);
+            }
+
+            // 数量标签只在战略态放大后显示，避免桌面小卷轴被数字淹没。
+            if (IsStrategicView && _zoom >= 1.3f)
+            {
+                var fontSize = Mathf.RoundToInt(Mathf.Clamp(10f * Mathf.Sqrt(_zoom), 10f, 13f));
+                var text = $"{stockpile.GrainQuantity}石";
+                var baseline = point + new Vector2(12, 20);
+                DrawStringOutline(ThemeDB.FallbackFont, baseline, text, HorizontalAlignment.Left, -1, fontSize, 1, new Color(0.90f, 0.85f, 0.70f, 0.72f));
+                DrawString(ThemeDB.FallbackFont, baseline, text, HorizontalAlignment.Left, -1, fontSize, alert.Darkened(0.25f));
+            }
+        }
+
+        if (_routesVisible)
+        {
+            foreach (var shipment in _fleetModel.Shipments)
+            {
+                if (shipment.Status != "InTransit") continue;
+                var route = _fleetModel.Routes.FirstOrDefault(candidate =>
+                    string.Equals(candidate.RouteId, shipment.RouteId, StringComparison.Ordinal));
+                if (route is null || !TryGetFleetNodePoint(route.FromLocationId, out var fromMap) ||
+                    !TryGetFleetNodePoint(route.ToLocationId, out var toMap)) continue;
+                if (!_shipmentDisplayProgress.TryGetValue(shipment.ShipmentId, out var progress))
+                    progress = (float)shipment.VisualProgress;
+                var position = (transform * fromMap).Lerp(transform * toMap, Mathf.Clamp(progress, 0f, 1f));
+                var radius = Mathf.Clamp(3.2f * _zoom, 3.0f, 5.5f);
+                DrawCircle(position, radius + 1.6f, new Color(0.12f, 0.10f, 0.07f, 0.85f));
+                DrawCircle(position, radius, new Color(0.24f, 0.52f, 0.47f, 0.95f));
+            }
+        }
+    }
+
+    private bool TryGetFleetNodePoint(string locationId, out Vector2 mapPoint)
+    {
+        if (_placesById.TryGetValue(locationId, out var place))
+        {
+            mapPoint = new Vector2((float)place.MapX, (float)place.MapY);
+            return true;
+        }
+        return FleetFallbackNodePositions.TryGetValue(locationId, out mapPoint);
+    }
+
+    private static Color FleetAlertColor(string level) => level switch
+    {
+        "Critical" => new Color("#A83B32"),
+        "Warning" => new Color("#D5A54B"),
+        _ => new Color("#6C9288"),
+    };
 
     private static Vector2 ToVector(MapPoint point) => new((float)point.MapX, (float)point.MapY);
 
