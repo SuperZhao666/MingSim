@@ -50,6 +50,8 @@ public partial class MainUi : Control
     private MemorialDeskReadModel _readModel = MemorialDeskReadModel.CreateDefaultDesignPreview();
     private RealtimeSimulationRuntime? _runtime;
     private CommandFacade? _facade;
+    private DecreePanel _decreePanel = null!;
+    private EndgameReportPanel _endgameReportPanel = null!;
     private Label _realtimeClock = null!;
     private Label _realtimeStockpiles = null!;
     private Label _realtimeOutcome = null!;
@@ -95,6 +97,11 @@ public partial class MainUi : Control
         BuildDesk();
         BuildStrategicMap();
         BuildRealtimeBar();
+        // 面板必须在 BuildRealtimeBar 之后接 runtime：全场景只有桥装配的那一份内核与门面。
+        _decreePanel = GetNode<DecreePanel>("DecreePanel");
+        _endgameReportPanel = GetNode<EndgameReportPanel>("EndgameReportPanel");
+        _decreePanel.ConnectRuntime(_runtime, _facade);
+        _endgameReportPanel.ConnectRuntime(_runtime);
         OnPlaceSelected(_map.SelectedPlaceId);
         ApplyStrategicStateImmediately(false);
         UpdateDeskNotice();
@@ -525,7 +532,8 @@ public partial class MainUi : Control
         return button;
     }
 
-    private static StyleBoxTexture MakePaperStyle()
+    /// <summary>纸张九宫格样式；奏疏、政令、复盘等面板共用（两个以上真实消费者）。</summary>
+    public static StyleBoxTexture MakePaperStyle()
     {
         var style = new StyleBoxTexture
         {
@@ -544,7 +552,8 @@ public partial class MainUi : Control
         return style;
     }
 
-    private static StyleBoxTexture MakeTextureStyle(string relativePath, float margin, float contentMargin)
+    /// <summary>纹理按钮九宫格样式；MainUi 与面板共用。</summary>
+    public static StyleBoxTexture MakeTextureStyle(string relativePath, float margin, float contentMargin)
     {
         var style = new StyleBoxTexture
         {
@@ -658,8 +667,26 @@ public partial class MainUi : Control
         var dispatch = AddPaperButton(bar, "调粮五千石", new Rect2(1060, 48, 252, 34));
         dispatch.Name = "RealtimeDispatchGrain";
         dispatch.Pressed += SubmitGrainShipment;
+        var decreeButton = AddPaperButton(bar, "政令", new Rect2(1320, 48, 88, 34));
+        decreeButton.Name = "OpenDecreePanel";
+        decreeButton.Pressed += OpenDecreePanel;
+        var endgameButton = AddPaperButton(bar, "终局复盘", new Rect2(1416, 48, 128, 34));
+        endgameButton.Name = "OpenEndgameReport";
+        endgameButton.Pressed += OpenEndgameReport;
 
         RefreshRealtimeLabels();
+    }
+
+    private void OpenDecreePanel()
+    {
+        _endgameReportPanel.Close();
+        _decreePanel.Open();
+    }
+
+    private void OpenEndgameReport()
+    {
+        _decreePanel.Close();
+        _endgameReportPanel.Open();
     }
 
     private void SubmitPause(bool paused)
@@ -700,7 +727,9 @@ public partial class MainUi : Control
             .Select(item => $"{item.Id.Value.Replace("sp-", "", StringComparison.Ordinal)}:{item.GrainQuantity}石"));
         _realtimeStockpiles.Text = $"已知库存（DESIGN 数值） {stocks} · 在途 {model.Shipments.Count(item => item.Status != ShipmentStatus.Arrived)} 批";
         var latest = model.CommandOutcomes.LastOrDefault();
-        _realtimeOutcome.Text = latest is null ? "尚无命令结果。" : $"最近命令 {latest.CommandId}：{(latest.Accepted ? "受理" : "拒绝")} · {string.Join("、", latest.ErrorCodes)}";
+        _realtimeOutcome.Text = latest is null
+            ? "尚无命令结果。"
+            : $"最近命令 {latest.CommandId}：{(latest.Accepted ? "受理" : "拒绝")} · {string.Join("；", latest.ErrorCodes.Select(CommandFailureText.Translate))}";
     }
 
     private void UpdateDeskNotice()

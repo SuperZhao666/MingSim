@@ -1,7 +1,9 @@
-[gd_scene load_steps=3 format=3]
+[gd_scene load_steps=5 format=3]
 
 [ext_resource type="Script" path="res://src/Ming.Godot/scripts/MainUi.cs" id="1_main"]
 [ext_resource type="Script" path="res://src/Ming.Godot/scripts/MapView.cs" id="2_map"]
+[ext_resource type="Script" path="res://src/Ming.Godot/scripts/DecreePanel.cs" id="3_decree"]
+[ext_resource type="Script" path="res://src/Ming.Godot/scripts/EndgameReportPanel.cs" id="4_endgame"]
 
 [node name="ImperialDesk" type="Control"]
 layout_mode = 3
@@ -20,3 +22,21 @@ offset_right = 1260.0
 offset_bottom = 832.0
 mouse_filter = 0
 script = ExtResource("2_map")
+
+[node name="DecreePanel" type="Panel" parent="."]
+visible = false
+layout_mode = 0
+offset_left = 410.0
+offset_top = 100.0
+offset_right = 1190.0
+offset_bottom = 800.0
+script = ExtResource("3_decree")
+
+[node name="EndgameReportPanel" type="Panel" parent="."]
+visible = false
+layout_mode = 0
+offset_left = 430.0
+offset_top = 130.0
+offset_right = 1170.0
+offset_bottom = 750.0
+script = ExtResource("4_endgame")
