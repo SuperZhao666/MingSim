@@ -7,11 +7,13 @@ using MingSim.Domain.Common;
 using MingSim.Domain.Decrees;
 using MingSim.Domain.Economy;
 using MingSim.Domain.Events;
+using MingSim.Domain.Institutions;
 using MingSim.Domain.Map;
 using MingSim.Domain.Military;
 using MingSim.Domain.Realtime;
 using MingSim.Domain.Scenario;
 using MingSim.Persistence.InMemory;
+using MingSim.Persistence.Sqlite;
 using MingSim.Simulation.Realtime;
 
 namespace MingSim.SmokeTests;
@@ -78,6 +80,14 @@ internal static class Program
             ShouldRoundTripThroughInMemoryCommitStore();
             ShouldPersistRejectedOutcomeThroughCommitStore();
             ShouldLoadNingyuan1629InitialWorld();
+            ShouldAssembleNingyuan1629AppointmentsFromWorldJson();
+            ShouldDeriveCapabilityFromActiveAppointment();
+            ShouldRevokeCapabilityAfterAppointmentChange();
+            ShouldRejectFakeActorEvenWithMatchingAppointment();
+            ShouldRejectResourceOutsideAppointmentScope();
+            ShouldExpireAppointmentAtEffectiveTo();
+            ShouldKeepAppointmentsInSnapshotAndCanonicalHash();
+            ShouldCompleteNinetyDayNingyuanScenarioWithEndgameReport();
             SnapshotCodecAcceptance.RunAll();
 #if MINGSIM_SQLITE_STORE
             SqliteStoreAcceptance.RunAll();
@@ -1563,6 +1573,57 @@ internal static class Program
             armies: [new ArmyState(new ArmyId("army-1"), "测试军", new ProvinceId("frontier"), 10_000, 3_000)]);
     }
 
+    /// <summary>
+    /// 任命测试世界：minister 被任命到 office-hubu（机构暴露 AllocateFinance/ReadFinance），
+    /// 但不给任何直接 CapabilityGrant——验证"任命推导授权"这条独立能力来源。
+    /// </summary>
+    private static WorldState CreateAppointmentWorld(
+        bool includeAppointment = true,
+        string? scope = null,
+        GameTime? effectiveTo = null,
+        DateTimeOffset? currentTime = null,
+        IEnumerable<AppointmentState>? extraAppointments = null)
+    {
+        var map = new MapDefinition(
+            "appointment-map",
+            [
+                new ProvinceDefinition(new ProvinceId("capital"), "京师", [new ProvinceId("frontier")]),
+                new ProvinceDefinition(new ProvinceId("frontier"), "边地", [new ProvinceId("capital")]),
+            ]);
+        var appointments = new List<AppointmentState>();
+        if (includeAppointment)
+        {
+            appointments.Add(new AppointmentState(
+                new CharacterId("minister"), new InstitutionId("office-hubu"),
+                scope, Limit: null,
+                new GameTime(currentTime ?? FixedUtc), effectiveTo));
+        }
+
+        if (extraAppointments is not null)
+        {
+            appointments.AddRange(extraAppointments);
+        }
+
+        return WorldState.CreateInitial(
+            new WorldId("appointment-world"),
+            1,
+            200_000,
+            map,
+            currentTime: currentTime ?? FixedUtc,
+            characters:
+            [
+                new CharacterState(new CharacterId("minister"), "户部尚书",
+                    new CharacterAttributes(80, 60, 30, 40, 70),
+                    new CharacterPersonality(true, false, true, true)),
+            ],
+            institutions:
+            [
+                new InstitutionState(new InstitutionId("office-hubu"), "户部",
+                    [GameCapability.AllocateFinance, GameCapability.ReadFinance]),
+            ],
+            appointments: appointments);
+    }
+
     /// <summary>ICommitStore 端口：内存商店往返——推进→恢复→同 hash 同事件流（doc 04 §5 LoadCommittedWorld）。</summary>
     private static void ShouldRoundTripThroughInMemoryCommitStore()
     {
@@ -1611,6 +1672,240 @@ internal static class Program
         Require(world.CapabilityGrants.Count == 5, "剧本必须装配 5 条能力授予");
         Require(world.Characters.Count == 8, "剧本必须装配 8 个角色（6 史实 + 2 职位槽位）");
         Require(world.Scenario.IsScenarioActive, "宁远前线粮仓必须启用场景规则");
+    }
+
+    /// <summary>任命装配：world.json 的 6 个 officeId（4 史实人物任职 + 2 职位槽位）必须装配成
+    /// 1629-01-01 生效的任命；毛文龙/孙承宗 officeId=null（OPEN 条目）不得产生任命。</summary>
+    private static void ShouldAssembleNingyuan1629AppointmentsFromWorldJson()
+    {
+        var world = MingSim.Application.Scenarios.Ningyuan1629InitialWorld.Load();
+        Require(world.Appointments.Count == 6, "剧本必须装配 6 条任命（4 史实人物任职 + 2 职位槽位）");
+        var appointments = world.Appointments.ToDictionary(item => item.PersonId.Value, StringComparer.Ordinal);
+        Require(appointments["zhu-youjian"].OfficeId.Value == "office-emperor-central", "崇祯帝必须任命到皇帝中枢");
+        Require(appointments["yuan-chonghuan"].OfficeId.Value == "office-jiliao-dushi", "袁崇焕必须任命到蓟辽督师差遣");
+        Require(appointments["man-gui"].OfficeId.Value == "office-guanning-ningyuan", "满桂必须任命到关宁军镇");
+        Require(appointments["zu-dashou"].OfficeId.Value == "office-guanning-ningyuan", "祖大寿必须任命到关宁军镇");
+        Require(appointments["hubu-slot"].OfficeId.Value == "office-hubu-grain", "户部槽位必须任命到户部");
+        Require(appointments["duliaoxiang-slot"].OfficeId.Value == "office-duliaoxiang", "督辽饷槽位必须任命到督辽饷差遣");
+        Require(appointments["yuan-chonghuan"].Scope == "ningyuan",
+            "督师任命辖区必须与 world.json capabilityGrants 的 resourceId 对齐（DESIGN 最小映射，不越权）");
+        Require(!world.Appointments.Any(item => item.PersonId.Value is "mao-wenlong" or "sun-chengzong"),
+            "毛文龙/孙承宗正月无切片内任职（OPEN 条目），不得虚构任命");
+        foreach (var appointment in world.Appointments)
+        {
+            Require(appointment.EffectiveFrom.Value == new DateTimeOffset(1629, 1, 1, 0, 0, 0, TimeSpan.Zero),
+                "任命生效起点必须是场景起点 1629-01-01（快照断言在任，不是史实任命日）");
+            Require(appointment.EffectiveTo is null, "切片内无撤换证据，任命结束时间必须为空");
+        }
+    }
+
+    /// <summary>任命推导：在任任命使角色获得机构暴露的能力，即使没有任何直接 CapabilityGrant。</summary>
+    private static void ShouldDeriveCapabilityFromActiveAppointment()
+    {
+        var world = CreateAppointmentWorld();
+        var authorizer = new CapabilityAuthorizer();
+        Require(authorizer.Check(world, new CharacterId("minister"), GameCapability.AllocateFinance).Allowed,
+            "在任任命必须推导出机构暴露的能力");
+        Require(!authorizer.Check(world, new CharacterId("minister"), GameCapability.BuildIndustry).Allowed,
+            "机构未暴露的能力不得通过任命推导");
+    }
+
+    /// <summary>换任：撤掉任命（世界状态改变）后，下一次授权检查立即失去该能力——权限随任命即时变化。</summary>
+    private static void ShouldRevokeCapabilityAfterAppointmentChange()
+    {
+        var authorizer = new CapabilityAuthorizer();
+        var inOffice = CreateAppointmentWorld();
+        Require(authorizer.Check(inOffice, new CharacterId("minister"), GameCapability.AllocateFinance).Allowed,
+            "在任时通过任命获得能力");
+        var outOfOffice = CreateAppointmentWorld(includeAppointment: false);
+        Require(!authorizer.Check(outOfOffice, new CharacterId("minister"), GameCapability.AllocateFinance).Allowed,
+            "换任（撤掉任命）后必须立即失去能力");
+    }
+
+    /// <summary>伪造 Actor：即使世界任命列表里存在针对该编号的任命，角色不存在也必须被拒（fail-closed）。</summary>
+    private static void ShouldRejectFakeActorEvenWithMatchingAppointment()
+    {
+        var world = CreateAppointmentWorld(
+            includeAppointment: false,
+            extraAppointments:
+            [
+                new AppointmentState(new CharacterId("ghost"), new InstitutionId("office-hubu"),
+                    Scope: null, Limit: null, new GameTime(FixedUtc), EffectiveTo: null),
+            ]);
+        var decision = new CapabilityAuthorizer().Check(world, new CharacterId("ghost"), GameCapability.AllocateFinance);
+        Require(!decision.Allowed && decision.Reason.Contains("不存在"),
+            "伪造 Actor 必须被拒，即使任命列表里存在对应项");
+    }
+
+    /// <summary>越权辖区：任命 scope=ningyuan 时，只授权宁远辖区的目标，辖区外目标必须被拒。</summary>
+    private static void ShouldRejectResourceOutsideAppointmentScope()
+    {
+        var world = CreateAppointmentWorld(scope: "ningyuan");
+        var authorizer = new CapabilityAuthorizer();
+        Require(authorizer.Check(world, new CharacterId("minister"), GameCapability.AllocateFinance, "ningyuan").Allowed,
+            "辖区内的目标应通过任命授权");
+        Require(!authorizer.Check(world, new CharacterId("minister"), GameCapability.AllocateFinance, "dengzhou").Allowed,
+            "辖区外的目标必须被拒（越权辖区）");
+    }
+
+    /// <summary>到期：任命按半开区间 [EffectiveFrom, EffectiveTo) 生效，到期时刻即失效。</summary>
+    private static void ShouldExpireAppointmentAtEffectiveTo()
+    {
+        var from = new DateTimeOffset(1629, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var to = new DateTimeOffset(1629, 3, 1, 0, 0, 0, TimeSpan.Zero);
+        var authorizer = new CapabilityAuthorizer();
+        var active = CreateAppointmentWorld(currentTime: from.AddDays(30), effectiveTo: new GameTime(to));
+        Require(authorizer.Check(active, new CharacterId("minister"), GameCapability.AllocateFinance).Allowed,
+            "任期内的任命应有效");
+        var atExpiry = CreateAppointmentWorld(currentTime: to, effectiveTo: new GameTime(to));
+        Require(!authorizer.Check(atExpiry, new CharacterId("minister"), GameCapability.AllocateFinance).Allowed,
+            "到期时刻（EffectiveTo 精确到达）任命必须已失效");
+        var expired = CreateAppointmentWorld(currentTime: to.AddDays(10), effectiveTo: new GameTime(to));
+        Require(!authorizer.Check(expired, new CharacterId("minister"), GameCapability.AllocateFinance).Allowed,
+            "到期之后的任命必须失效");
+    }
+
+    /// <summary>哈希/快照：任命字段必须进入 canonical hash 与快照，且字节往返后逐字段一致。</summary>
+    private static void ShouldKeepAppointmentsInSnapshotAndCanonicalHash()
+    {
+        // 任命差异必须改变 canonical hash（任命是影响未来授权裁决的状态）
+        var withAppointment = new RealtimeSimulationRuntime(CreateAppointmentWorld());
+        var differentScope = new RealtimeSimulationRuntime(CreateAppointmentWorld(scope: "ningyuan"));
+        var noAppointment = new RealtimeSimulationRuntime(CreateAppointmentWorld(includeAppointment: false));
+        Require(withAppointment.StateHash != noAppointment.StateHash, "有无任命的两个世界 canonical hash 必须不同");
+        Require(withAppointment.StateHash != differentScope.StateHash, "任命辖区不同的两个世界 canonical hash 必须不同");
+
+        // 世界状态字节往返：任命必须逐字段恢复
+        var world = CreateAppointmentWorld();
+        var restoredWorld = SnapshotCodec.DeserializeWorld(SnapshotCodec.SerializeWorld(world));
+        Require(restoredWorld.Appointments.Count == world.Appointments.Count, "快照往返后任命数量必须一致");
+        Require(restoredWorld.Appointments.Single() == world.Appointments.Single(), "快照往返后任命必须逐字段一致");
+
+        // 完整运行时快照往返：canonical hash 必须一致（证明任命进入 RealtimeSnapshot 的 WorldState 编码）
+        var runtime = new RealtimeSimulationRuntime(world);
+        var restored = RealtimeSimulationRuntime.Restore(
+            SnapshotCodec.Deserialize(SnapshotCodec.Serialize(runtime.CaptureSnapshot())));
+        Require(restored.StateHash == runtime.StateHash, "含任命的完整快照往返后 canonical hash 必须一致");
+    }
+
+    /// <summary>
+    /// I2 终验收：真实 world.json 世界跑完 90 日垂直切片并产出六维终局报告。
+    /// 策略按纸面推演的陆海并行批次（docs/玩法验证）：陆 2×5000 石走三段、海 2×7000 石走两段；
+    /// 段间日历留足"天气延误最多 +3 日"余量，全部批次加护卫（400 两/批，不超 20000 两场景银预算），
+    /// 保证任何确定性抽取下都不缺粮断链。终局分档本身是平衡输出（DESIGN），
+    /// 本验收只钉住切片完整性与报告结构，不钉具体档位。
+    /// </summary>
+    private static void ShouldCompleteNinetyDayNingyuanScenarioWithEndgameReport()
+    {
+        var world = MingSim.Application.Scenarios.Ningyuan1629InitialWorld.Load();
+        var initialTotalGrain = world.Logistics.Stockpiles.Values.Sum(item => item.GrainQuantity);
+        var routeSources = world.Logistics.Routes.ToDictionary(
+            item => item.Key.Value, item => item.Value.FromStockpileId, StringComparer.Ordinal);
+        var routeCapacities = world.Logistics.Routes.ToDictionary(
+            item => item.Key.Value, item => item.Value.Capacity, StringComparer.Ordinal);
+        var store = new InMemoryCommitStore();
+        var runtime = new RealtimeSimulationRuntime(world, store);
+        runtime.ScheduleScenarioRiskSamples();
+        var start = runtime.ReadModel.GameTime;
+        Require(runtime.ReadModel.Scenario.IsScenarioActive, "90 日切片必须启用前线场景规则");
+
+        // 陆海并行批次日历（DESIGN 调度输入）：同路由两批之间留足到货与转运余量；
+        // 第 23 日两条路同时发运，保证第 24 日固定袭粮样本有在途运输可命中。
+        var convoyCalendar = new Dictionary<string, int[]>(StringComparer.Ordinal)
+        {
+            ["route-beijing-tongzhou"] = [0, 14],
+            ["route-tongzhou-shanhaiguan"] = [3, 18],
+            ["route-shanhaiguan-ningyuan"] = [9, 23],
+            ["route-dengzhou-juehuadao"] = [23, 36],
+            ["route-juehuadao-ningyuan"] = [30, 42],
+        };
+
+        var allEvents = new List<DomainEvent>();
+        for (var day = 0; day < EndgameEvaluator.ScenarioDurationDays; day++)
+        {
+            foreach (var route in convoyCalendar)
+            {
+                foreach (var scheduledDay in route.Value)
+                {
+                    if (scheduledDay != day)
+                    {
+                        continue;
+                    }
+
+                    // 每段运走"来源仓现有粮"并按路线容量封顶：损耗逐段累计，段批随段缩小；
+                    // 逐条接纳避免同一版本并发命令互相过期。
+                    var source = routeSources[route.Key];
+                    var available = runtime.ReadModel.Stockpiles.Single(item => item.Id == source).GrainQuantity;
+                    Require(available > 0, $"第 {day} 日 {route.Key} 来源仓必须有粮可发");
+                    var quantity = Math.Min(available, routeCapacities[route.Key]);
+                    Require(runtime.EnqueueCreateShipment(new CreateShipmentCommand(
+                        $"cmd-{route.Key}-{day}", new CharacterId("duliaoxiang-slot"),
+                        new ShipmentId($"shipment-{route.Key}-{day}"), new RouteId(route.Key), quantity,
+                        runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion, Escort: true)).Queued,
+                        $"第 {day} 日 {route.Key} 运输命令应进入收件箱");
+                    var accepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+                    Require(accepted.Succeeded && accepted.CommandResults.Single().Accepted,
+                        $"第 {day} 日 {route.Key} 运输必须被接纳");
+                }
+            }
+
+            var advanced = runtime.AdvanceTo(new GameTime(start.Value.AddDays(day + 1)));
+            Require(advanced.Succeeded, $"第 {day + 1} 日推进必须成功");
+            allEvents.AddRange(advanced.Events);
+        }
+
+        // 1) 90 日完整推进：时间精确停在终点；10 段运输全部到达、无在途悬挂；不触发硬失败。
+        Require(runtime.ReadModel.GameTime.Value == start.Value.AddDays(EndgameEvaluator.ScenarioDurationDays),
+            "90 日推进后必须恰好停在场景终点");
+        Require(runtime.ReadModel.Shipments.Count == 10 &&
+                runtime.ReadModel.Shipments.All(item => item.Status == ShipmentStatus.Arrived),
+            "10 段运输必须全部到达，无在途悬挂");
+        Require(runtime.ReadModel.Readiness.ConsecutiveZeroGrainDays < EndgameEvaluator.DesignHardFailureZeroDays,
+            "90 日内连续断粮必须少于 7 日（不触发硬失败）");
+
+        // 2) 固定风险样本各恰好触发一次，且延误/袭粮必须命中在途运输而不是空转。
+        Require(allEvents.Count(item => item.EventType == "ShipmentDelayed") == 1,
+            "固定风险样本必须恰好一次天气延误");
+        Require(allEvents.Count(item => item.EventType == "ShipmentAttacked") == 1,
+            "固定风险样本必须恰好一次袭粮");
+        Require(allEvents.Count(item => item.EventType == "ScenarioReportReceived") == 3,
+            "固定风险样本必须恰好三份报告");
+        Require(allEvents.All(item => item.EventType != "WeatherDelayNoOp" && item.EventType != "GrainRaidNoOp"),
+            "延误/袭粮样本必须命中在途运输，不能空转");
+
+        // 3) 粮食总账守恒：初始 = 末日 + 实际消耗 + 运输损耗（欠饷缺口从实际消耗中扣除）。
+        var finalTotalGrain = runtime.ReadModel.Stockpiles.Sum(item => item.GrainQuantity);
+        var consumedGrain = EndgameEvaluator.ScenarioDurationDays * runtime.ReadModel.Scenario.DailyGrainDemand
+            - runtime.ReadModel.Readiness.ArrearsGrain;
+        var lostGrain = runtime.ReadModel.Shipments.Sum(item => item.LossGrain);
+        Require(initialTotalGrain == finalTotalGrain + consumedGrain + lostGrain,
+            $"90 日粮食总账必须守恒：{initialTotalGrain} = {finalTotalGrain} + {consumedGrain} + {lostGrain}");
+
+        // 4) 六维终局报告：给出分档、六维解释齐全、银预算未透支、责任归属与审计链干净。
+        var evaluation = runtime.EvaluateEndgame();
+        Require(evaluation.Outcome is not (EndgameOutcome.InProgress or EndgameOutcome.HardFailure),
+            $"90 日终局必须给出分档且未被判硬失败，实际 {evaluation.Outcome}");
+        var frontGrain = runtime.ReadModel.Stockpiles
+            .Single(item => item.Id == new StockpileId("sp-ningyuan")).GrainQuantity;
+        Require(evaluation.AvailableGrainDays == frontGrain / runtime.ReadModel.Scenario.DailyGrainDemand,
+            "终局报告维度 1 必须与前线仓末日存粮一致");
+        Require(evaluation.Explanation.Contains("宁远可用粮", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("前线战备", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("中央财政", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("地方负担", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("大臣信任", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("执行与审计", StringComparison.Ordinal),
+            "终局报告必须输出 doc 03 §7.3 的六个解释维度");
+        Require(!evaluation.ScenarioBudgetOverdrawn, "10 批护卫（400 两/批）不得透支 20000 两场景银预算");
+        Require(evaluation.DeadlineMissedCount == 0 && evaluation.AuditChainComplete,
+            "切片未发政令：责任归属与审计链必须干净");
+
+        // 5) 提交商店整点恢复：90 日切片结束后可从最后一份提交恢复出同一世界与事件流。
+        var restored = RealtimeSimulationRuntime.RestoreFromStore(store);
+        Require(restored.ReadModel.StateHash == runtime.ReadModel.StateHash,
+            "90 日终局经提交商店恢复后 canonical hash 必须一致");
+        Require(EventFingerprints(restored.OutboxEvents).SequenceEqual(EventFingerprints(runtime.OutboxEvents)),
+            "90 日终局经提交商店恢复后事件流必须一致");
     }
 
     internal static void Require(bool condition, string message)
