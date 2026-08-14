@@ -103,7 +103,7 @@ internal static class NingyuanSeedReplay
 
     /// <summary>
     /// 固定的 90 日脚本（输入流本身确定，重放必然一致）：
-    /// - 第 0 天签发一道拨饷政令（绑定海运首批），并发出海运首批（登州→觉华岛，带护卫）；
+    /// - 第 0 天发出海运首批（登州→觉华岛，带护卫），再签发一道催饷政令绑定该批（P1-DECREE-03：绑定须先存在）；
     /// - 第 10 天发出陆运首批（北京→通州）与海运第二批；第 20 天发出陆运第二批（两处粮源用尽）；
     /// - 每天推进后把当日抵达的运输单沿路线网中继续运到下一段（纯读模型决策）；
     /// - 风险样本（第 12 天天气延误、第 24 天袭粮、第 30 天报告）由 ScheduleScenarioRiskSamples 安排，
@@ -116,15 +116,17 @@ internal static class NingyuanSeedReplay
         // 每日心跳/抵达/出发等调度事件提交也会递增 WorldVersion，不能只按命令数累加。
         var version = 0L;
 
-        runtime.EnqueueCreateDecree(new CreateDecreeCommand(
-            $"{seedId}-decree-1", new CharacterId("zhu-youjian"), new DecreeId($"{seedId}-decree-1"),
-            "拨饷令：向宁远调运军粮（长跑测试）", new ProvinceId("ningyuan"), 5_000,
-            new CharacterId("duliaoxiang-slot"), new GameTime(start.Value.AddDays(40)),
-            "", "长跑测试政令", GameCapability.PlanLogistics, null,
-            ShipmentId(seedId, "sea-a1"), start.Value, version++));
+        // P1-DECREE-03 绑定不变量：政令接纳时绑定运输单必须已存在（Planned/InTransit），
+        // 因此先发运输单（version 0）、再发绑定它的政令（version 1），同批收件箱按序接纳。
         runtime.EnqueueCreateShipment(new CreateShipmentCommand(
             $"{seedId}-sea-a1", new CharacterId("duliaoxiang-slot"), new ShipmentId(ShipmentId(seedId, "sea-a1")),
             new RouteId("route-dengzhou-juehuadao"), 7_000, start.Value, version++, Escort: true));
+        runtime.EnqueueCreateDecree(new CreateDecreeCommand(
+            $"{seedId}-decree-1", new CharacterId("zhu-youjian"), new DecreeId($"{seedId}-decree-1"),
+            "催饷令：向宁远调运军粮（长跑测试）", new ProvinceId("ningyuan"), 5_000,
+            new CharacterId("duliaoxiang-slot"), new GameTime(start.Value.AddDays(40)),
+            "", "长跑测试政令", ShipmentId(seedId, "sea-a1"), start.Value, version++,
+            DecreeKind.ExpediteSupply));
 
         for (var day = 1; day <= 90; day++)
         {

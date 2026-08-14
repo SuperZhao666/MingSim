@@ -288,8 +288,8 @@ internal static class StrategyExplorer
             $"{seedId}-ration-reduction", new CharacterId("zhu-youjian"), new DecreeId($"{seedId}-ration-reduction"),
             "减耗令：前线日耗 300→240 石/日（纸面推演 §3.2）", new ProvinceId("ningyuan"), 100,
             new CharacterId("duliaoxiang-slot"), new GameTime(start.Value.AddDays(30)),
-            "", "预先计划减耗", GameCapability.PlanLogistics, null,
-            null, model.GameTime.Value, model.WorldVersion, DecreeKind.RationReduction));
+            "", "预先计划减耗", LinkedShipmentId: null, model.GameTime.Value, model.WorldVersion,
+            DecreeKind.RationReduction));
     }
 
     /// <summary>种子 → 剧本世界变体：只有世界编号不同，其余与 Ningyuan1629InitialWorld.Load() 完全一致。</summary>
