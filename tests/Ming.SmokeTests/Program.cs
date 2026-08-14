@@ -1099,11 +1099,16 @@ internal static class Program
             "战备必须体现足额恢复与断粮衰减（DESIGN 公式）");
 
         // 到粮缓慢恢复：补运 5000 石（12 日到达），到粮后足额供粮日每天 +0.1。
+        // 第 25 日连续断粮满 7 日触发硬失败 → M5 自动暂停：推进在失败时刻停下，
+        // 断言 IsPaused 后由操作者恢复（模拟玩家解除暂停），再继续到货与恢复断言。
         Require(runtime.EnqueueCreateShipment(CreateShipment(runtime, "recover", 5_000)).Queued, "补粮命令应进入收件箱");
         runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        var pausedAtFailure = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddDays(12)));
+        Require(pausedAtFailure.ReadModel.IsPaused, "连续断粮 7 日必须触发自动暂停");
+        runtime.SetPaused(false);
         var arrival = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddDays(12)));
         Require(arrival.ReadModel.Stockpiles.Single(item => item.Id.Value == "ningyuan-granary").GrainQuantity > 0,
-            "粮队必须到达并恢复库存");
+            "恢复推进后粮队必须到达并恢复库存");
         var atArrival = arrival.ReadModel.Readiness.ValueBasisPoints;
         var afterRecovery = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddDays(5)));
         Require(afterRecovery.ReadModel.Readiness.ValueBasisPoints == atArrival + 5 * ReadinessState.DesignFullDayGainBasisPoints,

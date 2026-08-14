@@ -111,14 +111,14 @@ internal static partial class Program
             "预算耗尽时必须回退规则路径并明确 BudgetExceeded 原因");
         Require(provider.CallCount == 0, "预算耗尽后宿主不得发起任何模型调用");
         var ruleIntent = decision.Intents.Single();
-        Require(ruleIntent is PlanLogisticsIntent && ruleIntent.IdempotencyKey == "turn-1-logistics-ningyuan-300",
+        Require(ruleIntent is PlanLogisticsIntent && ruleIntent.IdempotencyKey == $"logistics-ningyuan-300-{world.WorldVersion}",
             "回退必须产出 Utility 的结构化意图");
         Require(decision.Submissions.Single().Accepted, "回退意图必须经入口提交");
         Require(audit.Entries.Single().Outcome == ModelCallOutcome.BudgetExceeded, "审计必须记录一次 BudgetExceeded");
 
         var advanced = runtime.AdvanceTo(before.GameTime);
         Require(advanced.ReadModel.Shipments.Count == 1 &&
-                advanced.ReadModel.Shipments.Single().Id.Value == "shipment-turn-1-logistics-ningyuan-300",
+                advanced.ReadModel.Shipments.Single().Id.Value == $"shipment-logistics-ningyuan-300-{world.WorldVersion}",
             "预算耗尽后宿主回退的规则意图必须真正生效，世界继续推进");
     }
 
@@ -287,7 +287,7 @@ internal static partial class Program
         Require(result.Source == DecisionSource.Rules && result.FallbackReason == ModelFallbackReason.ParseFailed,
             "解析器未预期异常必须回退规则路径并明确 ParseFailed 原因");
         var ruleIntent = result.Intents.Single();
-        Require(ruleIntent is PlanLogisticsIntent && ruleIntent.IdempotencyKey == "turn-1-logistics-ningyuan-300",
+        Require(ruleIntent is PlanLogisticsIntent && ruleIntent.IdempotencyKey == $"logistics-ningyuan-300-{world.WorldVersion}",
             "回退必须产出 Utility 的结构化意图");
         Require(audit.Entries.Single().Outcome == ModelCallOutcome.ParseFailed, "解析器异常必须记录 ParseFailed 审计");
 
@@ -340,6 +340,29 @@ internal static partial class Program
                     new StockpileId("capital-granary"), new StockpileId("ningyuan-granary"),
                     500, 2, 100),
             ]);
+    }
+
+    /// <summary>
+    /// 幂等键随世界版本派生（修复 #32 审查 P2-2）：同一版本重复决策同键（可被内核去重）；
+    /// 世界版本推进后的新决策必须派生新键，否则规则回退自第二回合起被 IDEMPOTENCY_CONFLICT 永远拒绝。
+    /// </summary>
+    private static void ShouldDeriveFreshIdempotencyKeyPerWorldVersion()
+    {
+        var world = CreateHostScenarioWorld();
+        var agent = new UtilityMinisterAgent(MinisterFocus.Logistics);
+        var context = new AgentContextCompiler().Compile(world, new CharacterId("duliaoxiang-slot"));
+
+        var firstKey = agent.Decide(context).Single().IdempotencyKey;
+        Require(firstKey == $"logistics-ningyuan-300-{world.WorldVersion}",
+            "幂等键必须由当前世界版本派生");
+        Require(agent.Decide(context).Single().IdempotencyKey == firstKey,
+            "同一版本重复决策必须得到同一幂等键（幂等）");
+
+        var nextContext = context with { WorldVersion = world.WorldVersion + 1 };
+        var secondKey = agent.Decide(nextContext).Single().IdempotencyKey;
+        Require(secondKey != firstKey, "世界版本推进后必须派生出新的幂等键");
+        Require(secondKey == $"logistics-ningyuan-300-{world.WorldVersion + 1}",
+            "新键必须对应推进后的世界版本");
     }
 
     /// <summary>契约测试用的"必然抛异常"解析器：证明 DecisionPlanner 的解析 try 回退防线真实生效。</summary>
