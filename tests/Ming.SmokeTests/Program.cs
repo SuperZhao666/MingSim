@@ -7,11 +7,13 @@ using MingSim.Domain.Common;
 using MingSim.Domain.Decrees;
 using MingSim.Domain.Economy;
 using MingSim.Domain.Events;
+using MingSim.Domain.Institutions;
 using MingSim.Domain.Map;
 using MingSim.Domain.Military;
 using MingSim.Domain.Realtime;
 using MingSim.Domain.Scenario;
 using MingSim.Persistence.InMemory;
+using MingSim.Persistence.Sqlite;
 using MingSim.Simulation.Realtime;
 
 namespace MingSim.SmokeTests;
@@ -78,6 +80,13 @@ internal static class Program
             ShouldRoundTripThroughInMemoryCommitStore();
             ShouldPersistRejectedOutcomeThroughCommitStore();
             ShouldLoadNingyuan1629InitialWorld();
+            ShouldAssembleNingyuan1629AppointmentsFromWorldJson();
+            ShouldDeriveCapabilityFromActiveAppointment();
+            ShouldRevokeCapabilityAfterAppointmentChange();
+            ShouldRejectFakeActorEvenWithMatchingAppointment();
+            ShouldRejectResourceOutsideAppointmentScope();
+            ShouldExpireAppointmentAtEffectiveTo();
+            ShouldKeepAppointmentsInSnapshotAndCanonicalHash();
             ShouldCompleteNinetyDayNingyuanScenarioWithEndgameReport();
             SnapshotCodecAcceptance.RunAll();
 #if MINGSIM_SQLITE_STORE
@@ -1564,6 +1573,57 @@ internal static class Program
             armies: [new ArmyState(new ArmyId("army-1"), "测试军", new ProvinceId("frontier"), 10_000, 3_000)]);
     }
 
+    /// <summary>
+    /// 任命测试世界：minister 被任命到 office-hubu（机构暴露 AllocateFinance/ReadFinance），
+    /// 但不给任何直接 CapabilityGrant——验证"任命推导授权"这条独立能力来源。
+    /// </summary>
+    private static WorldState CreateAppointmentWorld(
+        bool includeAppointment = true,
+        string? scope = null,
+        GameTime? effectiveTo = null,
+        DateTimeOffset? currentTime = null,
+        IEnumerable<AppointmentState>? extraAppointments = null)
+    {
+        var map = new MapDefinition(
+            "appointment-map",
+            [
+                new ProvinceDefinition(new ProvinceId("capital"), "京师", [new ProvinceId("frontier")]),
+                new ProvinceDefinition(new ProvinceId("frontier"), "边地", [new ProvinceId("capital")]),
+            ]);
+        var appointments = new List<AppointmentState>();
+        if (includeAppointment)
+        {
+            appointments.Add(new AppointmentState(
+                new CharacterId("minister"), new InstitutionId("office-hubu"),
+                scope, Limit: null,
+                new GameTime(currentTime ?? FixedUtc), effectiveTo));
+        }
+
+        if (extraAppointments is not null)
+        {
+            appointments.AddRange(extraAppointments);
+        }
+
+        return WorldState.CreateInitial(
+            new WorldId("appointment-world"),
+            1,
+            200_000,
+            map,
+            currentTime: currentTime ?? FixedUtc,
+            characters:
+            [
+                new CharacterState(new CharacterId("minister"), "户部尚书",
+                    new CharacterAttributes(80, 60, 30, 40, 70),
+                    new CharacterPersonality(true, false, true, true)),
+            ],
+            institutions:
+            [
+                new InstitutionState(new InstitutionId("office-hubu"), "户部",
+                    [GameCapability.AllocateFinance, GameCapability.ReadFinance]),
+            ],
+            appointments: appointments);
+    }
+
     /// <summary>ICommitStore 端口：内存商店往返——推进→恢复→同 hash 同事件流（doc 04 §5 LoadCommittedWorld）。</summary>
     private static void ShouldRoundTripThroughInMemoryCommitStore()
     {
@@ -1612,6 +1672,120 @@ internal static class Program
         Require(world.CapabilityGrants.Count == 5, "剧本必须装配 5 条能力授予");
         Require(world.Characters.Count == 8, "剧本必须装配 8 个角色（6 史实 + 2 职位槽位）");
         Require(world.Scenario.IsScenarioActive, "宁远前线粮仓必须启用场景规则");
+    }
+
+    /// <summary>任命装配：world.json 的 6 个 officeId（4 史实人物任职 + 2 职位槽位）必须装配成
+    /// 1629-01-01 生效的任命；毛文龙/孙承宗 officeId=null（OPEN 条目）不得产生任命。</summary>
+    private static void ShouldAssembleNingyuan1629AppointmentsFromWorldJson()
+    {
+        var world = MingSim.Application.Scenarios.Ningyuan1629InitialWorld.Load();
+        Require(world.Appointments.Count == 6, "剧本必须装配 6 条任命（4 史实人物任职 + 2 职位槽位）");
+        var appointments = world.Appointments.ToDictionary(item => item.PersonId.Value, StringComparer.Ordinal);
+        Require(appointments["zhu-youjian"].OfficeId.Value == "office-emperor-central", "崇祯帝必须任命到皇帝中枢");
+        Require(appointments["yuan-chonghuan"].OfficeId.Value == "office-jiliao-dushi", "袁崇焕必须任命到蓟辽督师差遣");
+        Require(appointments["man-gui"].OfficeId.Value == "office-guanning-ningyuan", "满桂必须任命到关宁军镇");
+        Require(appointments["zu-dashou"].OfficeId.Value == "office-guanning-ningyuan", "祖大寿必须任命到关宁军镇");
+        Require(appointments["hubu-slot"].OfficeId.Value == "office-hubu-grain", "户部槽位必须任命到户部");
+        Require(appointments["duliaoxiang-slot"].OfficeId.Value == "office-duliaoxiang", "督辽饷槽位必须任命到督辽饷差遣");
+        Require(appointments["yuan-chonghuan"].Scope == "ningyuan",
+            "督师任命辖区必须与 world.json capabilityGrants 的 resourceId 对齐（DESIGN 最小映射，不越权）");
+        Require(!world.Appointments.Any(item => item.PersonId.Value is "mao-wenlong" or "sun-chengzong"),
+            "毛文龙/孙承宗正月无切片内任职（OPEN 条目），不得虚构任命");
+        foreach (var appointment in world.Appointments)
+        {
+            Require(appointment.EffectiveFrom.Value == new DateTimeOffset(1629, 1, 1, 0, 0, 0, TimeSpan.Zero),
+                "任命生效起点必须是场景起点 1629-01-01（快照断言在任，不是史实任命日）");
+            Require(appointment.EffectiveTo is null, "切片内无撤换证据，任命结束时间必须为空");
+        }
+    }
+
+    /// <summary>任命推导：在任任命使角色获得机构暴露的能力，即使没有任何直接 CapabilityGrant。</summary>
+    private static void ShouldDeriveCapabilityFromActiveAppointment()
+    {
+        var world = CreateAppointmentWorld();
+        var authorizer = new CapabilityAuthorizer();
+        Require(authorizer.Check(world, new CharacterId("minister"), GameCapability.AllocateFinance).Allowed,
+            "在任任命必须推导出机构暴露的能力");
+        Require(!authorizer.Check(world, new CharacterId("minister"), GameCapability.BuildIndustry).Allowed,
+            "机构未暴露的能力不得通过任命推导");
+    }
+
+    /// <summary>换任：撤掉任命（世界状态改变）后，下一次授权检查立即失去该能力——权限随任命即时变化。</summary>
+    private static void ShouldRevokeCapabilityAfterAppointmentChange()
+    {
+        var authorizer = new CapabilityAuthorizer();
+        var inOffice = CreateAppointmentWorld();
+        Require(authorizer.Check(inOffice, new CharacterId("minister"), GameCapability.AllocateFinance).Allowed,
+            "在任时通过任命获得能力");
+        var outOfOffice = CreateAppointmentWorld(includeAppointment: false);
+        Require(!authorizer.Check(outOfOffice, new CharacterId("minister"), GameCapability.AllocateFinance).Allowed,
+            "换任（撤掉任命）后必须立即失去能力");
+    }
+
+    /// <summary>伪造 Actor：即使世界任命列表里存在针对该编号的任命，角色不存在也必须被拒（fail-closed）。</summary>
+    private static void ShouldRejectFakeActorEvenWithMatchingAppointment()
+    {
+        var world = CreateAppointmentWorld(
+            includeAppointment: false,
+            extraAppointments:
+            [
+                new AppointmentState(new CharacterId("ghost"), new InstitutionId("office-hubu"),
+                    Scope: null, Limit: null, new GameTime(FixedUtc), EffectiveTo: null),
+            ]);
+        var decision = new CapabilityAuthorizer().Check(world, new CharacterId("ghost"), GameCapability.AllocateFinance);
+        Require(!decision.Allowed && decision.Reason.Contains("不存在"),
+            "伪造 Actor 必须被拒，即使任命列表里存在对应项");
+    }
+
+    /// <summary>越权辖区：任命 scope=ningyuan 时，只授权宁远辖区的目标，辖区外目标必须被拒。</summary>
+    private static void ShouldRejectResourceOutsideAppointmentScope()
+    {
+        var world = CreateAppointmentWorld(scope: "ningyuan");
+        var authorizer = new CapabilityAuthorizer();
+        Require(authorizer.Check(world, new CharacterId("minister"), GameCapability.AllocateFinance, "ningyuan").Allowed,
+            "辖区内的目标应通过任命授权");
+        Require(!authorizer.Check(world, new CharacterId("minister"), GameCapability.AllocateFinance, "dengzhou").Allowed,
+            "辖区外的目标必须被拒（越权辖区）");
+    }
+
+    /// <summary>到期：任命按半开区间 [EffectiveFrom, EffectiveTo) 生效，到期时刻即失效。</summary>
+    private static void ShouldExpireAppointmentAtEffectiveTo()
+    {
+        var from = new DateTimeOffset(1629, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var to = new DateTimeOffset(1629, 3, 1, 0, 0, 0, TimeSpan.Zero);
+        var authorizer = new CapabilityAuthorizer();
+        var active = CreateAppointmentWorld(currentTime: from.AddDays(30), effectiveTo: new GameTime(to));
+        Require(authorizer.Check(active, new CharacterId("minister"), GameCapability.AllocateFinance).Allowed,
+            "任期内的任命应有效");
+        var atExpiry = CreateAppointmentWorld(currentTime: to, effectiveTo: new GameTime(to));
+        Require(!authorizer.Check(atExpiry, new CharacterId("minister"), GameCapability.AllocateFinance).Allowed,
+            "到期时刻（EffectiveTo 精确到达）任命必须已失效");
+        var expired = CreateAppointmentWorld(currentTime: to.AddDays(10), effectiveTo: new GameTime(to));
+        Require(!authorizer.Check(expired, new CharacterId("minister"), GameCapability.AllocateFinance).Allowed,
+            "到期之后的任命必须失效");
+    }
+
+    /// <summary>哈希/快照：任命字段必须进入 canonical hash 与快照，且字节往返后逐字段一致。</summary>
+    private static void ShouldKeepAppointmentsInSnapshotAndCanonicalHash()
+    {
+        // 任命差异必须改变 canonical hash（任命是影响未来授权裁决的状态）
+        var withAppointment = new RealtimeSimulationRuntime(CreateAppointmentWorld());
+        var differentScope = new RealtimeSimulationRuntime(CreateAppointmentWorld(scope: "ningyuan"));
+        var noAppointment = new RealtimeSimulationRuntime(CreateAppointmentWorld(includeAppointment: false));
+        Require(withAppointment.StateHash != noAppointment.StateHash, "有无任命的两个世界 canonical hash 必须不同");
+        Require(withAppointment.StateHash != differentScope.StateHash, "任命辖区不同的两个世界 canonical hash 必须不同");
+
+        // 世界状态字节往返：任命必须逐字段恢复
+        var world = CreateAppointmentWorld();
+        var restoredWorld = SnapshotCodec.DeserializeWorld(SnapshotCodec.SerializeWorld(world));
+        Require(restoredWorld.Appointments.Count == world.Appointments.Count, "快照往返后任命数量必须一致");
+        Require(restoredWorld.Appointments.Single() == world.Appointments.Single(), "快照往返后任命必须逐字段一致");
+
+        // 完整运行时快照往返：canonical hash 必须一致（证明任命进入 RealtimeSnapshot 的 WorldState 编码）
+        var runtime = new RealtimeSimulationRuntime(world);
+        var restored = RealtimeSimulationRuntime.Restore(
+            SnapshotCodec.Deserialize(SnapshotCodec.Serialize(runtime.CaptureSnapshot())));
+        Require(restored.StateHash == runtime.StateHash, "含任命的完整快照往返后 canonical hash 必须一致");
     }
 
     /// <summary>

@@ -6,6 +6,7 @@ using MingSim.Domain.Common;
 using MingSim.Domain.Economy;
 using MingSim.Domain.Institutions;
 using MingSim.Domain.Map;
+using MingSim.Domain.Realtime;
 using MingSim.Domain.Scenario;
 
 namespace MingSim.Application.Scenarios;
@@ -84,6 +85,31 @@ public static class Ningyuan1629InitialWorld
                     : null));
         }
 
+        // 任命装配：把 world.json 已有 officeId 变成 1629-01-01 生效的 AppointmentState。
+        // 为什么由 officeId 派生而不是另写一份清单：officeId 是 world.json 的事实字段
+        // （loader_compat.office_id_scope：全部解析到本文件 institutions，无悬空引用），
+        // 从它派生保证任命与角色/机构永不脱节；毛文龙/孙承宗 officeId=null（OPEN 条目：
+        // 正月无切片内任职，见账本 OPEN-1629-JAN-CURRENT-OFFICERS / CLAIM-MAO-STATUS-CHANGE），
+        // 不产生任命、不虚构机构。生效起=场景起点是"快照断言 1629-01-01 在任"，
+        // 不是史实任命日（袁崇焕督师存在二月/四月来源冲突，账本不写具体任命日）；
+        // 结束为空表示切片内无撤换证据，不虚构卸任日期。
+        var appointments = new List<AppointmentState>();
+        foreach (var character in characters)
+        {
+            if (character.OfficeId is null)
+            {
+                continue;
+            }
+
+            appointments.Add(new AppointmentState(
+                character.Id,
+                new InstitutionId(character.OfficeId),
+                Scope: AppointmentScope(character.OfficeId),
+                Limit: null,
+                new GameTime(ScenarioStart),
+                EffectiveTo: null));
+        }
+
         var stockpiles = new List<StockpileState>();
         foreach (var stockpile in root.GetProperty("stockpiles").EnumerateArray())
         {
@@ -121,6 +147,7 @@ public static class Ningyuan1629InitialWorld
             grants,
             stockpiles: stockpiles,
             routes: routes,
+            appointments: appointments,
             scenario: scenario);
     }
 
@@ -132,4 +159,18 @@ public static class Ningyuan1629InitialWorld
         Enum.TryParse<GameCapability>(value, out var capability)
             ? capability
             : throw new InvalidDataException($"剧本中出现未知能力：{value}");
+
+    /// <summary>
+    /// 任命辖区（DESIGN 最小映射）：与 world.json capabilityGrants 的 resourceId 对齐。
+    /// 为什么督师差遣的辖区只写宁远：world.json 只把宁远定义为前线粮仓目的地，
+    /// 督师的 PlanLogistics/MoveArmy 授权本来就限定在 ningyuan（见 capabilityGrants），
+    /// 任命辖区取同一值可以保证"任命推导授权"与既有直接授权语义一致、不越权；
+    /// 其余中央机构负责全局财粮/督催（capabilityGrants.resourceId 为空），辖区留空=不限；
+    /// 皇帝/关宁军镇没有能力项，scope 不参与任何裁决。
+    /// </summary>
+    private static string? AppointmentScope(string officeId) => officeId switch
+    {
+        "office-jiliao-dushi" => "ningyuan",
+        _ => null,
+    };
 }
