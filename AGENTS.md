@@ -27,6 +27,7 @@
 → 测试验证
 → 实现
 → 独立审查
+→ Bug Hunt
 → 集成验证
 
 禁止因为：
@@ -40,7 +41,8 @@
 
 # 角色体系
 
-系统必须拆分以下 Agent：
+系统必须拆分以下 Agent（职责级拆分：一个执行者可戴多顶帽子，
+但 Self Review 与 Independent Review 必须由未开发该变更的执行者担任）：
 
 ## 1. Architect Agent
 
@@ -124,6 +126,9 @@ PR
 
 说明需求不明确。
 
+纯文档/内容/资产类变更（无可执行代码）以"可核验的验收证据"代替测试：
+来源核对、渲染/运行截图、diff 检查等，记录在 PR 正文即可，不因"无法定义测试"阻塞。
+
 禁止：
 
 "先写代码以后补测试"
@@ -193,10 +198,14 @@ Review Report
 
 这是最高优先级角色。
 
+角色冲突时，由 Principal Engineer（总控）结合运行证据裁决；
+Independent Reviewer 的 P0/P1 未修复前，总控不得合并。
 
 必须：
 
 不知道 Developer 的思考过程。
+审查输入只限：Requirement、Architecture Contract、Diff、Tests 与运行证据；
+开发者不得向审查者提供实现思路自述。
 
 只看：
 
@@ -234,6 +243,14 @@ Review Report
 
 - 是否违反边界
 
+## 仓库特定必查（MingSim 红线，与 docs 04/05/08/16 一致）
+
+- 代码 PR：权限、前置条件、事务、幂等、不变量、确定性、恢复与缺失边界测试
+- UI/地图/史料 PR：真实运行画面、来源、许可证，以及 FACT/INFERENCE/DESIGN/OPEN 语义
+- 架构边界：WorldState 只有 Simulation 可写；UI 只读 ReadModel 并提交 Command；
+  Agent/LLM 只提交结构化 Intent；权威时间只有一套 GameTime + Scheduler
+- 历史内容宽容度：史料细节的小偏差记为 P2 不阻塞；伪造来源冲突或绕过机器门禁为 P1
+
 
 输出：
 
@@ -270,7 +287,9 @@ REQUEST_CHANGES
 
 如果找不到：
 
-说明检查不足，需要重新分析。
+再重新分析一轮；仍无发现时如实记录"未发现潜在失败场景"并判定 BUG_HUNT_CLEAR，
+不得无限循环，也不得虚构问题。纯文档/内容类变更没有代码攻击面时，
+攻击目标改为协议自洽性、事实与来源一致性（FACT/DESIGN/OPEN），完成后记录即可。
 
 
 ---
@@ -298,6 +317,19 @@ Merge
 - 自己 merge
 - 自己 approve
 
+合并执行者（唯一）：
+
+只有总控（Principal Engineer）在 PR Gate 全部满足后执行 Squash merge 并删除远程分支；
+任何子代理不得审查、批准、合并或删除自己的分支。
+
+SHA 绑定与标签状态机：
+
+- 独立审查必须记录审查当时的 PR head SHA；通过后总控标记 review:passed，
+  并只为该 SHA 写入 independent-review-gate 成功状态；
+- 任何新提交产生没有通过状态的新 SHA，必须重新独立审查；标签不能代替 SHA 绑定门禁；
+- 标签流转：review:pending → review:passed 或 review:changes-requested；
+- 下游任务只能依赖"独立审查通过并已合并"的 PR，不能只看分支存在、测试通过或 PR 已创建。
+
 
 ---
 
@@ -316,6 +348,9 @@ PR 合并必须满足：
 [ ] Bug Hunter 完成
 
 [ ] 无 P0/P1 问题
+
+（其中 Independent Review PASS 与 Bug Hunter 完成都绑定审查时的 head SHA；
+合并必须使用该 SHA 或其后经过重新审查的新 SHA。）
 
 ---
 
@@ -346,11 +381,13 @@ PR 合并必须满足：
 不要创建抽象。
 
 
-只有满足：
+只有同时满足：
 
 1. 至少两个真实使用者
 2. 明确变化方向
 3. 抽象减少复杂度
+
+（三条同时满足才允许创建；与 docs/设计蓝图/10 §4.1 冲突时以本条为准。）
 
 
 才允许：
