@@ -6,7 +6,7 @@ using MingSim.Agents.Providers;
 
 namespace MingSim.Agents.ContractTests;
 
-internal static class Program
+internal static partial class Program
 {
     private static readonly ModelRequest Request = new(
         "You are a cautious adviser.",
@@ -37,6 +37,12 @@ internal static class Program
             ShouldHardStopWhenBodyReadStalls();
             ShouldIsolateConcurrentStalledCalls();
             ShouldHardStopWhenDisposeStalls();
+            ShouldSubmitAuthorizedRulesLogisticsIntentThroughKernel();
+            ShouldRejectUnauthorizedLogisticsIntentWithoutSideEffects();
+            ShouldRejectUnsupportedIntentExplicitly();
+            ShouldSubmitAuthorizedMoveArmyIntentThroughKernel();
+            ShouldRequireNoModelProviderForRulesPath();
+            ShouldNotLeakSecretsInAgentEntrySources();
 
             Console.WriteLine("Ming.Agents OpenAI-compatible contract tests passed.");
             return 0;

@@ -1,4 +1,5 @@
 using MingSim.Domain.Common;
+using MingSim.Domain.Realtime;
 
 namespace MingSim.Agents.Runtime;
 
@@ -23,4 +24,6 @@ public sealed record AgentContext(
     long TreasurySilver,
     int FacilityCount,
     IReadOnlyList<ArmyObservation> Armies,
-    IReadOnlySet<GameCapability> Capabilities);
+    IReadOnlySet<GameCapability> Capabilities,
+    long WorldVersion,
+    GameTime GameTime);
