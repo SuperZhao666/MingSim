@@ -23,7 +23,7 @@ internal static class SnapshotCodecAcceptance
         CodecRestoredInstanceContinuesDeterministically();
         CodecRoundTripsPendingInboxCommands();
         CodecMigratesV1PayloadToV2AndRestoresSameWorld();
-        CodecMigratesRealV1HashSampleAndRestoresSameWorld();
+        CodecRejectsV1PayloadWithInconsistentOrCorruptHashes();
         CodecMigrationFailureFailsClosed();
         CodecFallsBackFromCorruptedNewSnapshotToPreviousReady();
         CodecReadsV1WorldAndEventPayloads();
@@ -143,23 +143,24 @@ internal static class SnapshotCodecAcceptance
 
     /// <summary>
     /// v1→v2 迁移（本地等价验收；SQLite 全量路径见 SqliteStoreAcceptance.SqliteV1ArchiveMigratesAndRestoresSameWorld）：
-    /// 从 git 历史（#28 之前的 SnapshotCodec v1 格式）手工构造的 v1 载荷迁移到 v2 后，
-    /// 恢复出与原始快照相同的世界（canonical hash、WorldVersion/GameTime、在途运输一致）。
+    /// 载荷携带**真实 v1 哈希**（schema4、无任命段，见 Program.RealV1StateHash——由 #28 之前的
+    /// v1 hasher 对确定性夹具世界计算）。迁移先按 v1 记录版本校验载荷自带哈希（P1-1），
+    /// 校验通过后 re-seal 为当前规则（P1），恢复出与原始快照相同的世界。
     /// </summary>
     private static void CodecMigratesV1PayloadToV2AndRestoresSameWorld()
     {
         var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
-        Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "codec-migrate", 5_000)).Queued,
+        Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "v1-real-fixture", 5_000)).Queued,
             "迁移测试命令应该进入收件箱");
         runtime.AdvanceTo(runtime.ReadModel.GameTime);
         var snapshot = runtime.CaptureSnapshot();
         var v2Payload = SnapshotCodec.Serialize(snapshot);
-        var v1Payload = Program.DowngradePayloadToV1(v2Payload, "MSNAP"u8.ToArray());
+        var fixture = Program.BuildRealV1Fixture(snapshot, "MSNAP"u8.ToArray(), snapshot.StateHash, snapshot.PayloadChecksum);
 
         // 严格入口保持 fail-closed：Deserialize 不静默接受 v1，必须显式迁移
-        Program.RequireThrows<InvalidDataException>(() => SnapshotCodec.Deserialize(v1Payload));
+        Program.RequireThrows<InvalidDataException>(() => SnapshotCodec.Deserialize(fixture));
 
-        var migrated = SnapshotCodec.MigrateV1ToV2(v1Payload);
+        var migrated = SnapshotCodec.MigrateV1ToV2(fixture);
         Program.Require(migrated[5] == 2, "迁移后必须写回当前 v2 格式版本字节");
         var migratedV2 = SnapshotCodec.MigrateV1ToV2(v2Payload);
         Program.Require(migratedV2.SequenceEqual(v2Payload), "已是 v2 的载荷迁移必须幂等原样返回");
@@ -167,6 +168,9 @@ internal static class SnapshotCodecAcceptance
         var migratedSnapshot = SnapshotCodec.Deserialize(migrated);
         Program.Require(Program.GetSnapshotState(migratedSnapshot).Appointments.Count == 0,
             "v1 世界没有任命段，迁移后任命必须为空");
+        Program.Require(!StringComparer.Ordinal.Equals(migratedSnapshot.StateHash, Program.RealV1StateHash) &&
+                        StringComparer.Ordinal.Equals(migratedSnapshot.StateHash, runtime.StateHash),
+            "迁移必须 re-seal：重新计算的 StateHash 等于当前 hasher 结果且不再是 v1 时代哈希");
         var restored = RealtimeSimulationRuntime.Restore(migratedSnapshot);
         Program.Require(restored.StateHash == runtime.StateHash,
             "v1 载荷迁移到 v2 后恢复，canonical hash 必须与迁移前一致（同一世界）");
@@ -180,37 +184,32 @@ internal static class SnapshotCodecAcceptance
     }
 
     /// <summary>
-    /// P1 回归样本：带真实 v1 哈希（schema4、无任命段，见 Program.RealV1StateHash）的载荷
-    /// 迁移后必须通过 RealtimeSimulationRuntime.Restore 权威校验且 hash 一致。
-    /// 旧实现（迁移原样保留 v1 哈希字段）在此必然失败：当前运行时按 schema5 重算无法复现
-    /// schema4 哈希（已实证 HASHES DIFFER=True），因此 Restore 会抛"canonical state hash 校验失败"。
+    /// P1-1 边界回归：v1 载荷校验字段与内容不一致必须 fail-closed（拒绝，绝不静默成功）。
+    /// (a) "v1 布局但带 v2 时代哈希"的载荷（DowngradePayloadToV1 产物）：任何哈希规则下都与
+    ///     内容不一致 → 迁移必须拒绝；(b) 真实 v1 哈希样本上单字节内容损坏（结构仍可解码）：
+    ///     按 schema4 重算的校验字段与载荷自带值失配 → 迁移必须拒绝（旧实现会带病 re-seal 静默通过）。
     /// </summary>
-    private static void CodecMigratesRealV1HashSampleAndRestoresSameWorld()
+    private static void CodecRejectsV1PayloadWithInconsistentOrCorruptHashes()
     {
-        // 夹具世界必须与 Program.RealV1StateHash 计算时完全一致（见常量出处注释）。
         var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
         Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "v1-real-fixture", 5_000)).Queued,
-            "真实 v1 样本命令应该进入收件箱");
+            "P1-1 边界命令应该进入收件箱");
         runtime.AdvanceTo(runtime.ReadModel.GameTime);
         var snapshot = runtime.CaptureSnapshot();
+
+        // (a) v1 布局但保留 v2 时代哈希（DowngradePayloadToV1 只改布局）——哈希字段与内容不一致
+        var synthetic = Program.DowngradePayloadToV1(SnapshotCodec.Serialize(snapshot), "MSNAP"u8.ToArray());
+        Program.RequireThrows<InvalidDataException>(() => SnapshotCodec.MigrateV1ToV2(synthetic));
+
+        // (b) 真实 v1 哈希样本 + 单字节内容损坏（翻转 outbox 事件类型字符串内的一个字符，
+        //     保持结构可解码与合法 UTF-8；内容变化使 schema4 校验字段失配）
         var fixture = Program.BuildRealV1Fixture(snapshot, "MSNAP"u8.ToArray(), snapshot.StateHash, snapshot.PayloadChecksum);
-
-        // 夹具前提：载荷携带的 StateHash 是 schema4 旧哈希，当前 hasher 无法复现（非自证式样本）。
-        var migratedSnapshot = SnapshotCodec.Deserialize(SnapshotCodec.MigrateV1ToV2(fixture));
-        Program.Require(!StringComparer.Ordinal.Equals(migratedSnapshot.StateHash, Program.RealV1StateHash),
-            "迁移必须 re-seal：重新计算的 StateHash 不能再是 v1 时代哈希");
-        Program.Require(StringComparer.Ordinal.Equals(migratedSnapshot.StateHash, runtime.StateHash),
-            "re-seal 后 StateHash 必须等于当前 hasher 对同一世界的计算结果");
-
-        // 权威恢复必须成功且 hash 一致（保留旧哈希的旧实现在这里失败——P1 回归点）。
-        var restored = RealtimeSimulationRuntime.Restore(migratedSnapshot);
-        Program.Require(restored.StateHash == runtime.StateHash,
-            "真实 v1 哈希样本迁移后，权威恢复必须成功且 canonical hash 与原始世界一致");
-        Program.Require(restored.ReadModel.WorldVersion == runtime.ReadModel.WorldVersion &&
-                        restored.ReadModel.GameTime == runtime.ReadModel.GameTime,
-            "真实 v1 哈希样本迁移恢复后 WorldVersion/GameTime 必须一致");
-        Program.Require(restored.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
-            "真实 v1 哈希样本迁移恢复后必须回到同一在途运输状态");
+        var needle = "ShipmentPlanned"u8.ToArray();
+        var contentIndex = IndexOf(fixture, needle);
+        Program.Require(contentIndex >= 0, "真实 v1 夹具必须包含可定位的 outbox 事件类型字符串");
+        var corrupted = (byte[])fixture.Clone();
+        corrupted[contentIndex + 3] ^= 0x01; // 'p' → 'q'：合法 ASCII，内容变化，结构不变
+        Program.RequireThrows<InvalidDataException>(() => SnapshotCodec.MigrateV1ToV2(corrupted));
     }
 
     /// <summary>迁移失败 fail-closed：损坏/截断/未知版本的 v1 载荷必须抛异常，绝不返回半迁移结果。</summary>
@@ -295,6 +294,34 @@ internal static class SnapshotCodecAcceptance
                         restoredEvent.EventType == domainEvent.EventType &&
                         restoredEvent.EventSequence == domainEvent.EventSequence,
             "v1 事件载荷必须按同一布局读取，事件字段逐项一致");
+    }
+
+    private static int IndexOf(byte[] haystack, byte[] needle)
+    {
+        if (needle.Length == 0 || haystack.Length < needle.Length)
+        {
+            return -1;
+        }
+
+        for (var start = 0; start <= haystack.Length - needle.Length; start++)
+        {
+            var matched = true;
+            for (var offset = 0; offset < needle.Length; offset++)
+            {
+                if (haystack[start + offset] != needle[offset])
+                {
+                    matched = false;
+                    break;
+                }
+            }
+
+            if (matched)
+            {
+                return start;
+            }
+        }
+
+        return -1;
     }
 
     private static void TryRestore(byte[] payload)

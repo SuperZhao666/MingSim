@@ -136,6 +136,24 @@ public static class RealtimeSnapshotHash
             snapshot.NextIngressSequence, snapshot.NextEventSequence, snapshot.ProcessedScheduledEventCount,
             snapshot.RealGameTickRemainder, snapshot.IsPaused, snapshot.Speed, snapshot.RandomState);
 
+    /// <summary>
+    /// V1 校验专用入口（独立审查 P1-1）：按 v1 时代哈希规则（schema4、无任命段）重算
+    /// StateHash/PayloadChecksum。迁移用它与 v1 载荷自带的校验字段逐字节比对——内容损坏但
+    /// 结构可解码的旧档会在这里失配而被拒绝（fail-closed），绝不带病 re-seal 静默通过。
+    /// payload checksum 逻辑在 v1 时代与当前一致（RealtimeSnapshotSchema.Version 同为当前值），
+    /// 只是 stateHash 输入不同。
+    /// </summary>
+    public static (string StateHash, string PayloadChecksum) ComputeV1Hashes(RealtimeSnapshot snapshot)
+    {
+        var stateHash = CanonicalStateHasher.Compute(
+            snapshot.State, snapshot.ScheduledEvents, snapshot.NextCreationSequence, snapshot.NextIngressSequence,
+            snapshot.CommandOutcomes, snapshot.RandomState, snapshot.OutboxEvents, snapshot.RealGameTickRemainder,
+            snapshot.InitialGameTime, snapshot.InitialWorldVersion, snapshot.ProcessedScheduledEventCount, snapshot.IsPaused,
+            snapshot.Speed, snapshot.PendingCommands.Select(Fingerprint), snapshot.NextEventSequence,
+            hashSchemaVersion: CanonicalStateHasher.LegacySchemaVersionV1);
+        return (stateHash, ComputePayloadChecksum(snapshot, stateHash));
+    }
+
     /// <summary>按当前权威规则计算 StateHash + PayloadChecksum（快照对象版；迁移 re-seal 与测试使用）。</summary>
     public static (string StateHash, string PayloadChecksum) ComputeHashes(RealtimeSnapshot snapshot)
     {

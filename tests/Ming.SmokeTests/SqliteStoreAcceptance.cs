@@ -25,7 +25,7 @@ internal static class SqliteStoreAcceptance
         SqliteRepeatedCommitIsIdempotent();
         SqliteVersionRegressionIsRejected();
         SqliteV1ArchiveMigratesAndRestoresSameWorld();
-        SqliteV1ArchiveWithRealV1HashMigratesAndRestores();
+        SqliteV1SingleByteContentCorruptionFailsClosed();
         SqliteCorruptedNewSnapshotFallsBackToPreviousReady();
         SqliteMigrationFailureFailsClosed();
     }
@@ -295,9 +295,10 @@ internal static class SqliteStoreAcceptance
     }
 
     /// <summary>
-    /// v1 档成功迁移到 v2 并恢复同一世界：把已提交存档的快照行降级为 v1 格式
-    /// （从 git 历史手工构造的最小样例，见 Program.DowngradePayloadToV1），
-    /// RestoreLatest 先迁移再恢复，得到与迁移前完全相同的世界。
+    /// v1 档成功迁移到 v2 并恢复同一世界：已提交存档的快照行替换为**真实 v1 档**
+    /// （v1 布局 + schema4 权威哈希，见 Program.BuildRealV1Fixture/RealV1StateHash）。
+    /// RestoreLatest 先按 v1 记录版本校验载荷哈希（P1-1）再 re-seal 为当前规则（P1），
+    /// 权威恢复后得到与迁移前完全相同的世界。
     /// </summary>
     private static void SqliteV1ArchiveMigratesAndRestoresSameWorld()
     {
@@ -306,7 +307,7 @@ internal static class SqliteStoreAcceptance
         try
         {
             var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
-            Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "sqlite-v1migrate", 5_000)).Queued,
+            Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "v1-real-fixture", 5_000)).Queued,
                 "迁移测试命令应该进入收件箱");
             runtime.AdvanceTo(runtime.ReadModel.GameTime);
             var snapshot = runtime.CaptureSnapshot();
@@ -315,10 +316,9 @@ internal static class SqliteStoreAcceptance
                 StageAndCommit(store, worldId, snapshot);
             }
 
-            // 把最新快照行的载荷降级为 v1（snapshot_blob 不在整库校验和覆盖列内，
-            // 列校验仍通过；内容由迁移/恢复路径校验）。
-            var v1Payload = Program.DowngradePayloadToV1(SnapshotCodec.Serialize(snapshot), "MSNAP"u8.ToArray());
-            ReplaceSnapshotBlob(dbPath, worldId, LatestSnapshotSeq(dbPath, worldId), v1Payload);
+            // 把最新快照行替换为"真实 v1 档"（schema4 哈希 + v1 布局；snapshot_blob 不在整库校验和覆盖列内）。
+            var realV1 = Program.BuildRealV1Fixture(snapshot, "MSNAP"u8.ToArray(), snapshot.StateHash, snapshot.PayloadChecksum);
+            ReplaceSnapshotBlob(dbPath, worldId, LatestSnapshotSeq(dbPath, worldId), realV1);
 
             var restored = RealtimeSimulationRuntime.Restore(SqliteCommitStore.RestoreLatest(dbPath, worldId));
             Program.Require(restored.StateHash == runtime.StateHash,
@@ -337,12 +337,11 @@ internal static class SqliteStoreAcceptance
     }
 
     /// <summary>
-    /// P1 回归样本（SQLite 全量路径）：带真实 v1 哈希（schema4）的 v1 档迁移后必须通过
-    /// 权威恢复并得到同一世界（旧实现保留 v1 哈希时 RestoreLatest 恢复出的快照会在
-    /// Runtime.Restore 的 canonical hash 校验失败）。详见
-    /// SnapshotCodecAcceptance.CodecMigratesRealV1HashSampleAndRestoresSameWorld。
+    /// P1-1 边界回归（SQLite 全量路径）：v1 档单字节内容损坏必须 fail-closed——
+    /// (a) 只有一份快照且内容被篡改 → RestoreLatest 拒绝（绝不带病 re-seal 静默成功）；
+    /// (b) 最新快照内容被篡改且存在旧 READY → RestoreLatest 回退到旧 READY（绝不发布损坏内容）。
     /// </summary>
-    private static void SqliteV1ArchiveWithRealV1HashMigratesAndRestores()
+    private static void SqliteV1SingleByteContentCorruptionFailsClosed()
     {
         var worldId = new WorldId("ningyuan-1629");
         var dbPath = CreateDbPath();
@@ -350,26 +349,47 @@ internal static class SqliteStoreAcceptance
         {
             var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
             Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "v1-real-fixture", 5_000)).Queued,
-                "真实 v1 档命令应该进入收件箱");
+                "P1-1 边界命令应该进入收件箱");
             runtime.AdvanceTo(runtime.ReadModel.GameTime);
             var snapshot = runtime.CaptureSnapshot();
+
+            // (a) 单份快照：内容单字节损坏（翻转 outbox 事件类型字符串内一个字符，结构仍可解码）
             using (var store = new SqliteCommitStore(dbPath, worldId))
             {
                 StageAndCommit(store, worldId, snapshot);
             }
 
-            // 把最新快照行替换为"真实 v1 档"（schema4 哈希 + v1 布局；snapshot_blob 不在整库校验和覆盖列内）。
-            var realV1 = Program.BuildRealV1Fixture(snapshot, "MSNAP"u8.ToArray(), snapshot.StateHash, snapshot.PayloadChecksum);
-            ReplaceSnapshotBlob(dbPath, worldId, LatestSnapshotSeq(dbPath, worldId), realV1);
+            var fixture = Program.BuildRealV1Fixture(snapshot, "MSNAP"u8.ToArray(), snapshot.StateHash, snapshot.PayloadChecksum);
+            var needle = "ShipmentPlanned"u8.ToArray();
+            var contentIndex = IndexOf(fixture, needle);
+            Program.Require(contentIndex >= 0, "真实 v1 夹具必须包含可定位的 outbox 事件类型字符串");
+            var corrupted = (byte[])fixture.Clone();
+            corrupted[contentIndex + 3] ^= 0x01;
+            ReplaceSnapshotBlob(dbPath, worldId, LatestSnapshotSeq(dbPath, worldId), corrupted);
+            Program.RequireThrowsAny(() => SqliteCommitStore.RestoreLatest(dbPath, worldId));
+            DeleteDbFiles(dbPath);
 
-            var restored = RealtimeSimulationRuntime.Restore(SqliteCommitStore.RestoreLatest(dbPath, worldId));
-            Program.Require(restored.StateHash == runtime.StateHash,
-                "真实 v1 哈希档迁移后，权威恢复必须成功且 canonical hash 与原始世界一致（P1 re-seal）");
-            Program.Require(restored.ReadModel.WorldVersion == runtime.ReadModel.WorldVersion &&
-                            restored.ReadModel.GameTime == runtime.ReadModel.GameTime,
-                "真实 v1 哈希档迁移恢复后 WorldVersion/GameTime 必须一致");
-            Program.Require(restored.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
-                "真实 v1 哈希档迁移恢复后必须回到同一在途运输状态");
+            // (b) 两快照：损坏的最新 v1 快照 + 旧 READY（v2）→ 回退到旧 READY，绝不发布损坏内容。
+            // 注：第二份提交用"同一时刻处理第二条命令"产生版本递增（GameTime 不变），
+            // 避开既有的"场景起点未序列化导致时间推进后快照往返哈希漂移"缺陷（P2 债务，见 PR 风险节）。
+            var hashA = snapshot.StateHash;
+            using (var store = new SqliteCommitStore(dbPath, worldId))
+            {
+                StageAndCommit(store, worldId, snapshot);
+            }
+
+            runtime.SetPaused(true);
+            runtime.AdvanceTo(runtime.ReadModel.GameTime);
+            using (var store = new SqliteCommitStore(dbPath, worldId))
+            {
+                StageAndCommit(store, worldId, runtime.CaptureSnapshot());
+            }
+
+            var latestSeq = LatestSnapshotSeq(dbPath, worldId);
+            ReplaceSnapshotBlob(dbPath, worldId, latestSeq, corrupted);
+            var fellBack = RealtimeSimulationRuntime.Restore(SqliteCommitStore.RestoreLatest(dbPath, worldId));
+            Program.Require(fellBack.StateHash == hashA,
+                "损坏的最新 v1 快照必须回退到旧 READY（同一历史世界），绝不静默接受损坏内容");
         }
         finally
         {

@@ -143,10 +143,13 @@ public static class SnapshotCodec
     /// - v1 载荷：按 v1 布局读取全部段（WorldState 无任命段，任命为空），再用当前格式重新序列化；
     /// - 已是 v2 的载荷原样返回（幂等，调用方无需先探版本）；
     /// - 未知更高版本抛异常（fail-closed），绝不把旧档按新格式静默误读。
-    /// re-seal（独立审查 P1）：v1 时代载荷携带的 StateHash/PayloadChecksum 由旧哈希规则
-    /// （CanonicalStateHasher schema4、无任命段）计算，当前运行时按 schema5 重算必然失配；
-    /// 迁移后必须用当前规则对重建的快照内容重算二者（<see cref="RealtimeSnapshotHash"/>），
-    /// 才能通过 <see cref="RealtimeSimulationRuntime.Restore"/> 的权威校验并恢复同一世界。
+    /// 先验证、再 re-seal（独立审查 P1/P1-1）：
+    /// 1. P1：v1 时代载荷携带的 StateHash/PayloadChecksum 由旧哈希规则（schema4、无任命段）计算，
+    ///    当前运行时按 schema5 重算必然失配，迁移后必须用当前规则重算二者（<see cref="RealtimeSnapshotHash"/>）
+    ///    才能通过 <see cref="RealtimeSimulationRuntime.Restore"/> 的权威校验；
+    /// 2. P1-1：丢弃载荷自带校验字段前，先用 schema4 规则对解码出的内容重算 StateHash/PayloadChecksum
+    ///    并与载荷自带值逐字节比对——内容损坏但结构可解码的 v1 档会在这里失配而被拒绝（fail-closed，
+    ///    交给调用方回退链处理），绝不带病 re-seal 静默通过（相对 v1 时代 fail-closed 的严格性回归）。
     /// </remarks>
     public static byte[] MigrateV1ToV2(byte[] payload)
     {
@@ -169,9 +172,19 @@ public static class SnapshotCodec
             throw new InvalidDataException($"不支持快照载荷格式版本 {formatVersion}（当前支持 {FormatVersion}）。");
         }
 
-        // re-seal：v1 载荷的 StateHash/PayloadChecksum 由旧哈希规则计算，当前运行时无法复现；
-        // 读 v1 段 → 用当前规则重算 → 写 v2 段。任何一步失败都会抛出（fail-closed）。
+        // 读 v1 段（ReadString 使用严格 UTF-8 解码，非法字节即抛）。
         var migrated = ReadV1Snapshot(reader);
+
+        // P1-1：先按 v1 记录版本（schema4）重算校验字段并与载荷自带值比对，不一致即拒绝。
+        var (v1StateHash, v1Checksum) = RealtimeSnapshotHash.ComputeV1Hashes(migrated);
+        if (!StringComparer.Ordinal.Equals(migrated.StateHash, v1StateHash) ||
+            !StringComparer.Ordinal.Equals(migrated.PayloadChecksum, v1Checksum))
+        {
+            throw new InvalidDataException(
+                "v1 存档内容校验失败：内容哈希与载荷自带校验字段不一致（可能被篡改或损坏）。");
+        }
+
+        // re-seal：校验通过后，用当前规则重算 StateHash/PayloadChecksum 并写 v2 段（fail-closed）。
         var (stateHash, payloadChecksum) = RealtimeSnapshotHash.ComputeHashes(migrated);
         return Serialize(SnapshotReflection.Reseal(migrated, stateHash, payloadChecksum));
     }
@@ -989,6 +1002,10 @@ public static class SnapshotCodec
         writer.Write(bytes);
     }
 
+    // 严格 UTF-8 解码（throwOnInvalidBytes）：v1 读取也必须抛错而非替换字符静默接受损坏
+    // （独立审查 P1-1）；正常写入的字符串恒为合法 UTF-8，因此对合法往返无影响。
+    private static readonly UTF8Encoding StrictUtf8 = new(false, throwOnInvalidBytes: true);
+
     private static string ReadString(BinaryReader reader)
     {
         var length = ReadInt32(reader);
@@ -997,7 +1014,14 @@ public static class SnapshotCodec
             throw new InvalidDataException("字符串长度不能为负数。");
         }
 
-        return Encoding.UTF8.GetString(reader.ReadBytes(length));
+        try
+        {
+            return StrictUtf8.GetString(reader.ReadBytes(length));
+        }
+        catch (DecoderFallbackException exception)
+        {
+            throw new InvalidDataException("字符串包含非法 UTF-8 字节，载荷损坏。", exception);
+        }
     }
 
     private static void WriteNullableString(BinaryWriter writer, string? value)
