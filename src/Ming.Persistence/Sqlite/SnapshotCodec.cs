@@ -564,6 +564,7 @@ public static class SnapshotCodec
             turnNumber,
             treasurySilver,
             map,
+            currentTime: new DateTimeOffset(gameTimeTicks, TimeSpan.Zero),
             characters,
             institutions,
             grants,
