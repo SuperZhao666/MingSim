@@ -15,7 +15,9 @@ namespace MingSim.Domain.Realtime;
 /// </remarks>
 public static class CanonicalStateHasher
 {
-    public const int SchemaVersion = 4;
+    // Schema 4→5：新增 AppointmentState 段（任命影响授权裁决，必须进入权威哈希）。
+    // 哈希 schema 改变就递增版本（doc 08 约定），旧存档按旧版本验证。
+    public const int SchemaVersion = 5;
 
     public static string Compute(
         WorldState state,
@@ -66,6 +68,7 @@ public static class CanonicalStateHasher
         WriteCharacters(writer, state);
         WriteInstitutions(writer, state);
         WriteCapabilities(writer, state);
+        WriteAppointments(writer, state);
         WriteEconomy(writer, state);
         WriteIndustry(writer, state);
         WriteMilitary(writer, state);
@@ -200,6 +203,30 @@ public static class CanonicalStateHasher
             WriteString(writer, grant.Capability.ToString());
             WriteNullableString(writer, grant.ResourceId);
             WriteNullableInt32(writer, grant.ExpiresAtTurn);
+        }
+    }
+
+    /// <summary>
+    /// 任命段：任命影响授权裁决（未来行为），必须按稳定键排序进入哈希。
+    /// 排序键与 SnapshotCodec 完全一致，保证"同状态 → 同字节 → 同哈希"。
+    /// </summary>
+    private static void WriteAppointments(BinaryWriter writer, WorldState state)
+    {
+        var appointments = state.Appointments
+            .OrderBy(item => item.PersonId.Value, StringComparer.Ordinal)
+            .ThenBy(item => item.OfficeId.Value, StringComparer.Ordinal)
+            .ThenBy(item => item.Scope, StringComparer.Ordinal)
+            .ThenBy(item => item.EffectiveFrom.Value.UtcTicks)
+            .ToArray();
+        WriteInt32(writer, appointments.Length);
+        foreach (var appointment in appointments)
+        {
+            WriteString(writer, appointment.PersonId.Value);
+            WriteString(writer, appointment.OfficeId.Value);
+            WriteNullableString(writer, appointment.Scope);
+            WriteNullableInt64(writer, appointment.Limit);
+            WriteInt64(writer, appointment.EffectiveFrom.Value.UtcTicks);
+            WriteNullableInt64(writer, appointment.EffectiveTo?.Value.UtcTicks);
         }
     }
 

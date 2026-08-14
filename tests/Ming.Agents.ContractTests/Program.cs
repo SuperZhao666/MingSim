@@ -48,6 +48,12 @@ internal static partial class Program
             ShouldDiscardExpiredModelResultAndFallBackToRules();
             ShouldFallBackToRulesWhenModelOutputIsInvalid();
             ShouldRunRulesPathWithoutModelCalls();
+            ShouldStopModelCallsWhenBudgetExceededBeforeCall();
+            ShouldFallBackToUtilityAfterBudgetExhaustedByUsage();
+            ShouldFallBackToUtilityWhenProviderThrowsWithoutBlockingWorld();
+            ShouldFallBackToUtilityWhenProviderTimesOutWithoutBlockingWorld();
+            ShouldReadApiKeyOnlyFromEnvironmentVariable();
+            ShouldKeepKeyOutOfAuditAndExceptions();
 
             Console.WriteLine("Ming.Agents OpenAI-compatible contract tests passed.");
             return 0;

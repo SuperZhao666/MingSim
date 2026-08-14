@@ -24,6 +24,7 @@ public sealed class WorldState
     private readonly Dictionary<CharacterId, CharacterState> _characters = [];
     private readonly Dictionary<InstitutionId, InstitutionState> _institutions = [];
     private readonly List<CapabilityGrant> _capabilityGrants = [];
+    private readonly List<AppointmentState> _appointments = [];
     private readonly Dictionary<ArmyId, MovementState> _movements = [];
     private readonly Dictionary<DecreeId, DecreeState> _decrees = [];
 
@@ -65,6 +66,7 @@ public sealed class WorldState
         IEnumerable<ArmyState>? armies = null,
         IEnumerable<StockpileState>? stockpiles = null,
         IEnumerable<RouteState>? routes = null,
+        IEnumerable<AppointmentState>? appointments = null,
         ScenarioState? scenario = null)
     {
         // currentTime 允许剧本指定历史起点（如 1629-01-01）；缺省沿用 SimulationEpoch 的回合映射。
@@ -76,6 +78,7 @@ public sealed class WorldState
         foreach (var character in characters ?? []) world.AddCharacter(character);
         foreach (var institution in institutions ?? []) world.AddInstitution(institution);
         foreach (var grant in capabilityGrants ?? []) world.GrantCapability(grant);
+        foreach (var appointment in appointments ?? []) world.AddAppointment(appointment);
         foreach (var (resourceType, quantity) in inventory ?? []) world.Economy.Inventory.GetOrCreate(resourceType).Add(quantity);
         foreach (var army in armies ?? []) world.Military.Add(army);
         foreach (var stockpile in stockpiles ?? []) world.Logistics.AddStockpile(stockpile);
@@ -141,6 +144,10 @@ public sealed class WorldState
     public IReadOnlyList<CapabilityGrant> CapabilityGrants =>
         new ReadOnlyCollection<CapabilityGrant>(_capabilityGrants);
 
+    /// <summary>当前生效/已记录的人物↔职位机构任命（doc 06 §4.3）。写入仍只能通过初始化或 Simulation。</summary>
+    public IReadOnlyList<AppointmentState> Appointments =>
+        new ReadOnlyCollection<AppointmentState>(_appointments);
+
     public IReadOnlyDictionary<ArmyId, MovementState> Movements =>
         new ReadOnlyDictionary<ArmyId, MovementState>(_movements);
 
@@ -165,6 +172,8 @@ public sealed class WorldState
     }
 
     internal void GrantCapability(CapabilityGrant grant) => _capabilityGrants.Add(grant);
+
+    internal void AddAppointment(AppointmentState appointment) => _appointments.Add(appointment);
 
     internal void AddDecree(DecreeState decree)
     {
@@ -250,6 +259,12 @@ public sealed class WorldState
         foreach (var grant in _capabilityGrants)
         {
             clone._capabilityGrants.Add(grant);
+        }
+
+        // AppointmentState 是不可变 record（值语义），与 CapabilityGrant 一样直接共享引用即可。
+        foreach (var appointment in _appointments)
+        {
+            clone._appointments.Add(appointment);
         }
 
         foreach (var (armyId, movement) in _movements)

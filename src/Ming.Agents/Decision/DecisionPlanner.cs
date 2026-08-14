@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using MingSim.Agents.Audit;
 using MingSim.Agents.Providers;
 using MingSim.Agents.Runtime;
 using MingSim.Domain.Intents;
@@ -9,13 +11,15 @@ namespace MingSim.Agents.Decision;
 /// 按需决策规划器：模型路径可选，规则（Utility AI）路径是默认回退（ADR-006）。
 /// </summary>
 /// <remarks>
-/// 最小版人物决策流水线（doc 07 §3）：
-/// 1. 配置了 IModelProvider 时，先尝试让模型产出白名单意图 JSON；
-/// 2. 解析成功且结果未过期（AcceptedGameTime &lt; Deadline）→ 采用模型意图；
-/// 3. 解析失败、模型失败/超时或结果已过期 → 一律丢弃模型结果，回退规则决策。
+/// 最小版人物决策流水线（doc 07 §3、§13）：
+/// 1. 配置了 IModelProvider 时，先做预算闸门预检（预算耗尽→0 次调用，直接回退规则）；
+/// 2. 通过闸门后尝试让模型产出白名单意图 JSON，计时并记录审计；
+/// 3. 解析成功且结果未过期（AcceptedGameTime &lt; Deadline）→ 采用模型意图；
+/// 4. 解析失败、模型失败/超时或结果已过期 → 一律丢弃模型结果，回退规则决策。
 ///
 /// 不配置 Provider（provider 为 null）时 0 次模型调用即可完整决策；
 /// 模型故障只影响本次可选的模型路径，不会暂停世界主循环（doc 07 §13.4）。
+/// 每次模型调用（或被预算拦截的调用）都写入 ModelAuditLog：只记固定摘要，绝不携带密钥。
 /// 本类只产出意图，不提交：Agent 改写世界的唯一通道是 AgentRealtimeEntry。
 /// </remarks>
 public sealed class DecisionPlanner
@@ -36,20 +40,32 @@ public sealed class DecisionPlanner
 
     private readonly IAgentDecisionSource _ruleSource;
     private readonly IModelProvider? _provider;
+    private readonly ModelBudgetTracker? _budget;
+    private readonly ModelAuditLog? _auditLog;
+    private readonly string _providerName;
     private readonly ModelDecisionParser _parser = new();
 
     /// <summary>
     /// 创建规划器。ruleSource 是规则回退（通常是 Utility AI）；
-    /// provider 为空表示关闭模型路径，始终走规则决策。
+    /// provider 为空表示关闭模型路径，始终走规则决策；
+    /// budget 为空表示不限预算；auditLog 为空表示不记录审计；providerName 仅用于审计摘要。
     /// </summary>
-    public DecisionPlanner(IAgentDecisionSource ruleSource, IModelProvider? provider = null)
+    public DecisionPlanner(
+        IAgentDecisionSource ruleSource,
+        IModelProvider? provider = null,
+        ModelBudgetTracker? budget = null,
+        ModelAuditLog? auditLog = null,
+        string providerName = "model")
     {
         _ruleSource = ruleSource ?? throw new ArgumentNullException(nameof(ruleSource));
         _provider = provider;
+        _budget = budget;
+        _auditLog = auditLog;
+        _providerName = string.IsNullOrWhiteSpace(providerName) ? "model" : providerName;
     }
 
     /// <summary>
-    /// 完成一次决策：模型结果有效且未过期则采用，否则回退规则路径。
+    /// 完成一次决策：预算闸门通过且模型结果有效未过期则采用模型意图，否则回退规则路径。
     /// </summary>
     /// <param name="acceptedGameTime">结果被世界接受时的权威游戏时刻；用于半开区间过期判定。</param>
     public async Task<DecisionResult> PlanAsync(
@@ -61,55 +77,116 @@ public sealed class DecisionPlanner
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(context);
 
-        if (_provider is not null)
+        if (_provider is null)
         {
-            var modelIntents = await TryParseModelIntentsAsync(request, context, acceptedGameTime, cancellationToken)
-                .ConfigureAwait(false);
-            if (modelIntents is not null && !request.IsExpired(acceptedGameTime))
-            {
-                return new DecisionResult(request.DecisionId, DecisionSource.Model, modelIntents, acceptedGameTime);
-            }
-
-            // 模型结果解析失败、模型失败/超时或已过期：一律丢弃，回退规则路径。
+            return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.NotConfigured);
         }
 
-        return new DecisionResult(
-            request.DecisionId,
-            DecisionSource.Rules,
-            _ruleSource.Decide(context),
-            acceptedGameTime);
-    }
+        var modelRequest = BuildModelRequest(request, context);
+        var estimatedRequestTokens = EstimateRequestTokens(modelRequest);
 
-    private async Task<IReadOnlyList<WorldIntent>?> TryParseModelIntentsAsync(
-        DecisionRequest request,
-        AgentContext context,
-        GameTime acceptedGameTime,
-        CancellationToken cancellationToken)
-    {
+        // 预算闸门：预算耗尽时停止新模型请求（0 次调用），直接回退 Utility（doc 07 §13.3）。
+        if (_budget is not null && !_budget.CanAfford(estimatedRequestTokens))
+        {
+            AppendAudit(new ModelAuditEntry(
+                request.DecisionId,
+                _providerName,
+                ModelCallOutcome.BudgetExceeded,
+                estimatedRequestTokens,
+                0,
+                _budget.CostFor(estimatedRequestTokens),
+                TimeSpan.Zero,
+                DateTimeOffset.UtcNow));
+            return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.BudgetExceeded);
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        ModelResponse response;
         try
         {
-            var response = await _provider!.GenerateAsync(
-                BuildModelRequest(request, context),
-                cancellationToken).ConfigureAwait(false);
-            if (!response.Succeeded)
-            {
-                return null;
-            }
-
-            var parsed = _parser.Parse(request, context, response.Content, acceptedGameTime);
-            return parsed.Succeeded ? parsed.Intents : null;
+            response = await _provider.GenerateAsync(modelRequest, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            // 调用方取消必须原样传播，不能伪装成模型失败。
+            // 调用方取消必须原样传播，不能伪装成模型失败，也不记审计。
             throw;
         }
         catch (Exception)
         {
-            // 模型路径是按需外围决策源：任何未预期异常都回退规则，不让世界主循环停下来。
-            return null;
+            stopwatch.Stop();
+            // 未预期异常（含断网、认证失败）只回退规则；异常文本可能携带认证细节，绝不外泄。
+            RecordUsage(estimatedRequestTokens, 0);
+            AppendAudit(FailureEntry(request.DecisionId, estimatedRequestTokens, 0, stopwatch.Elapsed));
+            return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.ProviderFailed);
         }
+
+        stopwatch.Stop();
+        if (!response.Succeeded)
+        {
+            // Provider 失败/超时：审计统一用固定类别，不依赖 Provider 的文案。
+            RecordUsage(estimatedRequestTokens, 0);
+            AppendAudit(FailureEntry(request.DecisionId, estimatedRequestTokens, 0, stopwatch.Elapsed));
+            return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.ProviderFailed);
+        }
+
+        var responseTokens = TokenEstimation.FromText(response.Content);
+        RecordUsage(estimatedRequestTokens, responseTokens);
+        var parsed = _parser.Parse(request, context, response.Content, acceptedGameTime);
+        if (parsed.Succeeded && !request.IsExpired(acceptedGameTime))
+        {
+            AppendAudit(new ModelAuditEntry(
+                request.DecisionId,
+                _providerName,
+                ModelCallOutcome.Accepted,
+                estimatedRequestTokens,
+                responseTokens,
+                CostFor(estimatedRequestTokens + responseTokens),
+                stopwatch.Elapsed,
+                DateTimeOffset.UtcNow));
+            return new DecisionResult(request.DecisionId, DecisionSource.Model, parsed.Intents, acceptedGameTime);
+        }
+
+        // 模型结果解析失败或已过期：丢弃并回退规则路径，审计记录真实原因，不制造静默成功。
+        var outcome = parsed.Succeeded ? ModelCallOutcome.Expired : ModelCallOutcome.ParseFailed;
+        var reason = parsed.Succeeded ? ModelFallbackReason.Expired : ModelFallbackReason.ParseFailed;
+        AppendAudit(new ModelAuditEntry(
+            request.DecisionId,
+            _providerName,
+            outcome,
+            estimatedRequestTokens,
+            responseTokens,
+            CostFor(estimatedRequestTokens + responseTokens),
+            stopwatch.Elapsed,
+            DateTimeOffset.UtcNow));
+        return RulesResult(request, context, acceptedGameTime, reason);
     }
+
+    private DecisionResult RulesResult(
+        DecisionRequest request,
+        AgentContext context,
+        GameTime acceptedGameTime,
+        ModelFallbackReason reason) =>
+        new(request.DecisionId, DecisionSource.Rules, _ruleSource.Decide(context), acceptedGameTime, reason);
+
+    private void RecordUsage(long requestTokens, long responseTokens) =>
+        _budget?.RecordUsage(requestTokens + responseTokens);
+
+    private long CostFor(long tokens) => _budget?.CostFor(tokens) ?? 0;
+
+    private void AppendAudit(ModelAuditEntry entry) => _auditLog?.Append(entry);
+
+    private ModelAuditEntry FailureEntry(
+        string decisionId,
+        long requestTokens,
+        long responseTokens,
+        TimeSpan duration) =>
+        new(decisionId, _providerName, ModelCallOutcome.ProviderFailed,
+            requestTokens, responseTokens, CostFor(requestTokens + responseTokens), duration, DateTimeOffset.UtcNow);
+
+    private static long EstimateRequestTokens(ModelRequest request) =>
+        TokenEstimation.FromText(request.SystemInstruction) +
+        TokenEstimation.FromText(request.UserInput) +
+        TokenEstimation.FromText(request.ExpectedOutputSchema);
 
     /// <summary>编译最小决策上下文（DecisionPacket 的最小子集），不包含密钥或完整世界状态。</summary>
     private static ModelRequest BuildModelRequest(DecisionRequest request, AgentContext context)
