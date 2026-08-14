@@ -231,8 +231,11 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
                 WriteStateRow(_pendingState!, stateHash);
                 AppendJournalDelta(_pendingEvents!);
                 var snapshotSeq = WriteSnapshotRow(payload, _pendingState!, stateHash, payloadChecksum);
+                // 先写 meta 占位、再计算校验和、最后回写：校验和布局从不包含 total_checksum 列本身，
+                // 避免"为了校验 meta 又要先知道 meta 里的校验和"的自引用（提交/恢复两侧布局必须完全一致）。
+                WriteMeta(_pendingState, stateHash, payloadChecksum, snapshotSeq, totalChecksum: "");
                 var totalChecksum = ComputeTotalChecksum();
-                WriteMeta(_pendingState, stateHash, payloadChecksum, snapshotSeq, totalChecksum);
+                UpdateTotalChecksum(totalChecksum);
                 transaction.Commit();
             }
             catch
@@ -502,6 +505,16 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
         command.ExecuteNonQuery();
     }
 
+    /// <summary>事务内回写 meta.total_checksum：CommitAll 先写占位 meta → 计算校验和 → 本方法回写真实值。</summary>
+    private void UpdateTotalChecksum(string totalChecksum)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText = "UPDATE world_meta SET total_checksum = $total WHERE world_id = $world;";
+        command.Parameters.AddWithValue("$world", _worldId.Value);
+        command.Parameters.AddWithValue("$total", totalChecksum);
+        command.ExecuteNonQuery();
+    }
+
     private void ClearPending()
     {
         _pendingState = null;
@@ -554,8 +567,12 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
         return new SnapshotPreparation(state.Id, state.TurnNumber, snapshot.StateHash, true, state, events);
     }
 
-    /// <summary>覆盖本世界全部内容行的校验和：meta + 所有状态行 + 所有日志行 + 所有快照行。</summary>
+    /// <summary>覆盖本世界全部内容行的校验和：meta（不含 total_checksum 列）+ 所有状态行 + 所有日志行 + 所有快照行。</summary>
     /// <remarks>
+    /// 布局约定（提交与恢复必须完全一致）：meta 行的第 10 列固定为字面量 ''，绝不写入
+    /// total_checksum 列本身——否则"恢复时用 meta 里的校验和去校验 meta"构成自引用，
+    /// 未篡改的库也会因提交/恢复两侧布局不一致而永远失败（复审 P0）。CommitAll 先写占位
+    /// meta、计算本哈希、再回写 total_checksum，恢复侧用同一布局重算比对。
     /// 为什么覆盖全部行而不是只覆盖当前行：恢复路径要求"篡改库中任一内容字节 → 恢复失败"，
     /// 历史行虽然不参与当前指针读取，但仍在库内，同样纳入校验。代价是恢复时 O(总行数)，
     /// MVP 规模可接受；日志量增长后应改为链式/分片校验（见 PR 剩余风险）。
@@ -566,7 +583,7 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
         command.CommandText = """
             SELECT 'meta', world_id, schema_version, current_world_version, current_commit_id,
                    current_game_time_ticks, current_state_hash, current_payload_checksum,
-                   current_snapshot_seq, total_checksum
+                   current_snapshot_seq, ''
             FROM world_meta WHERE world_id = $world
             UNION ALL
             SELECT 'state', world_id, world_version, 0, commit_id, game_time_ticks, state_hash, '', 0, ''
@@ -601,13 +618,14 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
         return Convert.ToHexString(SHA256.HashData(stream.ToArray()));
     }
 
+    /// <summary>恢复侧重算校验和：布局与提交侧完全一致（meta 行不含 total_checksum 列，第 10 列固定 ''）。</summary>
     private static string ComputeTotalChecksum(SqliteConnection connection, WorldId worldId)
     {
         using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT 'meta', world_id, schema_version, current_world_version, current_commit_id,
                    current_game_time_ticks, current_state_hash, current_payload_checksum,
-                   current_snapshot_seq, total_checksum
+                   current_snapshot_seq, ''
             FROM world_meta WHERE world_id = $world
             UNION ALL
             SELECT 'state', world_id, world_version, 0, commit_id, game_time_ticks, state_hash, '', 0, ''
