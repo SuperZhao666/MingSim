@@ -1,16 +1,20 @@
 {
   "counts": {
+    "admission_status_counts": {
+      "DESIGN": 4,
+      "EVIDENCE": 0
+    },
     "admitted_claims": 4,
-    "evidence_claims": 23,
+    "evidence_claims": 24,
     "historical_baseline_regions": 15,
     "historical_regions": 0,
     "place_inputs": 5,
-    "places": 0,
+    "places": 5,
     "route_inputs": 2,
-    "routes": 0,
+    "routes": 2,
     "source_ledger_entries": 13,
-    "suppressed_places": 5,
-    "suppressed_routes": 2,
+    "suppressed_places": 0,
+    "suppressed_routes": 0,
     "visible_lake_points": 17258,
     "visible_lake_rings": 245,
     "visible_lake_shape_records": 242,
@@ -23,18 +27,18 @@
   },
   "generator": "tools/maps/build_east_asia_map.py",
   "generator_version": 2,
-  "historical_content_status": "reviewed_p0_evidence_with_open_items",
+  "historical_content_status": "design_only_no_reviewed_evidence",
   "notes": [
     "build-report.json 不记录自身哈希，以避免递归哈希。",
     "source_sha256 对 UTF-8 文本输入使用 canonical LF 字节；二进制输入使用 checkout 原始字节。",
     "历史区域几何仅供表现；本构建器不读取、推导或写入 Simulation 拓扑。"
   ],
   "output_sha256": {
-    "debug-map.png": "4516869810d02b7f158f96a479f732ca1fa11db35066ef91c001ae350a79c440",
+    "debug-map.png": "dc863c4aa2284a680807bad4d621743ef614731e58b7bcad7f53541b7f57062e",
     "history-overlay.png": "e91d7adb0c0494fb1e079ed9355f3f95f6e4f0488e677ef11c2b79156c73adc1",
-    "map-manifest.json": "65749128451199453d139ef120d9e8f4bed649fa0c0848d7209aa335dceeed48",
+    "map-manifest.json": "2b2624f5ad6dffae21e3046b8e847910569bd6392b8db0e3aabd22b3ccad10ea",
     "physical-base.png": "eeb1fdf47654b67a657b6a00967a9772112ec73cbe644864cd428a34cf113896",
-    "regions.geojson": "411de21d0bb3734f946d0037d9710069ed648068b0a7074788971dfee613afa7"
+    "regions.geojson": "c87b50ac53547b6eba155f629dfead2b903c42a950eddef4ce304424f1be821d"
   },
   "scenario_id": "ming_1629_east_asia",
   "schema_version": 1,
@@ -43,31 +47,34 @@
     "assets/maps/sources/natural-earth-physical/lakes/ne_10m_lakes.shp": "11064fa55ed91b56a0d86733643c1a5bfcc137fdf044e83f471978a5b86617e1",
     "assets/maps/sources/natural-earth-physical/land/ne_10m_land.shp": "4cad3a49bc75c1a4c2f3d7efae04f2f8e63151c96764b2658effabf524331fa6",
     "assets/maps/sources/natural-earth-physical/rivers/ne_10m_rivers_lake_centerlines.shp": "f9a1cf6d9f58c0a6f182a7f25771a03e0a48026253d4484aab782b2586354d78",
-    "content/scenarios/ming_1629/evidence/liaodong-1629-evidence.json": "fb1674aae73f335d85303aed4a3c44d69498491b222e9f7c42e2b861f409f324",
+    "content/scenarios/ming_1629/evidence/liaodong-1629-evidence.json": "68f081bb8574526017e3f4f6f3f883cd84ec16c2a90d65fa82dffedaafc77f84",
     "content/scenarios/ming_1629/map/historical-overlays.json": "f4c4c3e4f5eb0d59e6f7cc63739a58876f0f7a194372f188fddcc936aa5d2ff3",
     "content/scenarios/ming_1629/map/historical-regions.json": "0fbc48a56c71c5742e48a47b9d15f3c6bc4a5ad1e58c3ae9e93e0033bec46f6a",
     "content/scenarios/ming_1629/map/map-build.json": "fed4ade91e94a34d99c5c62ebcc98710bba43f9409195bd78553772097ed32da",
-    "content/scenarios/ming_1629/map/places.json": "242f69dfbc91a12723f89f5321428084cba6cde72f624a26ec74cbbe7d4636d2",
-    "content/scenarios/ming_1629/map/routes.json": "1a1188f3e6af47d07cc9791f2f2a9924b1e698214413ad6fbcc2a8b8d63b2a14",
+    "content/scenarios/ming_1629/map/places.json": "ba03ba14838575e26c9aaad3778063b60698ec5b8afae382b38b3794d64fb955",
+    "content/scenarios/ming_1629/map/routes.json": "cd76ace7b36a1f67c76ea2d733e65d2597bf0266b6aa6d71cb54c7f551f0ce9d",
     "content/scenarios/ming_1629/map/source-ledger.csv": "174f48ab4465fe3b43fa25874e3c9f3e3bea480f7c283cb80f634668827f1311"
   },
-  "status": "technical_validation_passed_reviewed_evidence",
-  "technical_validation": "passed",
+  "status": "built_with_design_preview_and_open_items",
   "validation": {
+    "admission_contracts_complete": true,
+    "date_contracts_validated": true,
+    "design_admissions_not_reviewed": true,
     "evidence_claims_have_sources": true,
     "geometry_structurally_valid": true,
     "hartwell_baseline_not_rendered": true,
-    "open_claims_not_rendered": true,
-    "open_routes_not_rendered": true,
     "optional_physical_layers": {
       "lakes": "rendered",
       "rivers": "rendered"
     },
     "place_ids_unique": true,
+    "rendered_claims_are_not_open": true,
     "route_endpoints_known_and_aligned": true,
     "route_ids_unique": true,
+    "route_inputs_accounted_for": true,
     "source_features_unique": true,
+    "source_hashes_collected": true,
     "source_ids_known": true,
-    "volatile_metadata_included": false
+    "temporary_asset_hashes_match": true
   }
 }

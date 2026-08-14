@@ -7,12 +7,12 @@
   },
   "features": [],
   "metadata": {
-    "claim_status": "reviewed_p0_evidence",
-    "geometry_role": "reviewed_historical_presentation_only_not_simulation_topology",
+    "claim_status": "design_only_no_reviewed_evidence",
+    "geometry_role": "historical_presentation_only_not_simulation_topology",
     "schema_version": 1,
     "snapshot_date": "1629-01-01",
     "warning": "当前没有可审计的面状历史证据；东江、辽沈、山海关均不输出Polygon，历史覆盖层暂时不画。"
   },
-  "name": "ming_1629_reviewed_evidence_overlays",
+  "name": "ming_1629_historical_evidence_overlays",
   "type": "FeatureCollection"
 }

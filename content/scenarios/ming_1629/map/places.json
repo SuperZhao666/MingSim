@@ -16,9 +16,9 @@
       "evidence_confidence": "medium",
       "confidence": "unknown",
       "review_status": "draft",
-      "claim_ids": ["INFERENCE-P0-GUANNINGJIN-TOPOLOGY"],
+      "claim_ids": ["INFERENCE-DESIGN-BEIJING-TONGZHOU-TOPOLOGY"],
       "source_ids": ["SRC-PLACE-MODERN-ANCHOR", "SRC-CTEXT-MAOSHUAIDONGJI"],
-      "notes": "现代地理锚点；只作为关系拓扑端点，不表示现代行政区或1629城址中心。"
+      "notes": "现代地理锚点；只作为北京—通州 DESIGN 关系拓扑端点，不表示现代行政区或1629城址中心。"
     },
     {
       "id": "tongzhou",
@@ -33,9 +33,9 @@
       "evidence_confidence": "medium",
       "confidence": "unknown",
       "review_status": "draft",
-      "claim_ids": ["INFERENCE-P0-GUANNINGJIN-TOPOLOGY"],
+      "claim_ids": ["INFERENCE-DESIGN-BEIJING-TONGZHOU-TOPOLOGY"],
       "source_ids": ["SRC-PLACE-MODERN-ANCHOR", "SRC-CTEXT-MAOSHUAIDONGJI"],
-      "notes": "现代地理锚点；具体漕运仓储与道路几何保持 OPEN。"
+      "notes": "现代地理锚点；北京—通州具体漕运仓储与道路几何保持 OPEN，不借用关宁锦 claim。"
     },
     {
       "id": "ningyuan",
