@@ -21,6 +21,8 @@ public sealed record ModelParseResult(
 /// - 只接受已登记的 schema_version == 1；
 /// - intent_type 必须在本解析器的白名单内（粮运/行军），未知类型明确拒绝；
 /// - 必需参数缺失、类型错误或范围非法一律解析失败；
+/// - route_id / army_id / destination_id 必须属于上下文候选集（AgentContext 编译的
+///   可行动路线与军队邻接合法目的地），模型不能伪造世界对象（P1-AGENT-02）；
 /// - 多余字段（如 public_statement、request_id）固定忽略，不触发任何动作；
 /// - 身份（ActorId）、世界版本、提交时刻都由 DecisionRequest/权威时间程序绑定，
 ///   模型 JSON 里写什么都没用，不能伪造身份；
@@ -108,6 +110,13 @@ public class ModelDecisionParser
             return Failure("logistics.request_shipment 缺少 route_id 或 grain_quantity 非法。");
         }
 
+        // P1-AGENT-02：route_id 必须属于上下文候选集（真实存在且可行动的路线）；
+        // 模型不能自行发明不存在的路线，否则 ParseFailed 回退规则路径。
+        if (!context.Routes.Any(route => route.RouteId.Value == routeId))
+        {
+            return Failure($"logistics.request_shipment 的 route_id={routeId} 不在当前可行动路线候选集中。");
+        }
+
         return Success([
             new PlanLogisticsIntent(
                 $"{request.DecisionId}-{intentIndex}",
@@ -132,6 +141,19 @@ public class ModelDecisionParser
             !TryGetRequiredString(parameters, "destination_id", out var destinationId))
         {
             return Failure("military.move_army 缺少 army_id 或 destination_id。");
+        }
+
+        // P1-AGENT-02：army_id 必须属于上下文军队候选集，destination_id 必须是该军队
+        // 邻接合法目的地之一；模型不能伪造军队或命令军队跳到不邻接的地方。
+        var army = context.Armies.FirstOrDefault(candidate => candidate.ArmyId.Value == armyId);
+        if (army is null)
+        {
+            return Failure($"military.move_army 的 army_id={armyId} 不在当前军队候选集中。");
+        }
+
+        if (!army.AdjacentDestinations.Any(destination => destination.Value == destinationId))
+        {
+            return Failure($"military.move_army 的 destination_id={destinationId} 不是军队 {armyId} 的邻接合法目的地。");
         }
 
         var travelHours = 24; // 与 MoveArmyIntent 的默认值一致
