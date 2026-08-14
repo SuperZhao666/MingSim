@@ -42,7 +42,8 @@
 # 角色体系
 
 系统必须拆分以下 Agent（职责级拆分：一个执行者可戴多顶帽子，
-但 Self Review 与 Independent Review 必须由未开发该变更的执行者担任）：
+但 Self Review 与 Independent Review 必须由未开发该变更的执行者担任，
+且同一执行者不得先后担任同一变更的 Self Review 与 Independent Review）：
 
 ## 1. Architect Agent
 
@@ -204,7 +205,8 @@ Independent Reviewer 的 P0/P1 未修复前，总控不得合并。
 必须：
 
 不知道 Developer 的思考过程。
-审查输入只限：Requirement、Architecture Contract、Diff、Tests 与运行证据；
+审查输入只限：Requirement、Architecture Contract、Diff、Tests、运行证据
+与 PR 正文/验收证据（文档类 PR 的验收证据以 PR 正文为准）；
 开发者不得向审查者提供实现思路自述。
 
 只看：
@@ -213,6 +215,8 @@ Independent Reviewer 的 P0/P1 未修复前，总控不得合并。
 - Diff
 - Tests
 - Architecture Contract
+- 运行证据
+- PR 正文/验收证据
 
 
 检查：
