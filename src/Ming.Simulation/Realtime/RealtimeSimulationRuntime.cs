@@ -1089,26 +1089,26 @@ public sealed class RealtimeSimulationRuntime
         if (!IsValidId(command.CommandId) || !IsValidId(command.ActorId.Value) ||
             !IsValidId(command.DecreeId.Value))
         {
-            return Reject(command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         // P1-A（审查修复）：批准人必须持有 AllocateFinance（角色不存在时 CapabilityAuthorizer 同样拒绝）。
         var approverAuthorization = _authorizer.Check(candidate.State, command.ActorId, GameCapability.AllocateFinance, resourceId: null);
         if (!approverAuthorization.Allowed)
         {
-            return Reject(command.CommandId, $"批准人没有财权（AllocateFinance）授权：{approverAuthorization.Reason}", "DECREE_APPROVER_UNAUTHORIZED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, $"批准人没有财权（AllocateFinance）授权：{approverAuthorization.Reason}", "DECREE_APPROVER_UNAUTHORIZED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (!candidate.State.Decrees.TryGetValue(command.DecreeId, out var decree))
         {
-            return Reject(command.CommandId, "政令不存在。", "DECREE_NOT_FOUND", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "政令不存在。", "DECREE_NOT_FOUND", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         // Kind==RequestSupply 校验：只有请愿文书进入 Submitted（创建时不变量），该检查同时覆盖
         // 非请愿政令（General/催饷/拨饷/减耗均为 Executing，无法被批准）。
         if (decree.Status != DecreeStatus.Submitted)
         {
-            return Reject(command.CommandId, "只有已提交的请饷奏疏可以被批准。", "DECREE_NOT_PENDING_APPROVAL", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "只有已提交的请饷奏疏可以被批准。", "DECREE_NOT_PENDING_APPROVAL", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         // P2（审查）：批准路径复查绑定不变量——绑定运输单已抵达时批准被拒，避免"先抵后批滞留死锁"
@@ -1117,12 +1117,12 @@ public sealed class RealtimeSimulationRuntime
             candidate.State.Logistics.Shipments.TryGetValue(new ShipmentId(decree.LinkedShipmentId), out var boundShipment) &&
             boundShipment.Status == ShipmentStatus.Arrived)
         {
-            return Reject(command.CommandId, $"绑定运输单 {decree.LinkedShipmentId} 已抵达，不允许再批准该请饷。", "DECREE_SHIPMENT_ALREADY_ARRIVED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, $"绑定运输单 {decree.LinkedShipmentId} 已抵达，不允许再批准该请饷。", "DECREE_SHIPMENT_ALREADY_ARRIVED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (!candidate.State.Economy.Treasury.TrySpend(decree.Budget))
         {
-            return Reject(command.CommandId, "国库银两不足以批准该请饷预算。", "DECREE_BUDGET_EXCEEDS_TREASURY", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(candidate, command.CommandId, "国库银两不足以批准该请饷预算。", "DECREE_BUDGET_EXCEEDS_TREASURY", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         candidate.State.Scenario.AddSpentSilver(decree.Budget);
