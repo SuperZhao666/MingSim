@@ -490,6 +490,13 @@ public sealed class RealtimeSimulationRuntime
             var processed = 0;
             while (true)
             {
+                // M5：硬失败自动暂停发生在每日心跳提交内（ApplyDailyScenarioRules）。提交一完成
+                // 立即停止本次推进——同一 Advance 内不再处理更晚的到期事件，也不再推进时间。
+                if (_isPaused)
+                {
+                    break;
+                }
+
                 var next = _scheduledEvents
                     .OrderBy(item => item.DueGameTime)
                     .ThenBy(item => item.Phase)
@@ -1270,6 +1277,10 @@ public sealed class RealtimeSimulationRuntime
             candidate.State.Scenario.MarkHardFailureReported();
             events.Add(CreateEvent(candidate, null, "ScenarioHardFailure", candidate.State.GameTime, ("reason", failureReason)));
             candidate.Outbox.Add(events[^1]);
+            // M5（doc 08 §19"重大游戏事件"行、14 矩阵 SYS-013）：重大游戏事件正常提交后自动暂停一次。
+            // 与 MarkHardFailureReported 同块：只触发一次；玩家仍可手动恢复，且不会二次自动暂停；
+            // 不抢玩家手动暂停——手动 SetPaused 命令语义不变，恢复后的世界继续按原规则推进。
+            candidate.IsPaused = true;
         }
     }
 
@@ -1378,7 +1389,7 @@ public sealed class RealtimeSimulationRuntime
             ProcessedScheduledEvents = ingress.ProcessedScheduledEvents + advancement.ProcessedScheduledEvents,
         };
 
-    private RealtimeReadModel BuildReadModel() => RealtimeReadModel.From(_state, _scheduledEvents, _commandOutcomes.Values, _outboxEvents.Count, ComputeStateHash());
+    private RealtimeReadModel BuildReadModel() => RealtimeReadModel.From(_state, _scheduledEvents, _commandOutcomes.Values, _outboxEvents.Count, _isPaused, ComputeStateHash());
 
     private string ComputeStateHash(IEnumerable<string>? pendingCommandFingerprints = null) => CanonicalStateHasher.Compute(_state, _scheduledEvents, _nextCreationSequence, _nextIngressSequence,
         _commandOutcomes.Values, _randomState, _outboxEvents, _realGameTickRemainder, _initialGameTime, _initialWorldVersion,

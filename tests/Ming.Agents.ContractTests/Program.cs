@@ -61,6 +61,7 @@ internal static partial class Program
             ShouldTruncateAuditLogToCapacityPreservingOrder();
             ShouldEnforceMaxCostMillisAndSaturatingBoundaries();
             ShouldFallBackToRulesWhenParserThrows();
+            ShouldDeriveFreshIdempotencyKeyPerWorldVersion();
 
             Console.WriteLine("Ming.Agents OpenAI-compatible contract tests passed.");
             return 0;
