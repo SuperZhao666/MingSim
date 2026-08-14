@@ -921,7 +921,8 @@ public sealed class RealtimeSimulationRuntime
         if (!IsValidId(command.CommandId) || !IsValidId(command.ActorId.Value) ||
             !IsValidId(command.DecreeId.Value) || !IsValidId(command.ResponsibleActorId.Value))
         {
-            return Reject(command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            // P2（审查）：编号非法也走 RejectDecree，保证每次拒绝都留下 DecreeRejected 审计事件对。
+            return RejectDecree(candidate, command, "INVALID_OBJECT_ID", "命令中的对象编号不合法。", ingressSequence, acceptedAt, events);
         }
 
         if (string.IsNullOrWhiteSpace(command.Goal))
@@ -1059,15 +1060,23 @@ public sealed class RealtimeSimulationRuntime
         List<DomainEvent> events)
     {
         // 政令特有的拒绝事件：与通用 CommandRejected 一起构成可审计的 DecreeAccepted/Rejected 事件对。
+        // 编号非法路径可能携带 null DecreeId（id 类型不校验非空），事件载荷用占位符防字典 null 值崩溃。
         events.Add(CreateEvent(candidate, command.CommandId, "DecreeRejected", acceptedAt,
-            ("decree_id", command.DecreeId.Value), ("code", code), ("reason", message)));
+            ("decree_id", command.DecreeId.Value ?? "(invalid)"), ("code", code), ("reason", message)));
         candidate.Outbox.Add(events[^1]);
         return Reject(command.CommandId, message, code, ingressSequence, acceptedAt, candidate.State.WorldVersion);
     }
 
     /// <summary>
     /// 批准一道已提交的请饷奏疏（P1-AUTH-01 请饷语义）：扣除批准预算、Submitted → Executing。
-    /// 只有 Simulation 命令管线可调用；重复批准/批准非待批准政令都被结构化拒绝。
+    /// 只有 Simulation 命令管线可调用。
+    /// 批准人授权（P1-A 审查修复）：批准=动用中央预算的财政决定，批准人必须经
+    /// <see cref="CapabilityAuthorizer"/> 持有 AllocateFinance（财权）；任何真实角色都不再能
+    /// "两步耗尽国库"（签发请饷→自我批准）。领域没有"皇帝"角色标记，最小实现取审查结论的
+    /// "持 AllocateFinance 的角色"路径；真实场景中请饷由户部槽位（hubu-slot，AllocateFinance）批准。
+    /// 被批准政令必须处于 Submitted——内核在创建时只让请愿文书（RequestSupply）进入 Submitted，
+    /// 因此 Status==Submitted 即等价于 Kind==RequestSupply（DecreeKind 定义在 Simulation，
+    /// Domain 的 DecreeState 不存储 Kind，状态机不变量是唯一且充分的校验）。
     /// </summary>
     private RealtimeCommandResult ApplyApproveDecree(
         WorkingCopy candidate,
@@ -1082,9 +1091,11 @@ public sealed class RealtimeSimulationRuntime
             return Reject(command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
-        if (!candidate.State.Characters.ContainsKey(command.ActorId))
+        // P1-A（审查修复）：批准人必须持有 AllocateFinance（角色不存在时 CapabilityAuthorizer 同样拒绝）。
+        var approverAuthorization = _authorizer.Check(candidate.State, command.ActorId, GameCapability.AllocateFinance, resourceId: null);
+        if (!approverAuthorization.Allowed)
         {
-            return Reject(command.CommandId, "批准人不存在。", "DECREE_ISSUER_UNAUTHORIZED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+            return Reject(command.CommandId, $"批准人没有财权（AllocateFinance）授权：{approverAuthorization.Reason}", "DECREE_APPROVER_UNAUTHORIZED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (!candidate.State.Decrees.TryGetValue(command.DecreeId, out var decree))
@@ -1092,9 +1103,20 @@ public sealed class RealtimeSimulationRuntime
             return Reject(command.CommandId, "政令不存在。", "DECREE_NOT_FOUND", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
+        // Kind==RequestSupply 校验：只有请愿文书进入 Submitted（创建时不变量），该检查同时覆盖
+        // 非请愿政令（General/催饷/拨饷/减耗均为 Executing，无法被批准）。
         if (decree.Status != DecreeStatus.Submitted)
         {
             return Reject(command.CommandId, "只有已提交的请饷奏疏可以被批准。", "DECREE_NOT_PENDING_APPROVAL", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
+        // P2（审查）：批准路径复查绑定不变量——绑定运输单已抵达时批准被拒，避免"先抵后批滞留死锁"
+        // （抵达完成只处理 Executing 政令，Submitted 请饷不会自动完成）。
+        if (decree.LinkedShipmentId is not null &&
+            candidate.State.Logistics.Shipments.TryGetValue(new ShipmentId(decree.LinkedShipmentId), out var boundShipment) &&
+            boundShipment.Status == ShipmentStatus.Arrived)
+        {
+            return Reject(command.CommandId, $"绑定运输单 {decree.LinkedShipmentId} 已抵达，不允许再批准该请饷。", "DECREE_SHIPMENT_ALREADY_ARRIVED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         if (!candidate.State.Economy.Treasury.TrySpend(decree.Budget))
@@ -1662,7 +1684,11 @@ public static class RealtimeSnapshotSchema
     // 本 PR 之前的存档（旧哈希 schema）在新代码下必然哈希校验失败；版本门禁升到 7 使旧快照被显式拒绝
     // （Restore 的版本检查先于哈希校验，返回"不支持实时快照版本"），而不是以哈希失配的偶然失败收场。
     // 旧存档不再兼容，恢复即拒绝（fail-closed），与 doc 08 存档版本约定一致。
-    public const int Version = 7;
+    // 7→8（#43 独立审查 P1-C）：命令指纹形状变更——CreateDecreeCommand 移除
+    // RequiredCapability/RequiredResourceId（P1-AUTH-01 字段删除）并新增 ApproveDecreeCommand 分支。
+    // v7 快照若含 pending 政令命令，按当前指纹重算必然 StateHash/PayloadChecksum 失配；版本门禁升到 8
+    // 使 v7 快照被显式拒绝（fail-closed），而不是以哈希失配的偶然失败收场。
+    public const int Version = 8;
 
     /// <summary>v1 载荷时代（#28 之前，4b035ab 及以前）的运行时快照 schema 版本：
     /// 当时 payload checksum 头部写入 6（与当前 7 不同）。迁移按 v1 时代规则校验旧档
