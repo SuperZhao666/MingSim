@@ -87,6 +87,7 @@ internal static class Program
             ShouldRejectResourceOutsideAppointmentScope();
             ShouldExpireAppointmentAtEffectiveTo();
             ShouldKeepAppointmentsInSnapshotAndCanonicalHash();
+            ShouldCompleteNinetyDayNingyuanScenarioWithEndgameReport();
             SnapshotCodecAcceptance.RunAll();
 #if MINGSIM_SQLITE_STORE
             SqliteStoreAcceptance.RunAll();
@@ -1785,6 +1786,125 @@ internal static class Program
         var restored = RealtimeSimulationRuntime.Restore(
             SnapshotCodec.Deserialize(SnapshotCodec.Serialize(runtime.CaptureSnapshot())));
         Require(restored.StateHash == runtime.StateHash, "含任命的完整快照往返后 canonical hash 必须一致");
+
+    /// <summary>
+    /// I2 终验收：真实 world.json 世界跑完 90 日垂直切片并产出六维终局报告。
+    /// 策略按纸面推演的陆海并行批次（docs/玩法验证）：陆 2×5000 石走三段、海 2×7000 石走两段；
+    /// 段间日历留足"天气延误最多 +3 日"余量，全部批次加护卫（400 两/批，不超 20000 两场景银预算），
+    /// 保证任何确定性抽取下都不缺粮断链。终局分档本身是平衡输出（DESIGN），
+    /// 本验收只钉住切片完整性与报告结构，不钉具体档位。
+    /// </summary>
+    private static void ShouldCompleteNinetyDayNingyuanScenarioWithEndgameReport()
+    {
+        var world = MingSim.Application.Scenarios.Ningyuan1629InitialWorld.Load();
+        var initialTotalGrain = world.Logistics.Stockpiles.Values.Sum(item => item.GrainQuantity);
+        var routeSources = world.Logistics.Routes.ToDictionary(
+            item => item.Key.Value, item => item.Value.FromStockpileId, StringComparer.Ordinal);
+        var routeCapacities = world.Logistics.Routes.ToDictionary(
+            item => item.Key.Value, item => item.Value.Capacity, StringComparer.Ordinal);
+        var store = new InMemoryCommitStore();
+        var runtime = new RealtimeSimulationRuntime(world, store);
+        runtime.ScheduleScenarioRiskSamples();
+        var start = runtime.ReadModel.GameTime;
+        Require(runtime.ReadModel.Scenario.IsScenarioActive, "90 日切片必须启用前线场景规则");
+
+        // 陆海并行批次日历（DESIGN 调度输入）：同路由两批之间留足到货与转运余量；
+        // 第 23 日两条路同时发运，保证第 24 日固定袭粮样本有在途运输可命中。
+        var convoyCalendar = new Dictionary<string, int[]>(StringComparer.Ordinal)
+        {
+            ["route-beijing-tongzhou"] = [0, 14],
+            ["route-tongzhou-shanhaiguan"] = [3, 18],
+            ["route-shanhaiguan-ningyuan"] = [9, 23],
+            ["route-dengzhou-juehuadao"] = [23, 36],
+            ["route-juehuadao-ningyuan"] = [30, 42],
+        };
+
+        var allEvents = new List<DomainEvent>();
+        for (var day = 0; day < EndgameEvaluator.ScenarioDurationDays; day++)
+        {
+            foreach (var route in convoyCalendar)
+            {
+                foreach (var scheduledDay in route.Value)
+                {
+                    if (scheduledDay != day)
+                    {
+                        continue;
+                    }
+
+                    // 每段运走"来源仓现有粮"并按路线容量封顶：损耗逐段累计，段批随段缩小；
+                    // 逐条接纳避免同一版本并发命令互相过期。
+                    var source = routeSources[route.Key];
+                    var available = runtime.ReadModel.Stockpiles.Single(item => item.Id == source).GrainQuantity;
+                    Require(available > 0, $"第 {day} 日 {route.Key} 来源仓必须有粮可发");
+                    var quantity = Math.Min(available, routeCapacities[route.Key]);
+                    Require(runtime.EnqueueCreateShipment(new CreateShipmentCommand(
+                        $"cmd-{route.Key}-{day}", new CharacterId("duliaoxiang-slot"),
+                        new ShipmentId($"shipment-{route.Key}-{day}"), new RouteId(route.Key), quantity,
+                        runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion, Escort: true)).Queued,
+                        $"第 {day} 日 {route.Key} 运输命令应进入收件箱");
+                    var accepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+                    Require(accepted.Succeeded && accepted.CommandResults.Single().Accepted,
+                        $"第 {day} 日 {route.Key} 运输必须被接纳");
+                }
+            }
+
+            var advanced = runtime.AdvanceTo(new GameTime(start.Value.AddDays(day + 1)));
+            Require(advanced.Succeeded, $"第 {day + 1} 日推进必须成功");
+            allEvents.AddRange(advanced.Events);
+        }
+
+        // 1) 90 日完整推进：时间精确停在终点；10 段运输全部到达、无在途悬挂；不触发硬失败。
+        Require(runtime.ReadModel.GameTime.Value == start.Value.AddDays(EndgameEvaluator.ScenarioDurationDays),
+            "90 日推进后必须恰好停在场景终点");
+        Require(runtime.ReadModel.Shipments.Count == 10 &&
+                runtime.ReadModel.Shipments.All(item => item.Status == ShipmentStatus.Arrived),
+            "10 段运输必须全部到达，无在途悬挂");
+        Require(runtime.ReadModel.Readiness.ConsecutiveZeroGrainDays < EndgameEvaluator.DesignHardFailureZeroDays,
+            "90 日内连续断粮必须少于 7 日（不触发硬失败）");
+
+        // 2) 固定风险样本各恰好触发一次，且延误/袭粮必须命中在途运输而不是空转。
+        Require(allEvents.Count(item => item.EventType == "ShipmentDelayed") == 1,
+            "固定风险样本必须恰好一次天气延误");
+        Require(allEvents.Count(item => item.EventType == "ShipmentAttacked") == 1,
+            "固定风险样本必须恰好一次袭粮");
+        Require(allEvents.Count(item => item.EventType == "ScenarioReportReceived") == 3,
+            "固定风险样本必须恰好三份报告");
+        Require(allEvents.All(item => item.EventType != "WeatherDelayNoOp" && item.EventType != "GrainRaidNoOp"),
+            "延误/袭粮样本必须命中在途运输，不能空转");
+
+        // 3) 粮食总账守恒：初始 = 末日 + 实际消耗 + 运输损耗（欠饷缺口从实际消耗中扣除）。
+        var finalTotalGrain = runtime.ReadModel.Stockpiles.Sum(item => item.GrainQuantity);
+        var consumedGrain = EndgameEvaluator.ScenarioDurationDays * runtime.ReadModel.Scenario.DailyGrainDemand
+            - runtime.ReadModel.Readiness.ArrearsGrain;
+        var lostGrain = runtime.ReadModel.Shipments.Sum(item => item.LossGrain);
+        Require(initialTotalGrain == finalTotalGrain + consumedGrain + lostGrain,
+            $"90 日粮食总账必须守恒：{initialTotalGrain} = {finalTotalGrain} + {consumedGrain} + {lostGrain}");
+
+        // 4) 六维终局报告：给出分档、六维解释齐全、银预算未透支、责任归属与审计链干净。
+        var evaluation = runtime.EvaluateEndgame();
+        Require(evaluation.Outcome is not (EndgameOutcome.InProgress or EndgameOutcome.HardFailure),
+            $"90 日终局必须给出分档且未被判硬失败，实际 {evaluation.Outcome}");
+        var frontGrain = runtime.ReadModel.Stockpiles
+            .Single(item => item.Id == new StockpileId("sp-ningyuan")).GrainQuantity;
+        Require(evaluation.AvailableGrainDays == frontGrain / runtime.ReadModel.Scenario.DailyGrainDemand,
+            "终局报告维度 1 必须与前线仓末日存粮一致");
+        Require(evaluation.Explanation.Contains("宁远可用粮", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("前线战备", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("中央财政", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("地方负担", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("大臣信任", StringComparison.Ordinal) &&
+                evaluation.Explanation.Contains("执行与审计", StringComparison.Ordinal),
+            "终局报告必须输出 doc 03 §7.3 的六个解释维度");
+        Require(!evaluation.ScenarioBudgetOverdrawn, "10 批护卫（400 两/批）不得透支 20000 两场景银预算");
+        Require(evaluation.DeadlineMissedCount == 0 && evaluation.AuditChainComplete,
+            "切片未发政令：责任归属与审计链必须干净");
+
+        // 5) 提交商店整点恢复：90 日切片结束后可从最后一份提交恢复出同一世界与事件流。
+        var restored = RealtimeSimulationRuntime.RestoreFromStore(store);
+        Require(restored.ReadModel.StateHash == runtime.ReadModel.StateHash,
+            "90 日终局经提交商店恢复后 canonical hash 必须一致");
+        Require(EventFingerprints(restored.OutboxEvents).SequenceEqual(EventFingerprints(runtime.OutboxEvents)),
+            "90 日终局经提交商店恢复后事件流必须一致");
     }
 
     internal static void Require(bool condition, string message)
