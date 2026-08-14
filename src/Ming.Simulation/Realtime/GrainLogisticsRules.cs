@@ -11,18 +11,24 @@ internal static class GrainLogisticsRules
         quantity > 0 && source.GrainQuantity >= quantity;
 
     public static bool FitsRouteCapacity(LogisticsState logistics, RouteState route, long quantity) =>
-        quantity > 0 && logistics.InTransitGrain(route.Id) + quantity <= route.Capacity;
+        quantity > 0 && quantity <= route.Capacity &&
+        logistics.InTransitGrain(route.Id) <= route.Capacity - quantity;
 
     public static bool FitsDestinationCapacity(
         LogisticsState logistics,
         StockpileState destination,
-        long quantity) =>
-        quantity > 0 && logistics.ReservedIncomingGrain(destination.Id) + destination.GrainQuantity + quantity <=
-        destination.Capacity;
-
-    public static (long Delivered, long Loss) CalculateArrival(RouteState route, long quantity)
+        long quantity)
     {
-        var loss = checked(quantity * route.LossPerThousand / 1000);
-        return (quantity - loss, loss);
+        if (quantity <= 0)
+        {
+            return false;
+        }
+
+        var available = destination.Capacity - destination.GrainQuantity;
+        var reserved = logistics.ReservedIncomingGrain(destination.Id);
+        return reserved <= available && quantity <= available - reserved;
     }
+
+    public static bool TryCalculateArrival(RouteState route, long quantity, out long delivered, out long loss) =>
+        route.TryCalculateDeliveredGrain(quantity, out delivered, out loss);
 }

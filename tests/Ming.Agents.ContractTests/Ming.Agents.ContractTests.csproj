@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Library</OutputType>
+    <OutputType>Exe</OutputType>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Ming.Domain\Ming.Domain.csproj" />
+    <ProjectReference Include="..\..\src\Ming.Agents\Ming.Agents.csproj" />
   </ItemGroup>
 </Project>

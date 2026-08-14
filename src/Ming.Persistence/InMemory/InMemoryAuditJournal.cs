@@ -8,6 +8,7 @@ namespace MingSim.Persistence.InMemory;
 public sealed class InMemoryAuditJournal : IAuditJournal
 {
     private readonly List<DomainEvent> _events = [];
+    private readonly HashSet<string> _eventIds = new(StringComparer.Ordinal);
 
     public void Append(WorldId worldId, IReadOnlyList<DomainEvent> events)
     {
@@ -16,6 +17,11 @@ public sealed class InMemoryAuditJournal : IAuditJournal
             if (domainEvent.WorldId != worldId)
             {
                 throw new InvalidOperationException("审计事件所属世界与目标世界不一致。");
+            }
+
+            if (!_eventIds.Add(domainEvent.EventId))
+            {
+                throw new InvalidOperationException($"重复的 DomainEvent EventId：{domainEvent.EventId}。");
             }
 
             _events.Add(domainEvent);

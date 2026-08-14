@@ -52,7 +52,7 @@ func _test_cover_clicks(map: Control) -> void:
 		_send_wheel(map, MOUSE_BUTTON_WHEEL_UP, Vector2(map.size.x * 0.5, map.size.y * 0.5))
 	_assert(is_equal_approx(map.Zoom, 4.0), "点击验收使用近景 LOD")
 
-	for place_id in ["beijing", "tongzhou", "shanhaiguan", "ningyuan"]:
+	for place_id in ["beijing", "tongzhou", "ningyuan", "jinzhou"]:
 		var point: Vector2 = map.GetViewportPointForPlace(place_id)
 		_assert(Rect2(Vector2.ZERO, map.size).has_point(point), "%s 的共享 cover 正算落在视口内" % place_id)
 		_send_click(map, point)
@@ -66,7 +66,7 @@ func _test_cover_clicks(map: Control) -> void:
 func _test_hidden_points_do_not_win(map: Control) -> void:
 	map.ResetView()
 	_assert(map.VisiblePlaceCount < map.PlaceCount, "最远 LOD 确有隐藏节点")
-	map.SelectPlace("shanhaiguan")
+	map.SelectPlace("beijing")
 	var hidden_tongzhou_point: Vector2 = map.GetViewportPointForPlace("tongzhou")
 	_send_click(map, hidden_tongzhou_point)
 	_assert(map.SelectedPlaceId != "tongzhou", "未绘制的通州不会抢走点击")
@@ -75,17 +75,17 @@ func _test_hidden_points_do_not_win(map: Control) -> void:
 func _test_semantic_surface(map: Control) -> void:
 	map.SelectPlace("ningyuan")
 	var place_summary: String = str(map.SelectedPlaceSummary)
-	for token in ["FACT/OPEN", "review_status=accepted", "evidence_status=accepted_evidence", "coordinate_epoch=modern_anchor", "map_representation=approximate_point", "historical_site_status=open"]:
+	for token in ["DESIGN/OPEN", "review_status=draft", "evidence_status=draft", "coordinate_epoch=modern_anchor", "map_representation=approximate_point", "historical_site_status=open"]:
 		_assert(place_summary.contains(token), "选中节点摘要公开语义：%s" % token)
 
-	var route_summary: String = str(map.GetRouteSemanticSummary("route-shanhaiguan-ningyuan"))
-	for token in ["INFERENCE", "review_status=accepted", "evidence_status=accepted", "claim_status=reviewed_inference"]:
+	var route_summary: String = str(map.GetRouteSemanticSummary("route-ningyuan-jinzhou"))
+	for token in ["DESIGN", "review_status=draft", "evidence_status=draft", "claim_status=design_topology"]:
 		_assert(route_summary.contains(token), "路线摘要公开语义：%s" % token)
 
 	var legend: String = str(map.SemanticLegend)
-	_assert(legend.contains("approximate_point") and legend.contains("INFERENCE") and legend.contains("FACT"), "运行时图例区分近似点、推断路线与事实路线")
+	_assert(legend.contains("approximate_point") and legend.contains("INFERENCE") and legend.contains("FACT") and legend.contains("DESIGN"), "运行时图例区分近似点、推断路线、事实路线与设计准入")
 	var route_legend: String = str(map.RouteSemanticLegend)
-	_assert(route_legend.contains("claim_status=reviewed_inference") and route_legend.contains("evidence_status=accepted"), "运行时路线图例携带 claim/evidence 状态")
+	_assert(route_legend.contains("claim_status=design_topology") and route_legend.contains("evidence_status=draft"), "运行时路线图例携带 claim/evidence 状态")
 
 
 func _test_actual_label_count(map: Control) -> void:
@@ -98,7 +98,9 @@ func _test_actual_label_count(map: Control) -> void:
 	print("MAP_INPUT_WIDE_LABEL_COUNT: %d/%d" % [wide_count, map.VisiblePlaceCount])
 	_assert(wide_count > 0 and wide_count <= map.VisiblePlaceCount, "宽视口标签计数不超过实际可见节点")
 
-	map.set_size(Vector2(360, 220))
+	# 合并后的正式清单只有 5 个节点且错位偏移互不重叠，360 宽仍能全部放下；
+	# 用 200x120 的极窄视口让视口裁剪与碰撞过滤必然剔除部分标签。
+	map.set_size(Vector2(200, 120))
 	var constrained_count: int = map.VisibleLabelCount
 	map.queue_redraw()
 	await process_frame
@@ -198,8 +200,8 @@ func _test_self_consistent_small_canvas(map: Control) -> void:
 		"historical_content": {
 			"snapshot_date": "1629-01-01",
 			"warning": "自洽小画布负例",
-			"claim_status": "reviewed_p0_evidence",
-			"geometry_role": "presentation_only_not_simulation_topology"
+			"claim_status": "design_only_no_reviewed_evidence",
+			"geometry_role": "historical_presentation_only_not_simulation_topology"
 		},
 		"research_baseline": {
 			"geometry_depict_date": "1391-01-01",
@@ -215,9 +217,9 @@ func _test_self_consistent_small_canvas(map: Control) -> void:
 				"id": "route-1",
 				"from_place_id": "beijing",
 				"to_place_id": "ningyuan",
-				"review_status": "accepted",
-				"evidence_status": "accepted",
-				"claim_status": "reviewed_inference",
+				"review_status": "draft",
+				"evidence_status": "draft",
+				"claim_status": "design_topology",
 				"points": [
 					{"map_x": 200.0, "map_y": 300.0},
 					{"map_x": 300.0, "map_y": 500.0}
@@ -235,8 +237,8 @@ func _small_place(id: String, map_x: float, map_y: float) -> Dictionary:
 		"id": id,
 		"kind": "city",
 		"name_zh": id,
-		"review_status": "accepted",
-		"evidence_status": "accepted_anchor",
+		"review_status": "draft",
+		"evidence_status": "draft",
 		"historical_site_status": "open",
 		"coordinate_epoch": "modern_anchor",
 		"map_representation": "approximate_point",

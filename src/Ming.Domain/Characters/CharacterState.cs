@@ -17,12 +17,16 @@ public sealed class CharacterState
         CharacterId id,
         string name,
         CharacterAttributes attributes,
-        CharacterPersonality personality)
+        CharacterPersonality personality,
+        ProvinceId? locationId = null,
+        string? officeId = null)
     {
         Id = id;
         Name = name;
         Attributes = attributes;
         Personality = personality;
+        LocationId = locationId ?? new ProvinceId("capital");
+        OfficeId = officeId;
     }
 
     public CharacterId Id { get; }
@@ -37,7 +41,7 @@ public sealed class CharacterState
     public string? OfficeId { get; private set; }
 
     /// <summary>角色所在地区。</summary>
-    public ProvinceId LocationId { get; private set; } = new("capital");
+    public ProvinceId LocationId { get; private set; }
 
     /// <summary>越高表示角色越愿意承受风险和不便；范围约定为 0 到 100。</summary>
     public int Loyalty { get; private set; } = 50;
@@ -48,20 +52,20 @@ public sealed class CharacterState
     /// <summary>角色的私有记忆，不应直接当作世界真相。</summary>
     public IReadOnlyList<MemoryNote> PrivateMemories => _privateMemories;
 
-    public void AssignOffice(string? officeId) => OfficeId = officeId;
+    internal void AssignOffice(string? officeId) => OfficeId = officeId;
 
-    public void MoveTo(ProvinceId locationId) => LocationId = locationId;
+    internal void MoveTo(ProvinceId locationId) => LocationId = locationId;
 
-    public void ChangeLoyalty(int delta) => Loyalty = Math.Clamp(Loyalty + delta, 0, 100);
+    internal void ChangeLoyalty(int delta) => Loyalty = Math.Clamp(Loyalty + delta, 0, 100);
 
-    public void AddStress(int delta) => Stress = Math.Max(0, Stress + delta);
+    internal void AddStress(int delta) => Stress = Math.Max(0, Stress + delta);
 
-    public void Remember(MemoryNote memory) => _privateMemories.Add(memory);
+    internal void Remember(MemoryNote memory) => _privateMemories.Add(memory);
 
     /// <summary>
     /// 创建一份深拷贝，用于回合冻结和失败回滚。
     /// </summary>
-    public CharacterState Clone()
+    internal CharacterState Clone()
     {
         var clone = new CharacterState(Id, Name, Attributes, Personality)
         {

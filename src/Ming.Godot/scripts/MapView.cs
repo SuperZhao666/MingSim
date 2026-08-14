@@ -200,7 +200,8 @@ public partial class MapView : Control
     public string SelectedPlaceSummary => _placesById.TryGetValue(_selectedPlaceId, out var place)
         ? FormatPlaceSemanticSummary(place)
         : "OPEN · 未选择有效地图节点";
-    public string SemanticLegend => "空心环=OPEN/modern_anchor/approximate_point；虚线=INFERENCE；实线=FACT";
+    // 合并后正式清单为 DESIGN 准入草稿（PR #9 契约）：语义层区分 DESIGN/INFERENCE/FACT。
+    public string SemanticLegend => "空心环=OPEN/modern_anchor/approximate_point；虚线=INFERENCE；实线=FACT；DESIGN=设计准入草稿";
     public string RouteSemanticLegend => BuildRouteSemanticLegend();
     public string GeometryDepictDate => _manifest?.ResearchBaseline?.GeometryDepictDate ?? "OPEN";
     public string SnapshotDate => _manifest?.HistoricalContent?.SnapshotDate ?? "OPEN";
@@ -468,7 +469,10 @@ public partial class MapView : Control
                 {
                     var from = transform * ToVector(route.Points[i - 1]);
                     var to = transform * ToVector(route.Points[i]);
-                    if (IsInferenceRoute(route))
+                    // DESIGN 准入草稿用土色虚线，不冒充 FACT 实线；INFERENCE 用朱红虚线。
+                    if (string.Equals(route.ClaimStatus, "design_topology", StringComparison.Ordinal))
+                        DrawDashedLine(from, to, new Color(0.45f, 0.42f, 0.36f, 0.72f), Mathf.Clamp(1.25f * _zoom, 1.1f, 2.0f), 5.0f, true);
+                    else if (IsInferenceRoute(route))
                         DrawDashedLine(from, to, new Color(0.55f, 0.19f, 0.16f, 0.76f), Mathf.Clamp(1.25f * _zoom, 1.1f, 2.0f), 7.0f, true);
                     else
                         DrawLine(from, to, new Color("#6F1F1B"), Mathf.Clamp(1.55f * _zoom, 1.4f, 2.5f), true);
@@ -651,8 +655,10 @@ public partial class MapView : Control
 
     private static string PlaceKnowledgeClass(PlaceDefinition place)
     {
-        var evidenceClass = string.Equals(place.EvidenceStatus, "accepted_evidence", StringComparison.Ordinal)
-            ? "FACT"
+        // 合并后的正式契约：地点/路线都是 DESIGN 准入草稿（PR #9 的证据准入机器），
+        // 尚未通过史料复核，语义层如实标 DESIGN 而不是冒充 FACT。
+        var evidenceClass = string.Equals(place.EvidenceStatus, "draft", StringComparison.Ordinal)
+            ? "DESIGN"
             : "INFERENCE";
         var openClass = string.Equals(place.HistoricalSiteStatus, "open", StringComparison.OrdinalIgnoreCase)
             ? "OPEN"
@@ -660,7 +666,11 @@ public partial class MapView : Control
         return string.IsNullOrEmpty(openClass) ? evidenceClass : $"{evidenceClass}/{openClass}";
     }
 
-    private static string RouteKnowledgeClass(RouteDefinition route) => IsInferenceRoute(route) ? "INFERENCE" : "FACT";
+    private static string RouteKnowledgeClass(RouteDefinition route)
+    {
+        if (string.Equals(route.ClaimStatus, "design_topology", StringComparison.Ordinal)) return "DESIGN";
+        return IsInferenceRoute(route) ? "INFERENCE" : "FACT";
+    }
 
     private string BuildRouteSemanticLegend()
     {
@@ -742,7 +752,7 @@ public partial class MapView : Control
         }
         if (manifest.HistoricalContent is null || string.IsNullOrWhiteSpace(manifest.HistoricalContent.SnapshotDate) ||
             string.IsNullOrWhiteSpace(manifest.HistoricalContent.Warning) ||
-            manifest.HistoricalContent.ClaimStatus != "reviewed_p0_evidence" ||
+            manifest.HistoricalContent.ClaimStatus != "design_only_no_reviewed_evidence" ||
             manifest.HistoricalContent.GeometryRole is null || !manifest.HistoricalContent.GeometryRole.Contains("presentation_only_not_simulation_topology", StringComparison.Ordinal))
         {
             error = "地图清单缺少明确的历史呈现语义；已停止显示。";
@@ -766,7 +776,7 @@ public partial class MapView : Control
             if (string.IsNullOrWhiteSpace(place.Id) || !placeIds.Add(place.Id) || string.IsNullOrWhiteSpace(place.Kind) ||
                 string.IsNullOrWhiteSpace(place.NameZh) || !double.IsFinite(place.MapX) || !double.IsFinite(place.MapY) ||
                 place.MapX < 0 || place.MapX > manifest.Canvas.Width || place.MapY < 0 || place.MapY > manifest.Canvas.Height ||
-                place.ReviewStatus != "accepted" || place.EvidenceStatus is not ("accepted_anchor" or "accepted_evidence") ||
+                place.ReviewStatus != "draft" || place.EvidenceStatus != "draft" ||
                 place.HistoricalSiteStatus != "open" || place.CoordinateEpoch != "modern_anchor" || place.MapRepresentation != "approximate_point")
             {
                 error = "地图节点契约或历史状态无效；已停止显示。";
@@ -779,8 +789,8 @@ public partial class MapView : Control
         {
             if (string.IsNullOrWhiteSpace(route.Id) || !routeIds.Add(route.Id) || string.IsNullOrWhiteSpace(route.FromPlaceId) ||
                 string.IsNullOrWhiteSpace(route.ToPlaceId) || route.FromPlaceId == route.ToPlaceId || !placeIds.Contains(route.FromPlaceId) ||
-                !placeIds.Contains(route.ToPlaceId) || route.Points is not { Count: >= 2 } points || route.ReviewStatus != "accepted" ||
-                route.EvidenceStatus != "accepted" || route.ClaimStatus is not ("reviewed_inference" or "reviewed_fact" or "accepted_fact"))
+                !placeIds.Contains(route.ToPlaceId) || route.Points is not { Count: >= 2 } points || route.ReviewStatus != "draft" ||
+                route.EvidenceStatus != "draft" || route.ClaimStatus != "design_topology")
             {
                 error = "地图路线契约或历史状态无效；已停止显示。";
                 return false;

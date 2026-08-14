@@ -17,6 +17,7 @@ files contain no build time or other volatile metadata.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import hashlib
 import json
@@ -37,6 +38,25 @@ SCHEMA_VERSION = 1
 EARTH_RADIUS_METRES = 6_378_137.0
 MAX_MERCATOR_LATITUDE = 85.0511287798066
 DEFAULT_CONFIG = "content/scenarios/ming_1629/map/map-build.json"
+REPRESENTATIONS = {"approximate_point", "corridor", "polygon"}
+ADMISSION_STATUSES = {"EVIDENCE", "DESIGN"}
+SNAPSHOT_RELATIONS = {
+    "pre_snapshot_historical_evidence",
+    "immediate_pre_snapshot_event",
+    "post_snapshot_event",
+    "historical_foundation_not_snapshot_control",
+    "historical_site_identity_not_snapshot_control",
+    "open_research_gap",
+    "design_only",
+    "license_audit_current",
+}
+DATE_PRECISIONS = {
+    "year_only_open_conversion",
+    "month_only_open_conversion",
+    "open_conversion",
+    "design_label",
+    "not_applicable",
+}
 
 
 class BuildError(RuntimeError):
@@ -61,6 +81,20 @@ def require_list(value: Any, label: str) -> list[Any]:
 def require_string(value: Any, label: str) -> str:
     require(isinstance(value, str) and value.strip() != "", f"{label} 必须是非空字符串。")
     return value.strip()
+
+
+def validate_text_integrity(value: Any, label: str) -> None:
+    """Reject lossy text replacement that can silently break evidence auditability."""
+    if isinstance(value, str):
+        require("\ufffd" not in value, f"{label} 含 U+FFFD 替换字符，必须恢复原文或降级 OPEN。")
+        require("\x00" not in value, f"{label} 含 NUL 控制字符，不能作为可审计文本。")
+        require("???" not in value, f"{label} 含连续问号损坏文本，必须以 UTF-8 可审计文字恢复或降级 OPEN。")
+    elif isinstance(value, Mapping):
+        for key, child in value.items():
+            validate_text_integrity(child, f"{label}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            validate_text_integrity(child, f"{label}[{index}]")
 
 
 def require_id(value: Any, label: str) -> str:
@@ -92,14 +126,74 @@ def validate_lon_lat(longitude: Any, latitude: Any, label: str) -> tuple[float, 
 
 def load_json(path: Path, label: str) -> Mapping[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
+        raw = path.read_bytes().decode("utf-8", errors="strict")
+        if raw.startswith("\ufeff"):
+            raw = raw[1:]
+        value = json.loads(raw)
     except FileNotFoundError as error:
         raise BuildError(f"找不到{label}：{path}") from error
+    except UnicodeDecodeError as error:
+        raise BuildError(f"{label}不是严格 UTF-8 文本：{path}:{error.start}") from error
     except json.JSONDecodeError as error:
         raise BuildError(
             f"{label}不是有效 JSON：{path}:{error.lineno}:{error.colno} {error.msg}"
         ) from error
+    validate_text_integrity(value, label)
     return require_mapping(value, label)
+
+
+def validate_iso_date(value: Any, label: str) -> str | None:
+    if value is None:
+        return None
+    date = require_string(value, label)
+    require(
+        len(date) == 10 and date[4] == "-" and date[7] == "-" and date.replace("-", "").isdigit(),
+        f"{label} 必须是 YYYY-MM-DD 或 null。",
+    )
+    try:
+        year, month, day = (int(part) for part in date.split("-"))
+        __import__("datetime").date(year, month, day)
+    except (ValueError, TypeError) as error:
+        raise BuildError(f"{label} 不是有效 ISO 日期：{date}") from error
+    return date
+
+
+def validate_claim_dates(claim: Mapping[str, Any], label: str, snapshot_date: str) -> None:
+    valid_from = validate_iso_date(claim.get("valid_from"), f"{label}.valid_from")
+    valid_to = validate_iso_date(claim.get("valid_to"), f"{label}.valid_to")
+    date_normalized = validate_iso_date(claim.get("date_normalized"), f"{label}.date_normalized")
+    date_original = require_string(claim.get("date_original"), f"{label}.date_original")
+    date_precision = require_string(claim.get("date_precision"), f"{label}.date_precision")
+    open_conversion = claim.get("open_conversion")
+    require(isinstance(open_conversion, bool), f"{label}.open_conversion 必须是布尔值。")
+    snapshot_relation = require_string(claim.get("snapshot_relation"), f"{label}.snapshot_relation")
+    require(snapshot_relation in SNAPSHOT_RELATIONS, f"{label}.snapshot_relation 无效：{snapshot_relation}")
+    require(date_precision in DATE_PRECISIONS, f"{label}.date_precision 无效：{date_precision}")
+    if valid_from is None or valid_to is None:
+        require(valid_from is None and valid_to is None, f"{label}.valid_from/valid_to 必须同时为日期或 null。")
+    else:
+        require(valid_from <= valid_to, f"{label}.valid_from 不能晚于 valid_to。")
+    if open_conversion:
+        require(date_normalized is None, f"{label} 开放历法换算时 date_normalized 必须为 null。")
+        require(valid_from is None and valid_to is None, f"{label} 开放历法换算时不得伪造 ISO 区间。")
+        require(
+            date_precision in {"year_only_open_conversion", "month_only_open_conversion", "open_conversion"},
+            f"{label} open_conversion=true 时 date_precision 必须保留开放换算语义。",
+        )
+        require(claim.get("confidence") != "high", f"{label} 开放历法换算不得 confidence=high。")
+    elif date_precision == "design_label":
+        require(snapshot_relation == "design_only", f"{label} design_label 必须是 design_only。")
+        require(valid_from == snapshot_date and valid_to == snapshot_date, f"{label} design_label 必须仅使用快照标签日期。")
+        require(date_normalized is None, f"{label} design_label 不得伪造历史 date_normalized。")
+    elif date_precision == "not_applicable":
+        require(snapshot_relation == "license_audit_current", f"{label} not_applicable 必须是许可审计记录。")
+        require(valid_from is None and valid_to is None and date_normalized is None, f"{label} 许可审计日期不得冒充历史状态。")
+    else:
+        require(date_normalized is not None, f"{label} 已关闭日期精度时必须有 date_normalized。")
+    if snapshot_relation != "design_only":
+        require(valid_from != snapshot_date and valid_to != snapshot_date, f"{label} 历史断言不得把快照日写成事件区间。")
+        require(date_normalized != snapshot_date, f"{label} 历史断言不得把非快照事件归一化为快照日。")
+    require(date_original.strip() != "", f"{label}.date_original 不能为空。")
 
 
 def ensure_schema(document: Mapping[str, Any], label: str) -> None:
@@ -135,16 +229,42 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def sha256_text_source(path: Path) -> str:
-    """Hash text inputs using the repository's canonical LF line endings.
+def sha256_canonical_text_file(path: Path) -> str:
+    """Hash UTF-8 text as the LF bytes produced by the repository checkout contract.
 
-    Git may check text files out as CRLF on Windows.  Treating that platform
-    detail as source content made build-report.json differ after a clean local
-    rebuild even though the Git blob was unchanged.  The map compiler consumes
-    these files as text, so their provenance hash is normalized in the same
-    deterministic way on every platform.
+    Git may check text files out as CRLF on Windows (core.autocrlf=true), so
+    treating that platform detail as source content would make build-report.json
+    differ after a clean local rebuild even though the Git blob was unchanged.
+    The canonical form also strips a UTF-8 BOM and folds lone CR to LF, matching
+    the .gitattributes text eol=lf contract for every text source.
     """
-    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    raw = path.read_bytes()
+    text = raw.decode("utf-8-sig", errors="strict")
+    canonical = text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def sha256_input_file(path: Path) -> str:
+    if path.suffix.lower() in {".csv", ".geojson", ".json", ".md", ".py", ".txt"}:
+        return sha256_canonical_text_file(path)
+    return sha256_file(path)
+
+
+def unique_temp_dir(parent: Path, prefix: str) -> Path:
+    """Create a process-unique temporary directory with pathlib.
+
+    tempfile.mkdtemp 在本环境（Windows 文件沙箱）下会先以 O_CREAT 建文件探测、
+    删除后再 mkdir，结果目录被置为只读，目录内无法写入任何产物。pathlib 直接
+    建目录则读写与清理正常，行为与 mkdtemp 等价；构建与契约负例共用此实现。
+    """
+    for attempt in range(100):
+        candidate = parent / f"{prefix}-{os.getpid()}-{attempt}"
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            continue
+    raise BuildError(f"无法创建临时目录（{prefix}）")
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -670,16 +790,31 @@ def load_source_ledger(path: Path) -> dict[str, dict[str, str]]:
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as stream:
             reader = csv.DictReader(stream)
+            validate_text_integrity(reader.fieldnames or [], "source-ledger.csv.header")
             require(reader.fieldnames is not None and "source_id" in reader.fieldnames, "source-ledger.csv 缺少 source_id 列。")
             ledger: dict[str, dict[str, str]] = {}
             for line_number, row in enumerate(reader, start=2):
+                validate_text_integrity(row, f"source-ledger.csv:{line_number}")
                 source_id = require_id(row.get("source_id"), f"source-ledger.csv:{line_number}.source_id")
                 require(source_id not in ledger, f"source-ledger.csv 存在重复 source_id：{source_id}")
                 ledger[source_id] = {key: value or "" for key, value in row.items() if key is not None}
     except FileNotFoundError as error:
         raise BuildError(f"找不到 source ledger：{path}") from error
+    except UnicodeDecodeError as error:
+        raise BuildError(f"source-ledger.csv 不是严格 UTF-8 文本：{path}:{error.start}") from error
     require(ledger, "source-ledger.csv 不能为空。")
     return ledger
+
+
+def source_is_closed(source: Mapping[str, str]) -> bool:
+    url = source.get("url", "").strip().lower()
+    license_name = source.get("license", "").strip().lower()
+    return (
+        source.get("review_status") == "accepted"
+        and source.get("license_review") == "accepted"
+        and url not in {"", "tbd", "open", "local"}
+        and license_name not in {"", "tbd", "open", "research only"}
+    )
 
 
 def validate_source_ids(
@@ -696,16 +831,84 @@ def validate_source_ids(
     return source_ids
 
 
+def require_closed_sources(
+    source_ids: Sequence[str],
+    label: str,
+    ledger: Mapping[str, Mapping[str, str]],
+) -> None:
+    not_closed = sorted(source_id for source_id in source_ids if not source_is_closed(ledger[source_id]))
+    require(not not_closed, f"{label} 引用了未闭合来源：{not_closed}")
+
+
+def require_draft_for_open_sources(
+    source_ids: Sequence[str],
+    label: str,
+    ledger: Mapping[str, Mapping[str, str]],
+    *,
+    review_status: str,
+    evidence_status: str,
+    confidence: str,
+) -> None:
+    """Keep draft/TBD provenance from being mislabeled as accepted evidence."""
+    not_closed = sorted(source_id for source_id in source_ids if not source_is_closed(ledger[source_id]))
+    if not_closed:
+        require(
+            review_status in {"draft", "open"},
+            f"{label} 引用了未闭合来源 {not_closed}，review_status 必须是 draft/open。",
+        )
+        require(
+            evidence_status in {"draft", "open"},
+            f"{label} 引用了未闭合来源 {not_closed}，evidence_status 必须是 draft/open。",
+        )
+        require(confidence != "high", f"{label} 引用了未闭合来源，不得 confidence=high。")
+
+
+def claim_depends_on_open(
+    claim_id: str,
+    claims: Mapping[str, Mapping[str, Any]],
+    visiting: set[str] | None = None,
+) -> bool:
+    """Resolve the small claim graph so P0 admission cannot hide an OPEN dependency."""
+    seen = set() if visiting is None else visiting
+    if claim_id in seen:
+        raise BuildError(f"claim 依赖图存在循环：{claim_id}")
+    claim = claims[claim_id]
+    if claim.get("status") == "OPEN":
+        return True
+    seen.add(claim_id)
+    return any(
+        claim_depends_on_open(str(parent_id), claims, set(seen))
+        for parent_id in require_list(claim.get("source_claim_ids"), f"claim {claim_id}.source_claim_ids")
+    )
+
+
 def load_evidence_ledger(
     path: Path,
     source_ledger: Mapping[str, Mapping[str, str]],
-) -> tuple[dict[str, Mapping[str, Any]], set[str]]:
+    expected_snapshot_date: str | None = None,
+) -> tuple[
+    dict[str, Mapping[str, Any]],
+    dict[str, Mapping[str, Any]],
+    dict[str, Mapping[str, Any]],
+]:
     document = load_json(path, "liaodong-1629-evidence.json")
-    ensure_schema(document, "liaodong-1629-evidence.json")
+    # The evidence ledger owns schema version 2; map input files remain on the
+    # builder's schema version 1.  Keep this gate local to the ledger loader so
+    # the empty-overlay change does not broaden other schemas.
+    require(document.get("schema_version") == 2, "liaodong-1629-evidence.json.schema_version 必须为 2。")
+    snapshot = require_mapping(document.get("snapshot"), "evidence.snapshot")
+    snapshot_date = validate_iso_date(snapshot.get("date_normalized"), "evidence.snapshot.date_normalized")
+    require(snapshot_date is not None, "evidence.snapshot.date_normalized 不能为空。")
+    if expected_snapshot_date is not None:
+        require(
+            snapshot_date == expected_snapshot_date,
+            f"evidence.snapshot.date_normalized={snapshot_date} 与 map-build.snapshot_date={expected_snapshot_date} 不一致。",
+        )
     sources = require_list(document.get("sources"), "evidence.sources")
     source_ids: set[str] = set()
     for index, raw_source in enumerate(sources):
         source = require_mapping(raw_source, f"evidence.sources[{index}]")
+        validate_text_integrity(source, f"evidence.sources[{index}]")
         source_id = require_id(source.get("id"), f"evidence.sources[{index}].id")
         require(source_id not in source_ids, f"证据 source ID 重复：{source_id}")
         source_ids.add(source_id)
@@ -715,6 +918,8 @@ def load_evidence_ledger(
             source.get("url") and source.get("license"),
             f"证据 source {source_id} 必须记录 URL 和 license。",
         )
+        require(source.get("license_url"), f"证据 source {source_id} 缺少 license_url。")
+        require(source.get("license_decision"), f"证据 source {source_id} 缺少 license_decision。")
         require(source_id in source_ledger, f"证据 source {source_id} 未登记到 source-ledger.csv。")
 
     raw_claims = require_list(document.get("claims"), "evidence.claims")
@@ -728,6 +933,8 @@ def load_evidence_ledger(
         claims[claim_id] = claim
 
     for claim_id, claim in claims.items():
+        validate_text_integrity(claim, f"claim {claim_id}")
+        validate_claim_dates(claim, f"claim {claim_id}", snapshot_date)
         refs = [
             require_id(value, f"claim {claim_id}.source_ids[{index}]")
             for index, value in enumerate(
@@ -737,49 +944,211 @@ def load_evidence_ledger(
         require(refs, f"claim {claim_id}.source_ids 不能为空。")
         require(len(refs) == len(set(refs)), f"claim {claim_id}.source_ids 不能重复。")
         for ref in refs:
-            if ref in source_ids:
-                continue
             require(
-                ref in claims and claims[ref].get("status") != "OPEN",
-                f"claim {claim_id}.source_ids 引用了未知或 OPEN claim/source：{ref}",
+                ref in source_ids,
+                f"claim {claim_id}.source_ids 只能引用 evidence.sources/source-ledger ID：{ref}；claim 之间请使用 source_claim_ids。",
+            )
+        claim_source_ids = refs
+
+        confidence = require_string(claim.get("confidence"), f"claim {claim_id}.confidence")
+        require(confidence in {"high", "medium", "low", "unknown"}, f"claim {claim_id}.confidence 无效：{confidence}")
+        claim_review_status = require_string(claim.get("review_status"), f"claim {claim_id}.review_status")
+        require(claim_review_status in {"accepted", "draft", "open"}, f"claim {claim_id}.review_status 无效：{claim_review_status}")
+        claim_evidence_status = claim.get("evidence_status", "accepted" if claim_review_status == "accepted" else "draft")
+        require(
+            claim_evidence_status in {"accepted", "accepted_evidence", "draft", "open"},
+            f"claim {claim_id}.evidence_status 无效：{claim_evidence_status}",
+        )
+        if claim.get("status") == "OPEN" or claim_review_status in {"draft", "open"}:
+            require(confidence != "high", f"claim {claim_id} 为 OPEN/draft，不得 confidence=high。")
+            require(claim_review_status != "accepted", f"claim {claim_id} 为 OPEN/draft，不得 review_status=accepted。")
+            require(
+                claim_evidence_status not in {"accepted", "accepted_evidence"},
+                f"claim {claim_id} 为 OPEN/draft，不得 evidence_status={claim_evidence_status}。",
+            )
+        if claim.get("status") == "FACT" or claim_review_status == "accepted":
+            require_closed_sources(claim_source_ids, f"claim {claim_id}.source_ids", source_ledger)
+        else:
+            require_draft_for_open_sources(
+                claim_source_ids,
+                f"claim {claim_id}",
+                source_ledger,
+                review_status=claim_review_status,
+                evidence_status=claim_evidence_status,
+                confidence=confidence,
+            )
+        allowed_representations = claim.get("allowed_representations")
+        if claim.get("status") == "INFERENCE":
+            allowed = require_list(allowed_representations, f"claim {claim_id}.allowed_representations")
+            require(allowed, f"claim {claim_id}.allowed_representations 不能为空。")
+            require(all(value in REPRESENTATIONS for value in allowed), f"claim {claim_id}.allowed_representations 含未知枚举。")
+            require(len(allowed) == len(set(allowed)), f"claim {claim_id}.allowed_representations 不能重复。")
+        elif allowed_representations is not None:
+            allowed = require_list(allowed_representations, f"claim {claim_id}.allowed_representations")
+            require(all(value in REPRESENTATIONS for value in allowed), f"claim {claim_id}.allowed_representations 含未知枚举。")
+
+        if claim.get("status") == "FACT":
+            citation = require_mapping(claim.get("citation"), f"claim {claim_id}.citation")
+            citation_source_id = require_id(
+                citation.get("source_id"), f"claim {claim_id}.citation.source_id"
+            )
+            require(citation_source_id in source_ids, f"claim {claim_id}.citation.source_id 未知：{citation_source_id}")
+            require(
+                any(citation.get(key) not in (None, "") for key in ("scan_page", "source_row", "original_book_locator")),
+                f"claim {claim_id}.citation 必须有 scan_page、source_row 或原书卷页定位。",
+            )
+            require(citation.get("edition_responsibility"), f"claim {claim_id}.citation 缺少 edition_responsibility。")
+            require(citation.get("license_url"), f"claim {claim_id}.citation 缺少 license_url。")
+            require(citation.get("license_decision"), f"claim {claim_id}.citation 缺少 license_decision。")
+            require(
+                citation_source_id in claim_source_ids,
+                f"claim {claim_id}.citation.source_id 必须同时出现在 source_ids 中。",
+            )
+            if citation_source_id == "SRC-CTEXT-MAOSHUAIDONGJI":
+                require(
+                    claim.get("confidence") != "high",
+                    f"claim {claim_id} 使用未逐页核对的 CText OCR，不得标为 high。",
+                )
+        if claim_id == "OPEN-CHGIS-REUSE":
+            require(claim.get("status") == "OPEN", "OPEN-CHGIS-REUSE 必须保持 OPEN。")
+            require(claim.get("confidence") != "high", "OPEN-CHGIS-REUSE 不得标为 high。")
+
+        source_claim_ids = [
+            require_id(value, f"claim {claim_id}.source_claim_ids[{index}]")
+            for index, value in enumerate(
+                require_list(claim.get("source_claim_ids"), f"claim {claim_id}.source_claim_ids")
+            )
+        ]
+        require(len(source_claim_ids) == len(set(source_claim_ids)), f"claim {claim_id}.source_claim_ids 不能重复。")
+        for ref in source_claim_ids:
+            require(ref in claims, f"claim {claim_id}.source_claim_ids 引用了未知 claim：{ref}")
+            require(ref != claim_id, f"claim {claim_id}.source_claim_ids 不能自引用。")
+        if claim.get("status") == "INFERENCE":
+            require(source_claim_ids, f"claim {claim_id}.source_claim_ids 不能为空。")
+        if claim.get("status") == "INFERENCE" and claim_depends_on_open(claim_id, claims):
+            require(
+                claim_review_status == "draft",
+                f"claim {claim_id} 依赖 OPEN，只能保持 review_status=draft。",
             )
 
-    admitted_claim_ids: set[str] = set()
+    admission_by_claim: dict[str, Mapping[str, Any]] = {}
+    admission_records: dict[str, Mapping[str, Any]] = {}
+    admission_ids: set[str] = set()
     for index, raw_admission in enumerate(
         require_list(document.get("p0_map_admission"), "evidence.p0_map_admission")
     ):
         admission = require_mapping(raw_admission, f"evidence.p0_map_admission[{index}]")
         admission_id = require_id(admission.get("id"), f"evidence.p0_map_admission[{index}].id")
+        require(admission_id not in admission_ids, f"P0 admission ID 重复：{admission_id}")
+        admission_ids.add(admission_id)
+        admission_status = require_string(admission.get("admission_status"), f"admission {admission_id}.admission_status")
+        require(admission_status in ADMISSION_STATUSES, f"admission {admission_id}.admission_status 无效：{admission_status}")
+        allowed_representations = require_list(admission.get("allowed_representations"), f"admission {admission_id}.allowed_representations")
+        require(allowed_representations, f"admission {admission_id}.allowed_representations 不能为空。")
+        require(all(value in REPRESENTATIONS for value in allowed_representations), f"admission {admission_id}.allowed_representations 含未知枚举。")
+        require(len(allowed_representations) == len(set(allowed_representations)), f"admission {admission_id}.allowed_representations 不能重复。")
+        anchor_only = admission.get("anchor_only")
+        require(isinstance(anchor_only, bool), f"admission {admission_id}.anchor_only 必须是布尔值。")
+        if anchor_only:
+            require("polygon" not in allowed_representations, f"admission {admission_id} 的 anchor_only 不得允许 polygon。")
         admission_claims = require_list(
             admission.get("source_claim_ids"), f"admission {admission_id}.source_claim_ids"
         )
+        require(admission_claims, f"admission {admission_id}.source_claim_ids 不能为空。")
+        claim_contracts: dict[str, dict[str, Any]] = {}
         for claim_index, raw_claim_id in enumerate(admission_claims):
             claim_id = require_id(
                 raw_claim_id, f"admission {admission_id}.source_claim_ids[{claim_index}]"
             )
             require(claim_id in claims, f"admission {admission_id} 引用了未知 claim：{claim_id}")
-            admitted_claim_ids.add(claim_id)
+            require(claims[claim_id].get("status") == "INFERENCE", f"admission {admission_id} 只能准入 INFERENCE claim：{claim_id}")
+            claim_allowed = set(require_list(claims[claim_id].get("allowed_representations"), f"claim {claim_id}.allowed_representations"))
+            require(set(allowed_representations).issubset(claim_allowed), f"admission {admission_id} 的表现与 claim 机器枚举不一致：{claim_id}")
+            depends_on_open = claim_depends_on_open(claim_id, claims)
+            if depends_on_open:
+                require(
+                    admission_status == "DESIGN",
+                    f"admission {admission_id} 的 claim {claim_id} 依赖 OPEN，只能 admission_status=DESIGN。",
+                )
+            else:
+                require(
+                    admission_status == "EVIDENCE",
+                    f"admission {admission_id} 的 claim {claim_id} 无 OPEN 依赖时必须 admission_status=EVIDENCE。",
+                )
+            record = {
+                "admission_id": admission_id,
+                "admission_status": admission_status,
+                "claim_allowed_representations": sorted(claim_allowed),
+                "allowed_representations": list(allowed_representations),
+                "anchor_only": anchor_only,
+            }
+            require(claim_id not in admission_by_claim, f"claim {claim_id} 不能被多个 admission 重复准入。")
+            admission_by_claim[claim_id] = record
+            claim_contracts[claim_id] = {
+                "claim_allowed_representations": sorted(claim_allowed),
+                "admission_allowed_representations": list(allowed_representations),
+                "anchor_only": anchor_only,
+                "depends_on_open": depends_on_open,
+            }
+        admission_records[admission_id] = {
+            "id": admission_id,
+            "admission_status": admission_status,
+            "source_claim_ids": [require_id(value, f"admission {admission_id}.source_claim_ids") for value in admission_claims],
+            "allowed_representations": list(allowed_representations),
+            "anchor_only": anchor_only,
+            "claims": claim_contracts,
+            "semantic": admission.get("semantic", ""),
+            "condition": admission.get("condition", ""),
+        }
 
     require(claims, "evidence.claims 不能为空。")
-    require(admitted_claim_ids, "evidence.p0_map_admission 不能为空。")
-    return claims, admitted_claim_ids
+    require(admission_by_claim, "evidence.p0_map_admission 不能为空。")
+    return claims, admission_by_claim, admission_records
 
 
-def validate_claim_ids(
+def validate_consumer_claim_ids(
     raw_claim_ids: Any,
     label: str,
     claims: Mapping[str, Mapping[str, Any]],
-    admitted_claim_ids: set[str],
+    admission_by_claim: Mapping[str, Mapping[str, Any]],
+    representation: str,
+    *,
+    admitted_required: bool,
 ) -> list[str]:
     claim_ids = [
         require_id(value, f"{label}[{index}]")
         for index, value in enumerate(require_list(raw_claim_ids, label))
     ]
     require(claim_ids, f"{label} 不能为空。")
-    require(len(set(claim_ids)) == len(claim_ids), f"{label} 不能重复。")
+    require(len(claim_ids) == len(set(claim_ids)), f"{label} 不能重复。")
     for claim_id in claim_ids:
         require(claim_id in claims, f"{label} 引用了未知 claim：{claim_id}")
-        require(claim_id in admitted_claim_ids, f"{label} 引用的 claim 不在 P0 准入清单：{claim_id}")
+        claim = claims[claim_id]
+        status = claim.get("status")
+        require(
+            representation in {"approximate_point", "corridor", "polygon"},
+            f"{label} 使用了未支持的表现类型：{representation}",
+        )
+        if admitted_required:
+            require(status == "INFERENCE", f"{label} 只能消费 INFERENCE claim：{claim_id}")
+            require(claim_id in admission_by_claim, f"{label} 引用的 claim 不在 P0 准入清单：{claim_id}")
+            require(
+                admission_by_claim[claim_id].get("admission_status") == "EVIDENCE",
+                f"{label} 不能消费 DESIGN admission：{claim_id}",
+            )
+        else:
+            require(status != "OPEN", f"{label} 不得消费 OPEN claim：{claim_id}")
+        allowed = admission_by_claim.get(claim_id, {}).get(
+            "allowed_representations", claim.get("allowed_representations", [])
+        )
+        require(
+            not (
+                representation == "polygon"
+                and admission_by_claim.get(claim_id, {}).get("anchor_only", claim.get("anchor_only", False))
+            ),
+            f"{label} 的 anchor_only claim 不得消费为 Polygon：{claim_id}",
+        )
+        require(representation in allowed, f"{label} 的 claim 不允许表现 {representation}：{claim_id}")
     return claim_ids
 
 
@@ -936,7 +1305,7 @@ def load_evidence_overlays(
     path: Path,
     source_ledger: Mapping[str, Mapping[str, str]],
     claims: Mapping[str, Mapping[str, Any]],
-    admitted_claim_ids: set[str],
+    admission_by_claim: Mapping[str, Mapping[str, Any]],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     document = load_json(path, "historical-overlays.json")
     ensure_schema(document, "historical-overlays.json")
@@ -967,16 +1336,22 @@ def load_evidence_overlays(
             confidence in {"high", "medium", "low", "unknown"},
             f"overlay {overlay_id}.confidence 无效：{confidence}",
         )
-        claim_ids = validate_claim_ids(
-            overlay.get("claim_ids"), f"overlay {overlay_id}.claim_ids", claims, admitted_claim_ids
+        claim_ids = validate_consumer_claim_ids(
+            overlay.get("claim_ids"), f"overlay {overlay_id}.claim_ids", claims, admission_by_claim,
+            "polygon", admitted_required=True
         )
         source_ids = validate_source_ids(
             overlay.get("source_ids"), f"overlay {overlay_id}.source_ids", source_ledger
         )
-        require(
-            all(claims[claim_id].get("status") != "OPEN" for claim_id in claim_ids),
-            f"overlay {overlay_id} 不能引用 OPEN claim。",
+        require_draft_for_open_sources(
+            source_ids,
+            f"overlay {overlay_id}",
+            source_ledger,
+            review_status=review_status,
+            evidence_status="accepted_evidence" if review_status == "accepted" else "draft",
+            confidence=confidence,
         )
+        require_closed_sources(source_ids, f"overlay {overlay_id}.source_ids", source_ledger)
         polygons = geometry_polygons(overlay.get("geometry"), f"overlay {overlay_id}.geometry")
         bbox = geometry_bbox(polygons)
         properties = {
@@ -1000,16 +1375,20 @@ def load_evidence_overlays(
         )
         manifest_overlays.append({"id": overlay_id, "bbox_lon_lat": bbox, **properties})
 
-    require(output_features, "historical-overlays.json 至少需要一个叠加层。")
+    content_status = (
+        "reviewed_p0_evidence"
+        if any(record.get("admission_status") == "EVIDENCE" for record in admission_by_claim.values())
+        else "design_only_no_reviewed_evidence"
+    )
     output_geojson = {
         "type": "FeatureCollection",
-        "name": "ming_1629_reviewed_evidence_overlays",
+        "name": "ming_1629_historical_evidence_overlays",
         "crs": {"type": "name", "properties": {"name": "EPSG:4326"}},
         "metadata": {
             "schema_version": SCHEMA_VERSION,
             "snapshot_date": document.get("snapshot_date"),
-            "claim_status": "reviewed_p0_evidence",
-            "geometry_role": "reviewed_historical_presentation_only_not_simulation_topology",
+            "claim_status": content_status,
+            "geometry_role": "historical_presentation_only_not_simulation_topology",
             "warning": document.get("warning", ""),
         },
         "features": output_features,
@@ -1055,11 +1434,13 @@ def load_places(
     ledger: Mapping[str, Mapping[str, str]],
     projection: WebMercatorProjection,
     claims: Mapping[str, Mapping[str, Any]],
-    admitted_claim_ids: set[str],
-) -> list[dict[str, Any]]:
+    admission_by_claim: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     document = load_json(path, "places.json")
     ensure_schema(document, "places.json")
     places: list[dict[str, Any]] = []
+    rendered_places: list[dict[str, Any]] = []
+    suppressed_place_ids: list[str] = []
     place_ids: set[str] = set()
     for index, raw_place in enumerate(require_list(document.get("places"), "places.json.places")):
         place = require_mapping(raw_place, f"places[{index}]")
@@ -1093,7 +1474,7 @@ def load_places(
         )
         require(historical_site_status == "open", f"place {place_id} 必须保持 historical_site_status=open。")
         require(confidence == "unknown", f"place {place_id} 的坐标 confidence 必须保持 unknown。")
-        require(review_status == "accepted", f"place {place_id} 必须是 accepted 地图点。")
+        require(review_status in {"accepted", "draft"}, f"place {place_id}.review_status 无效或 OPEN：{review_status}")
         map_representation = require_string(
             place.get("map_representation"), f"place {place_id}.map_representation"
         )
@@ -1105,18 +1486,35 @@ def load_places(
             place.get("evidence_status"), f"place {place_id}.evidence_status"
         )
         require(
-            evidence_status in {"accepted_anchor", "accepted_evidence"},
-            f"place {place_id} 的 evidence_status 无效：{evidence_status}",
+            evidence_status in {"accepted_anchor", "accepted_evidence", "draft", "open"},
+            f"place {place_id} 的 evidence_status 无效或 OPEN：{evidence_status}",
         )
-        claim_ids = validate_claim_ids(
-            place.get("claim_ids"), f"place {place_id}.claim_ids", claims, admitted_claim_ids
+        require_draft_for_open_sources(
+            source_ids,
+            f"place {place_id}",
+            ledger,
+            review_status=review_status,
+            evidence_status="accepted_evidence" if evidence_status.startswith("accepted") else evidence_status,
+            confidence=confidence,
         )
+        admitted_required = review_status == "accepted" and evidence_status.startswith("accepted")
+        claim_ids = validate_consumer_claim_ids(
+            place.get("claim_ids"), f"place {place_id}.claim_ids", claims, admission_by_claim,
+            "approximate_point", admitted_required=admitted_required
+        )
+        if admitted_required:
+            require_closed_sources(source_ids, f"place {place_id}.source_ids", ledger)
         evidence_confidence = require_string(
             place.get("evidence_confidence"), f"place {place_id}.evidence_confidence"
         )
+        require(
+            evidence_confidence in {"high", "medium", "low", "unknown"},
+            f"place {place_id}.evidence_confidence 无效：{evidence_confidence}",
+        )
+        if review_status in {"draft", "open"} or evidence_status in {"draft", "open"}:
+            require(evidence_confidence != "high", f"place {place_id} 为 draft/open，不得 evidence_confidence=high。")
         map_x, map_y = projection.project(longitude, latitude)
-        places.append(
-            {
+        parsed_place = {
                 "id": place_id,
                 "name_zh": name_zh,
                 "kind": kind,
@@ -1134,10 +1532,16 @@ def load_places(
                 "claim_ids": claim_ids,
                 "source_ids": source_ids,
                 "notes": place.get("notes", ""),
-            }
-        )
+        }
+        places.append(parsed_place)
+        if review_status in {"accepted", "draft"} and evidence_status in {"accepted_anchor", "accepted_evidence", "draft"}:
+            # Draft records are visible only as a clearly labeled design preview;
+            # they never enter the reviewed-evidence admission path.
+            rendered_places.append(parsed_place)
+        else:
+            suppressed_place_ids.append(place_id)
     require(places, "places.json 至少需要一个地点。")
-    return places
+    return places, rendered_places, suppressed_place_ids
 
 
 def load_routes(
@@ -1146,8 +1550,8 @@ def load_routes(
     projection: WebMercatorProjection,
     places: Sequence[Mapping[str, Any]],
     claims: Mapping[str, Mapping[str, Any]],
-    admitted_claim_ids: set[str],
-) -> tuple[list[dict[str, Any]], list[str]]:
+    admission_by_claim: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str], int]:
     document = load_json(path, "routes.json")
     ensure_schema(document, "routes.json")
     place_by_id = {str(place["id"]): place for place in places}
@@ -1208,32 +1612,44 @@ def load_routes(
         review_status = require_string(
             route.get("review_status"), f"route {route_id}.review_status"
         )
-        if claim_status in {"design_open", "open"} or review_status != "accepted":
-            suppressed_route_ids.append(route_id)
-            continue
-        require(
-            claim_status == "reviewed_inference",
-            f"route {route_id} 当前必须保持 claim_status=reviewed_inference。",
+        map_representation = require_string(
+            route.get("map_representation"), f"route {route_id}.map_representation"
+        )
+        evidence_status = require_string(
+            route.get("evidence_status"), f"route {route_id}.evidence_status"
+        )
+        require(review_status in {"accepted", "draft", "open"}, f"route {route_id}.review_status 无效或 OPEN：{review_status}")
+        require(evidence_status in {"accepted", "draft", "open"}, f"route {route_id}.evidence_status 无效或 OPEN：{evidence_status}")
+        require(claim_status not in {"open", "design_open"}, f"route {route_id}.claim_status OPEN 不得进入构建：{claim_status}")
+        require_draft_for_open_sources(
+            source_ids,
+            f"route {route_id}",
+            ledger,
+            review_status=review_status,
+            evidence_status=evidence_status,
+            confidence=confidence,
+        )
+        admitted_required = review_status == "accepted" and evidence_status == "accepted"
+        claim_ids = validate_consumer_claim_ids(
+            route.get("claim_ids"), f"route {route_id}.claim_ids", claims, admission_by_claim,
+            map_representation, admitted_required=admitted_required
         )
         require(
             confidence in {"medium", "low"},
             f"route {route_id} 的证据走廊 confidence 必须为 medium 或 low。",
         )
-        require(review_status == "accepted", f"route {route_id} 必须是 accepted 证据走廊。")
-        map_representation = require_string(
-            route.get("map_representation"), f"route {route_id}.map_representation"
-        )
         require(
             map_representation == "corridor",
             f"route {route_id} 只允许 corridor，不得伪装成精确道路。",
         )
-        evidence_status = require_string(
-            route.get("evidence_status"), f"route {route_id}.evidence_status"
-        )
-        require(evidence_status == "accepted", f"route {route_id} 必须是 accepted 证据走廊。")
-        claim_ids = validate_claim_ids(
-            route.get("claim_ids"), f"route {route_id}.claim_ids", claims, admitted_claim_ids
-        )
+        if review_status == "accepted":
+            require(claim_status == "reviewed_inference", f"route {route_id} accepted 时必须是 reviewed_inference。")
+            require(evidence_status == "accepted", f"route {route_id} accepted 时必须是 accepted evidence。")
+            require_closed_sources(source_ids, f"route {route_id}.source_ids", ledger)
+        else:
+            require(review_status == "draft", f"route {route_id} 只能是 accepted 或 draft。")
+            require(evidence_status == "draft", f"route {route_id} draft 时必须 evidence_status=draft。")
+            require(claim_status == "design_topology", f"route {route_id} draft 时必须是 design_topology。")
         routes.append(
             {
                 "id": route_id,
@@ -1252,9 +1668,7 @@ def load_routes(
                 "notes": route.get("notes", ""),
             }
         )
-    require(routes, "routes.json 至少需要一条路线。")
-    require(routes, "routes.json 至少需要一条已准入路线。")
-    return routes, suppressed_route_ids
+    return routes, suppressed_route_ids, len(route_ids)
 
 
 def render_debug_map(
@@ -1295,7 +1709,7 @@ def render_debug_map(
     # Debug images can escape their original folder during review.  Keep an ASCII
     # warning inside the pixels so nobody can mistake this technical render for a
     # reviewed 1629 political map, even when the adjacent manifest is missing.
-    warning = "REVIEWED P0 EVIDENCE | OPEN BOUNDARIES | NO SIM TOPOLOGY"
+    warning = "DESIGN DRAFT PREVIEW | OPEN BOUNDARIES | NO SIM TOPOLOGY"
     warning_box = draw.textbbox((0, 0), warning)
     warning_width = warning_box[2] - warning_box[0]
     warning_height = warning_box[3] - warning_box[1]
@@ -1327,6 +1741,8 @@ def build(config_path: Path) -> dict[str, Any]:
     ensure_schema(config, "map-build.json")
     require(config.get("crs") == "EPSG:4326", "map-build.crs 必须是 EPSG:4326。")
     require(config.get("projection") == "web_mercator", "map-build.projection 必须是 web_mercator。")
+    config_snapshot_date = validate_iso_date(config.get("snapshot_date"), "map-build.snapshot_date")
+    require(config_snapshot_date is not None, "map-build.snapshot_date 不能为空。")
     canvas = require_mapping(config.get("canvas"), "map-build.canvas")
     width = int(require_number(canvas.get("width"), "map-build.canvas.width"))
     height = int(require_number(canvas.get("height"), "map-build.canvas.height"))
@@ -1367,20 +1783,20 @@ def build(config_path: Path) -> dict[str, Any]:
     style = require_mapping(config.get("style", {}), "map-build.style")
 
     ledger = load_source_ledger(source_paths["source_ledger"])
-    evidence_claims, admitted_claim_ids = load_evidence_ledger(
-        source_paths["evidence_ledger"], ledger
+    evidence_claims, admission_by_claim, admission_records = load_evidence_ledger(
+        source_paths["evidence_ledger"], ledger, config_snapshot_date
     )
     baseline_geojson, baseline_features, baseline_regions = load_historical_regions(
         source_paths["historical_regions"], source_paths["hartwell_1391_geojson"], ledger
     )
     evidence_geojson, evidence_features, evidence_overlays = load_evidence_overlays(
-        source_paths["historical_overlays"], ledger, evidence_claims, admitted_claim_ids
+        source_paths["historical_overlays"], ledger, evidence_claims, admission_by_claim
     )
-    places = load_places(
-        source_paths["places"], ledger, projection, evidence_claims, admitted_claim_ids
+    places, rendered_places, suppressed_place_ids = load_places(
+        source_paths["places"], ledger, projection, evidence_claims, admission_by_claim
     )
-    routes, suppressed_route_ids = load_routes(
-        source_paths["routes"], ledger, projection, places, evidence_claims, admitted_claim_ids
+    routes, suppressed_route_ids, route_input_count = load_routes(
+        source_paths["routes"], ledger, projection, places, evidence_claims, admission_by_claim
     )
     physical, physical_counts = render_physical_base(
         source_paths["physical_land_shp"],
@@ -1389,21 +1805,16 @@ def build(config_path: Path) -> dict[str, Any]:
         projection,
         style,
     )
-    # Only reviewed P0 evidence overlays are rendered.  The Hartwell geometry
-    # remains an auditable research baseline in the manifest, never a visible
-    # 1629 control layer.
+    # Only the explicitly admitted overlay geometry is rendered.  Draft places
+    # and routes are a labeled design preview; the Hartwell geometry remains an
+    # auditable research baseline and never becomes a visible 1629 control layer.
     history = render_history_overlay(evidence_features, projection, style)
-    debug = render_debug_map(physical, history, places, routes, style, projection)
+    debug = render_debug_map(physical, history, rendered_places, routes, style, projection)
 
-    binary_source_suffixes = {".shp", ".shx", ".dbf"}
     source_hashes = {
-        relative_path(repo_root, config_path): sha256_text_source(config_path),
+        relative_path(repo_root, config_path): sha256_input_file(config_path),
         **{
-            relative_path(repo_root, path): (
-                sha256_file(path)
-                if path.suffix.lower() in binary_source_suffixes
-                else sha256_text_source(path)
-            )
+            relative_path(repo_root, path): sha256_input_file(path)
             for path in source_paths.values()
         },
     }
@@ -1416,20 +1827,7 @@ def build(config_path: Path) -> dict[str, Any]:
         "build_report": "build-report.json",
     }
 
-    # 本环境（Windows 文件沙箱）下 tempfile.mkdtemp 的"建文件探测→删除→再 mkdir"
-    # 序列会让目标目录变为只读，目录内无法写入任何产物。这里用 pathlib 显式创建
-    # 一个进程唯一的临时目录，构建完成后整体清理，行为与 mkdtemp 等价。
-    temporary_dir: Path | None = None
-    for attempt in range(100):
-        candidate = output_dir.parent / f".ming-map-build-{os.getpid()}-{attempt}"
-        try:
-            candidate.mkdir()
-            temporary_dir = candidate
-            break
-        except FileExistsError:
-            continue
-    if temporary_dir is None:
-        raise BuildError("无法创建地图构建临时目录")
+    temporary_dir = unique_temp_dir(output_dir.parent, ".ming-map-build")
     try:
         physical_path = temporary_dir / output_names["physical_base"]
         history_path = temporary_dir / output_names["history_overlay"]
@@ -1454,7 +1852,7 @@ def build(config_path: Path) -> dict[str, Any]:
             "generator": "tools/maps/build_east_asia_map.py",
             "generator_version": GENERATOR_VERSION,
             "scenario_id": require_id(config.get("scenario_id"), "map-build.scenario_id"),
-            "snapshot_date": require_string(config.get("snapshot_date"), "map-build.snapshot_date"),
+            "snapshot_date": config_snapshot_date,
             "historical_content": evidence_geojson["metadata"],
             "research_baseline": {
                 "geometry_depict_date": baseline_geojson["metadata"]["geometry_depict_date"],
@@ -1485,26 +1883,28 @@ def build(config_path: Path) -> dict[str, Any]:
                     "default_visible": True,
                 },
                 {
-                    "id": "reviewed_evidence_overlays",
+                    "id": "historical_evidence_overlays",
                     "kind": "transparent_raster",
                     "asset": "history_overlay",
-                    "role": "reviewed_evidence_presentation_only_not_simulation_topology",
+                    "role": "historical_evidence_presentation_only_not_simulation_topology",
                     "default_visible": True,
                 },
             ],
             "overlays": [
-                {"id": "reviewed_evidence_overlays", "source": "regions", "default_visible": True},
+                {"id": "historical_evidence_overlays", "source": "regions", "default_visible": True},
                 {"id": "routes", "source": "routes", "default_visible": True},
                 {"id": "places", "source": "places", "default_visible": True},
             ],
             "regions": evidence_overlays,
             "historical_baseline_regions": baseline_regions,
-            "places": places,
+            "places": rendered_places,
+            "suppressed_places": suppressed_place_ids,
             "routes": routes,
             "suppressed_routes": suppressed_route_ids,
             "evidence": {
                 "ledger": godot_path(repo_root, source_paths["evidence_ledger"]),
-                "admitted_claim_ids": sorted(admitted_claim_ids),
+                "admitted_claim_ids": sorted(admission_by_claim),
+                "admission_to_claim": admission_records,
                 "claim_count": len(evidence_claims),
             },
             "separation_contract": {
@@ -1519,14 +1919,84 @@ def build(config_path: Path) -> dict[str, Any]:
             **preliminary_output_hashes,
             output_names["manifest"]: sha256_file(manifest_path),
         }
+        rendered_claim_ids = {
+            claim_id
+            for record in evidence_features
+            for claim_id in record.get("properties", {}).get("claim_ids", [])
+        }
+        rendered_claim_ids.update(
+            claim_id for place in rendered_places for claim_id in place.get("claim_ids", [])
+        )
+        rendered_claim_ids.update(
+            claim_id for route in routes for claim_id in route.get("claim_ids", [])
+        )
+        validation = {
+            "source_features_unique": len(evidence_overlays) == len({item["id"] for item in evidence_overlays}),
+            "source_ids_known": all(
+                source_id in ledger
+                for claim in evidence_claims.values()
+                for source_id in claim.get("source_ids", [])
+            ),
+            "evidence_claims_have_sources": all(
+                isinstance(claim.get("source_ids"), list) and claim.get("source_ids")
+                for claim in evidence_claims.values()
+            ),
+            "rendered_claims_are_not_open": all(
+                evidence_claims[claim_id].get("status") != "OPEN" for claim_id in rendered_claim_ids
+            ),
+            "hartwell_baseline_not_rendered": manifest["research_baseline"]["visible"] is False,
+            "route_inputs_accounted_for": len(routes) + len(suppressed_route_ids) == route_input_count,
+            "geometry_structurally_valid": all(
+                feature.get("type") == "Feature" and feature.get("geometry") is not None
+                for feature in evidence_features
+            ),
+            "place_ids_unique": len({place["id"] for place in places}) == len(places),
+            "route_ids_unique": len({route["id"] for route in routes}) == len(routes),
+            "route_endpoints_known_and_aligned": all(
+                route["points"]
+                and math.isclose(route["points"][0]["longitude"], next(place["longitude"] for place in places if place["id"] == route["from_place_id"]), abs_tol=1e-4)
+                and math.isclose(route["points"][0]["latitude"], next(place["latitude"] for place in places if place["id"] == route["from_place_id"]), abs_tol=1e-4)
+                and math.isclose(route["points"][-1]["longitude"], next(place["longitude"] for place in places if place["id"] == route["to_place_id"]), abs_tol=1e-4)
+                and math.isclose(route["points"][-1]["latitude"], next(place["latitude"] for place in places if place["id"] == route["to_place_id"]), abs_tol=1e-4)
+                for route in routes
+            ),
+            "date_contracts_validated": all(
+                all(field in claim for field in ("valid_from", "valid_to", "date_normalized", "date_precision", "open_conversion", "snapshot_relation"))
+                for claim in evidence_claims.values()
+            ),
+            "admission_contracts_complete": all(
+                record.get("claims") and all(
+                    claim_record.get("admission_allowed_representations")
+                    for claim_record in record["claims"].values()
+                )
+                for record in admission_records.values()
+            ),
+            "design_admissions_not_reviewed": all(
+                record.get("admission_status") == (
+                    "DESIGN"
+                    if any(claim_record.get("depends_on_open") for claim_record in record.get("claims", {}).values())
+                    else "EVIDENCE"
+                )
+                for record in admission_records.values()
+            ),
+            "source_hashes_collected": len(source_hashes) == len(source_paths) + 1,
+            "temporary_asset_hashes_match": all(
+                output_hashes[filename] == preliminary_output_hashes[filename]
+                for filename in preliminary_output_hashes
+            ),
+        }
+        require(all(validation.values()), f"地图构建验证未闭合：{[key for key, value in validation.items() if not value]}")
+        admission_status_counts = {
+            status: sum(record.get("admission_status") == status for record in admission_records.values())
+            for status in sorted(ADMISSION_STATUSES)
+        }
         report = {
             "schema_version": SCHEMA_VERSION,
             "generator": "tools/maps/build_east_asia_map.py",
             "generator_version": GENERATOR_VERSION,
             "scenario_id": manifest["scenario_id"],
-            "status": "technical_validation_passed_reviewed_evidence",
-            "technical_validation": "passed",
-            "historical_content_status": "reviewed_p0_evidence_with_open_items",
+            "status": "built_with_design_preview_and_open_items",
+            "historical_content_status": evidence_geojson["metadata"]["claim_status"],
             "source_sha256": source_hashes,
             "output_sha256": output_hashes,
             "counts": {
@@ -1534,24 +2004,18 @@ def build(config_path: Path) -> dict[str, Any]:
                 "historical_regions": len(evidence_features),
                 "historical_baseline_regions": len(baseline_features),
                 "evidence_claims": len(evidence_claims),
-                "admitted_claims": len(admitted_claim_ids),
+                "admitted_claims": len(admission_by_claim),
+                "admission_status_counts": admission_status_counts,
                 "suppressed_routes": len(suppressed_route_ids),
-                "places": len(places),
+                "places": len(rendered_places),
+                "place_inputs": len(places),
+                "suppressed_places": len(suppressed_place_ids),
                 "routes": len(routes),
+                "route_inputs": route_input_count,
                 "source_ledger_entries": len(ledger),
             },
             "validation": {
-                "source_features_unique": True,
-                "source_ids_known": True,
-                "evidence_claims_have_sources": True,
-                "open_claims_not_rendered": True,
-                "hartwell_baseline_not_rendered": True,
-                "open_routes_not_rendered": True,
-                "geometry_structurally_valid": True,
-                "place_ids_unique": True,
-                "route_ids_unique": True,
-                "route_endpoints_known_and_aligned": True,
-                "volatile_metadata_included": False,
+                **validation,
                 "optional_physical_layers": {
                     "lakes": (
                         "rendered" if "physical_lakes_shp" in source_paths else "not_configured"
@@ -1563,6 +2027,7 @@ def build(config_path: Path) -> dict[str, Any]:
             },
             "notes": [
                 "build-report.json 不记录自身哈希，以避免递归哈希。",
+                "source_sha256 对 UTF-8 文本输入使用 canonical LF 字节；二进制输入使用 checkout 原始字节。",
                 "历史区域几何仅供表现；本构建器不读取、推导或写入 Simulation 拓扑。",
             ],
         }
@@ -1583,6 +2048,157 @@ def build(config_path: Path) -> dict[str, Any]:
     }
 
 
+def run_contract_negative_tests(repo_root: Path) -> None:
+    """Run small fail-closed examples without creating map output files."""
+    source_path = repo_root / "content/scenarios/ming_1629/map/source-ledger.csv"
+    evidence_path = repo_root / "content/scenarios/ming_1629/evidence/liaodong-1629-evidence.json"
+    source_ledger = load_source_ledger(source_path)
+    evidence = load_json(evidence_path, "liaodong-1629-evidence.json")
+    snapshot_date = require_string(evidence["snapshot"]["date_normalized"], "negative.snapshot_date")
+    checks: list[str] = []
+
+    def expect_failure(name: str, action: Any) -> None:
+        try:
+            action()
+        except BuildError:
+            checks.append(name)
+            return
+        raise BuildError(f"负例未失败：{name}")
+
+    expect_failure(
+        "unknown_source",
+        lambda: validate_source_ids(["UNKNOWN-SOURCE"], "negative.source_ids", source_ledger),
+    )
+    expect_failure(
+        "unknown_claim",
+        lambda: validate_consumer_claim_ids(
+            ["UNKNOWN-CLAIM"],
+            "negative.claim_ids",
+            {},
+            {},
+            "corridor",
+            admitted_required=False,
+        ),
+    )
+    expect_failure(
+        "open_claim_as_consumer",
+        lambda: validate_consumer_claim_ids(
+            ["OPEN-CLAIM"],
+            "negative.open_consumer",
+            {"OPEN-CLAIM": {"status": "OPEN", "allowed_representations": ["corridor"]}},
+            {},
+            "corridor",
+            admitted_required=False,
+        ),
+    )
+    representation_claims = {
+        "CORRIDOR-ONLY": {"status": "INFERENCE", "allowed_representations": ["corridor"]}
+    }
+    representation_admission = {
+        "CORRIDOR-ONLY": {
+            "admission_status": "DESIGN",
+            "allowed_representations": ["corridor"],
+        }
+    }
+    expect_failure(
+        "corridor_only_as_approximate_point",
+        lambda: validate_consumer_claim_ids(
+            ["CORRIDOR-ONLY"],
+            "negative.representation",
+            representation_claims,
+            representation_admission,
+            "approximate_point",
+            admitted_required=False,
+        ),
+    )
+    anchor_claims = {"ANCHOR-ONLY": {"status": "INFERENCE", "allowed_representations": ["polygon"]}}
+    expect_failure(
+        "anchor_only_as_polygon",
+        lambda: validate_consumer_claim_ids(
+            ["ANCHOR-ONLY"],
+            "negative.anchor_polygon",
+            anchor_claims,
+            {"ANCHOR-ONLY": {"admission_status": "DESIGN", "allowed_representations": ["polygon"], "anchor_only": True}},
+            "polygon",
+            admitted_required=False,
+        ),
+    )
+    expect_failure("replacement_character", lambda: validate_text_integrity("坏\ufffd", "negative.text"))
+    expect_failure("nul_character", lambda: validate_text_integrity("坏\x00字", "negative.text"))
+    expect_failure("question_mark_damage", lambda: validate_text_integrity("坏???字", "negative.text"))
+    expect_failure(
+        "unclosed_geometry",
+        lambda: geometry_polygons(
+            {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1]]] },
+            "negative.geometry",
+        ),
+    )
+    expect_failure(
+        "draft_source_as_accepted",
+        lambda: require_draft_for_open_sources(
+            ["SRC-PLACE-MODERN-ANCHOR"],
+            "negative.consumer",
+            source_ledger,
+            review_status="accepted",
+            evidence_status="accepted_evidence",
+            confidence="medium",
+        ),
+    )
+
+    def mutated_evidence(mutator: Any) -> None:
+        document = copy.deepcopy(evidence)
+        mutator(document)
+        temporary = unique_temp_dir(repo_root, ".ming-map-negative")
+        try:
+            candidate = temporary / "evidence.json"
+            write_json(candidate, document)
+            load_evidence_ledger(candidate, source_ledger, snapshot_date)
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+
+    expect_failure(
+        "unknown_source_claim",
+        lambda: mutated_evidence(lambda document: document["claims"][0]["source_claim_ids"].append("UNKNOWN-CLAIM")),
+    )
+    expect_failure(
+        "open_claim_in_p0",
+        lambda: mutated_evidence(lambda document: document["p0_map_admission"][0].update({"source_claim_ids": ["OPEN-HISTORIC-SITE-COORDINATES"]})),
+    )
+    expect_failure(
+        "open_claim_high",
+        lambda: mutated_evidence(lambda document: next(claim for claim in document["claims"] if claim["status"] == "OPEN").update({"confidence": "high"})),
+    )
+    expect_failure(
+        "event_backfilled_into_snapshot",
+        lambda: mutated_evidence(lambda document: next(claim for claim in document["claims"] if claim["id"] == "INFERENCE-P0-NINGYUAN-ANCHOR").update({"valid_from": "1626-01-01"})),
+    )
+
+    temporary_dir = unique_temp_dir(repo_root, ".ming-map-negative")
+    try:
+        bad_csv = temporary_dir / "bad.csv"
+        bad_csv.write_bytes(b"source_id,title\nDRAFT,???\n")
+        expect_failure("csv_question_mark_damage", lambda: load_source_ledger(bad_csv))
+        bad_encoding = temporary_dir / "bad-encoding.csv"
+        bad_encoding.write_bytes(b"source_id,title\nDRAFT,\xff\n")
+        expect_failure("csv_invalid_utf8", lambda: load_source_ledger(bad_encoding))
+        bad_evidence = temporary_dir / "bad-evidence.json"
+        bad_evidence.write_text("{\"broken\":", encoding="utf-8", newline="\n")
+        bad_config = copy.deepcopy(load_json(repo_root / DEFAULT_CONFIG, "map-build.json"))
+        bad_config["sources"]["evidence_ledger"] = relative_path(repo_root, bad_evidence)
+        bad_config["output_dir"] = relative_path(repo_root, temporary_dir / "failed-output")
+        bad_config_path = temporary_dir / "bad-config.json"
+        write_json(bad_config_path, bad_config)
+        expect_failure("failed_build_has_no_report", lambda: build(bad_config_path))
+        require(
+            not (temporary_dir / "failed-output" / "build-report.json").exists(),
+            "失败构建不应产生 build-report.json。",
+        )
+    finally:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
+
+    require(len(checks) == 17, f"负例数量不完整：{checks}")
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1590,6 +2206,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help=f"项目内配置路径；默认 {DEFAULT_CONFIG}",
+    )
+    parser.add_argument(
+        "--contract-negative-tests",
+        action="store_true",
+        help="运行证据与地图消费契约的最小 fail-closed 负例，不生成地图资产。",
     )
     return parser.parse_args(argv)
 
@@ -1601,6 +2222,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not config_path.is_absolute():
         config_path = repo_root / config_path
     try:
+        if args.contract_negative_tests:
+            run_contract_negative_tests(repo_root)
+            print("契约负例全部按预期失败：17")
+            return 0
         result = build(config_path)
     except (BuildError, OSError, struct.error) as error:
         print(f"地图构建失败：{error}", file=sys.stderr)
