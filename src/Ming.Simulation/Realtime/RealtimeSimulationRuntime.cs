@@ -345,6 +345,57 @@ public sealed class RealtimeSimulationRuntime
 
     public RealtimeCommandReceipt EnqueueSetSimulationSpeed(SetSimulationSpeedCommand command) => Enqueue(command);
 
+    /// <summary>
+    /// 从权威路线中为一次调粮选择一个当前可执行的路线（P1-UI-01 修复）：
+    /// 按路线编号稳定排序，返回第一个"调用者有授权、来源有粮、路线容量与目的仓余量都放得下"的路线。
+    /// 只读权威状态；UI 用它替代硬编码路线，绝不猜测来源仓。
+    /// </summary>
+    public RouteId? ResolveRouteForGrainShipment(CharacterId actorId, long grainQuantity)
+    {
+        if (grainQuantity <= 0 || !IsValidId(actorId.Value))
+        {
+            return null;
+        }
+
+        lock (_writerGate)
+        {
+            foreach (var candidate in _state.Logistics.Routes.Values.OrderBy(item => item.Id.Value, StringComparer.Ordinal))
+            {
+                if (!_state.Logistics.Stockpiles.TryGetValue(candidate.FromStockpileId, out var source)
+                    || !_state.Logistics.Stockpiles.TryGetValue(candidate.ToStockpileId, out var destination))
+                {
+                    continue;
+                }
+
+                var authorization = _authorizer.Check(_state, actorId, GameCapability.PlanLogistics, candidate.Id.Value);
+                if (!authorization.Allowed)
+                {
+                    continue;
+                }
+
+                if (!GrainLogisticsRules.HasEnoughSourceGrain(source, grainQuantity) ||
+                    !GrainLogisticsRules.FitsRouteCapacity(_state.Logistics, candidate, grainQuantity))
+                {
+                    continue;
+                }
+
+                if (!GrainLogisticsRules.TryCalculateArrival(candidate, grainQuantity, out var plannedDelivery, out _))
+                {
+                    continue;
+                }
+
+                if (!GrainLogisticsRules.FitsDestinationCapacity(_state.Logistics, destination, plannedDelivery))
+                {
+                    continue;
+                }
+
+                return candidate.Id;
+            }
+
+            return null;
+        }
+    }
+
     public void SetPaused(bool paused)
     {
         lock (_writerGate)

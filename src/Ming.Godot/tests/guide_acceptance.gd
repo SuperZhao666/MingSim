@@ -41,6 +41,8 @@ func _init() -> void:
 		_finish()
 		return
 
+	await _test_dispatch_action_must_succeed_in_real_ningyuan_scenario(root)
+
 	guide_entry.emit_signal("pressed")
 	await process_frame
 	_assert(bool(guide_panel.visible), "点击入口后引导面板显示")
@@ -114,6 +116,33 @@ func _on_timeout() -> void:
 		return
 	failures.append("M3 guide acceptance 超时")
 	_finish()
+
+
+# 审计 P1-UI-01 端到端：引导第 2 步核心动作"调粮五千石"必须在真实 1629 场景中可执行——
+# 按钮通过权威路线投影选择当前可行路线（不再硬编码山海关），命令被内核受理并产生在途粮队。
+func _test_dispatch_action_must_succeed_in_real_ningyuan_scenario(root: Control) -> void:
+	var dispatch := _find_by_name(root, "RealtimeDispatchGrain", "Button") as BaseButton
+	var outcome := _find_by_name(root, "RealtimeOutcome", "Label") as Label
+	var stockpiles := _find_by_name(root, "RealtimeStockpiles", "Label") as Label
+	_assert(dispatch != null, "调粮按钮 RealtimeDispatchGrain 存在")
+	_assert(outcome != null and stockpiles != null, "顶栏结果与库存标签存在")
+	if dispatch == null or outcome == null or stockpiles == null:
+		return
+	dispatch.emit_signal("pressed")
+	# 等内核在帧推进中处理收件箱（RealtimeWorldBridge 每帧 Advance）。
+	for _i in range(30):
+		await process_frame
+	var outcome_text := str(outcome.text)
+	_assert(outcome_text.contains("受理"), "调粮命令必须被内核受理：%s" % outcome_text)
+	_assert(not outcome_text.contains("拒绝"), "调粮命令不得被拒绝：%s" % outcome_text)
+	_assert(str(stockpiles.text).contains("在途 1 批"), "受理后必须产生在途粮队：%s" % stockpiles.text)
+
+
+func _find_by_name(root: Node, node_name: String, node_class: String) -> Node:
+	for child in root.find_children("*", node_class, true, false):
+		if str(child.name) == node_name:
+			return child
+	return null
 
 
 func _finish() -> void:
