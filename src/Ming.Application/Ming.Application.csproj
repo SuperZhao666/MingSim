@@ -10,5 +10,12 @@
       本轮只新增 CommandFacade 这一个消费点，旧 TurnOrchestrator 仍保持封存拒绝，不再有第二套世界写入。
     -->
     <ProjectReference Include="..\Ming.Simulation\Ming.Simulation.csproj" />
+    <!--
+      M6 组合根接线（doc 04 §3 HOST / 任务契约）：AgentDecisionHost 需要组合
+      Ming.Agents 的 DecisionPlanner + AgentRealtimeEntry。这是组合根对 Agents 类型的
+      装配依赖，不是业务依赖方向反转：业务方向仍按 doc 04 §5（Agents 作为外围适配器），
+      本引用是 Application 组合根认识 Agents 类型的唯一消费点。
+    -->
+    <ProjectReference Include="..\Ming.Agents\Ming.Agents.csproj" />
   </ItemGroup>
 </Project>
