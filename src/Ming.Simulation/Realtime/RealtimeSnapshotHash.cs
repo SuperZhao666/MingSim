@@ -51,6 +51,8 @@ public static class RealtimeSnapshotHash
                 writer.Write(shipment.ExpectedWorldVersion);
                 break;
             case CreateDecreeCommand decree:
+                // P1-AUTH-01/02：CreateDecreeCommand 不再携带 RequiredCapability/RequiredResourceId
+                // （审核策略由内核按 DecreeKind trusted 映射决定），指纹只覆盖业务意图字段。
                 WriteFingerprintString(writer, "decree");
                 WriteFingerprintString(writer, decree.CommandId);
                 WriteFingerprintString(writer, decree.ActorId.Value);
@@ -62,12 +64,18 @@ public static class RealtimeSnapshotHash
                 writer.Write(decree.Deadline.Value.UtcTicks);
                 WriteFingerprintString(writer, decree.Restrictions);
                 WriteFingerprintString(writer, decree.Remarks);
-                WriteFingerprintString(writer, decree.RequiredCapability.ToString());
-                WriteFingerprintString(writer, decree.RequiredResourceId ?? string.Empty);
                 WriteFingerprintString(writer, decree.LinkedShipmentId ?? string.Empty);
                 WriteFingerprintString(writer, decree.Kind.ToString());
                 writer.Write(decree.SubmittedAt.UtcTicks);
                 writer.Write(decree.ExpectedWorldVersion);
+                break;
+            case ApproveDecreeCommand approve:
+                WriteFingerprintString(writer, "approve-decree");
+                WriteFingerprintString(writer, approve.CommandId);
+                WriteFingerprintString(writer, approve.ActorId.Value);
+                WriteFingerprintString(writer, approve.DecreeId.Value);
+                writer.Write(approve.SubmittedAt.UtcTicks);
+                writer.Write(approve.ExpectedWorldVersion);
                 break;
             case SetPausedCommand pause:
                 WriteFingerprintString(writer, "pause");

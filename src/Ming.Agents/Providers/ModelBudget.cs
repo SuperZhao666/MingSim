@@ -1,8 +1,6 @@
 namespace MingSim.Agents.Providers;
 
-/// <summary>
-/// 模型调用预算上限（长整型，避免浮点金额误差）。
-/// </summary>
+/// <summary>模型调用预算上限（长整型，避免浮点金额误差）。</summary>
 /// <remarks>
 /// 金额单位统一用“毫厘”（1/1000 元），全部用 long 计，避免浮点累计误差；
 /// token 与金额双上限，任一耗尽即视为预算耗尽。价格与上限都是易变配置，
@@ -13,15 +11,49 @@ public sealed record ModelBudget(
     long MaxCostMillis,
     long CostPerTokenMillis);
 
+/// <summary>一次已提交的预算预留：发起调用前原子占用的 token 额度。</summary>
+/// <remarks>
+/// <see cref="ModelBudgetTracker.TryReserve"/> 成功时返回预留句柄；调用结束后必须
+/// 恰好结算一次（<see cref="ModelBudgetTracker.Settle"/>）：按实际用量补记差额、
+/// 未用额度返还、全额返还（取消/未发起调用路径）。
+/// 句柄携带创建它的预算实例引用与已结算标记，用于归属校验与防重入（P2 审查）：
+/// - 用其他预算实例结算本句柄 → 拒绝；
+/// - 同一句柄结算两次 → 拒绝。
+/// </remarks>
+public sealed class ModelBudgetReservation
+{
+    internal ModelBudgetReservation(ModelBudgetTracker owner, long reservedTokens)
+    {
+        Owner = owner ?? throw new ArgumentNullException(nameof(owner));
+        ReservedTokens = reservedTokens;
+    }
+
+    /// <summary>创建本预留的预算实例（归属校验用；不暴露给外部改写）。</summary>
+    internal ModelBudgetTracker Owner { get; }
+
+    /// <summary>本次预留占用的 token 额度。</summary>
+    public long ReservedTokens { get; }
+
+    /// <summary>是否已经结算；只由所属预算实例在临界区内读取与置位。</summary>
+    internal bool Settled { get; private set; }
+
+    internal void MarkSettled() => Settled = true;
+}
+
 /// <summary>
-/// 预算记账器：累计已消耗 token/金额，并在发起模型调用前做预算闸门预检。
+/// 预算记账器：以原子预留（reserve）驱动模型调用，调用结束后按实际用量结算（settle）。
 /// </summary>
 /// <remarks>
-/// 调用方（决策管线）通常在单写者语义下串行访问本类；但模型后台任务与宿主线程
-/// 可能并发记账，因此所有可变状态用一把最小锁保护（P2-2）：锁只覆盖整数累加与
-/// 闸门判断，绝不包裹模型调用或世界推进，不会锁住世界主循环。
+/// P1-AGENT-04（Wave 5A 审计）：修复前闸门预检（CanAfford）与记账（RecordUsage）分离，
+/// 两个并发调用可能同时通过“检查+提交”两步之间留出的窗口，总额超限。
+/// 现在模型路径唯一入口是 <see cref="TryReserve"/>：在锁内一次性完成“检查+提交”，
+/// 不足即拒绝；调用结束后 <see cref="Settle"/> 修正为实际用量。预留与记账分离的
+/// 含义是：锁只覆盖整数累加与闸门判断，绝不包裹网络 await 或世界推进——模型调用
+/// 期间不持有任何预算锁。
 /// 预算只影响“是否发起模型调用”，不进入世界状态、不参与存档/快照。溢出按饱和处理
 /// （视为预算耗尽），绝不让记账数值回绕变成“还有钱”。
+/// <see cref="CanAfford"/> / <see cref="RecordUsage"/> 保留为纯预检/直接记账的兼容入口
+/// （测试与外部调用方使用），生产模型路径必须走 TryReserve/Settle。
 /// </remarks>
 public sealed class ModelBudgetTracker
 {
@@ -49,7 +81,7 @@ public sealed class ModelBudgetTracker
         }
     }
 
-    /// <summary>已消耗 token（长整型累计）。</summary>
+    /// <summary>已消耗 token（长整型累计；含尚未结算的预留占用）。</summary>
     public long SpentTokens
     {
         get
@@ -61,7 +93,7 @@ public sealed class ModelBudgetTracker
         }
     }
 
-    /// <summary>已消耗金额（毫厘，长整型累计）。</summary>
+    /// <summary>已消耗金额（毫厘，长整型累计；含尚未结算的预留占用）。</summary>
     public long SpentCostMillis
     {
         get
@@ -80,7 +112,7 @@ public sealed class ModelBudgetTracker
         {
             lock (_gate)
             {
-                return _spentTokens >= _budget.MaxTokens || _spentCostMillis >= _budget.MaxCostMillis;
+                return IsExhaustedCore;
             }
         }
     }
@@ -93,10 +125,9 @@ public sealed class ModelBudgetTracker
     }
 
     /// <summary>
-    /// 预算闸门：发起调用前检查“加上本次预估 token 后是否仍在双上限内”。
-    /// 返回 false 时调用方必须停止新模型请求并回退规则路径。
-    /// 已耗尽（含溢出饱和到上限）时一律拒绝新调用：饱和按“视为预算耗尽”处理（P2-6），
-    /// 避免饱和到 long.MaxValue 后因投影封顶等于上限而继续放行。
+    /// 预算闸门（兼容预检入口）：只检查“加上本次预估 token 后是否仍在双上限内”，不提交任何记账。
+    /// 已耗尽（含溢出饱和到上限）时一律拒绝新调用。生产模型路径必须使用
+    /// <see cref="TryReserve"/>（原子检查+提交），不能先 CanAfford 再调用，否则并发窗口会超限。
     /// </summary>
     public bool CanAfford(long estimatedTokens)
     {
@@ -119,7 +150,79 @@ public sealed class ModelBudgetTracker
         }
     }
 
-    /// <summary>调用结束后按实际（估算）token 记账；失败调用同样消耗请求 token，防止反复锤打故障 Provider。</summary>
+    /// <summary>
+    /// 原子预留（P1-AGENT-04 主入口）：在锁内一次性完成“检查+提交”——
+    /// 预算不足（含已耗尽与饱和封顶）时返回 false 且不改变任何记账；
+    /// 成功时立即把预估额度计入已消耗并返回预留句柄，后续并发预留只能看到
+    /// 被占用的余量，因此“恰在上限的两个并发预留只有一个成功”。
+    /// 调用结束后必须调用 <see cref="Settle"/> 恰好一次，未用额度返还。
+    /// </summary>
+    public bool TryReserve(long estimatedTokens, out ModelBudgetReservation reservation)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(estimatedTokens);
+        lock (_gate)
+        {
+            if (IsExhaustedCore)
+            {
+                reservation = null!;
+                return false;
+            }
+
+            if (estimatedTokens == 0)
+            {
+                reservation = new ModelBudgetReservation(this, 0);
+                return true;
+            }
+
+            var projectedTokens = AddSaturating(_spentTokens, estimatedTokens);
+            var projectedCost = AddSaturating(_spentCostMillis, MultiplySaturating(estimatedTokens, _budget.CostPerTokenMillis));
+            if (projectedTokens > _budget.MaxTokens || projectedCost > _budget.MaxCostMillis)
+            {
+                reservation = null!;
+                return false;
+            }
+
+            _spentTokens = projectedTokens;
+            _spentCostMillis = projectedCost;
+            reservation = new ModelBudgetReservation(this, estimatedTokens);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// 结算一次预留：把预留额度修正为实际用量（actualTokens ≥ 0）。
+    /// 结算 = 撤销预留占用 + 按实际入账，撤销与入账走与预留完全相同的饱和路径
+    /// （MultiplySaturating/AddSaturating），杜绝返还金额在饱和边界与预留不一致（P2 审查）。
+    /// - 实际 &gt; 预留（如响应 token）：净补记差额；
+    /// - 实际 &lt; 预留：净返还未用额度；
+    /// - 实际 == 0（取消/未发起调用）：全额返还。
+    /// 防重入与归属校验（P2 审查）：句柄只能由创建它的预算实例结算，且只能结算一次。
+    /// </summary>
+    public void Settle(ModelBudgetReservation reservation, long actualTokens)
+    {
+        ArgumentNullException.ThrowIfNull(reservation);
+        ArgumentOutOfRangeException.ThrowIfNegative(actualTokens);
+        if (!ReferenceEquals(reservation.Owner, this))
+        {
+            throw new InvalidOperationException("预留必须由创建它的预算实例结算。");
+        }
+
+        lock (_gate)
+        {
+            if (reservation.Settled)
+            {
+                throw new InvalidOperationException("预留只能结算一次。");
+            }
+
+            reservation.MarkSettled();
+            _spentTokens = SubtractSaturatingAtZero(_spentTokens, reservation.ReservedTokens);
+            _spentCostMillis = SubtractSaturatingAtZero(_spentCostMillis, MultiplySaturating(reservation.ReservedTokens, _budget.CostPerTokenMillis));
+            _spentTokens = AddSaturating(_spentTokens, actualTokens);
+            _spentCostMillis = AddSaturating(_spentCostMillis, MultiplySaturating(actualTokens, _budget.CostPerTokenMillis));
+        }
+    }
+
+    /// <summary>直接按实际（估算）token 记账的兼容入口；并发安全，不丢更新。</summary>
     public void RecordUsage(long tokens)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(tokens);
@@ -130,7 +233,7 @@ public sealed class ModelBudgetTracker
         }
     }
 
-    // 调用方已持锁时的内部判定，避免 CanAfford(0) 通过公开属性重入锁。
+    // 调用方已持锁时的内部判定，避免公开属性重入锁。
     private bool IsExhaustedCore =>
         _spentTokens >= _budget.MaxTokens || _spentCostMillis >= _budget.MaxCostMillis;
 
@@ -152,5 +255,15 @@ public sealed class ModelBudgetTracker
         }
 
         return left + right;
+    }
+
+    private static long SubtractSaturatingAtZero(long left, long right)
+    {
+        if (right <= 0)
+        {
+            return left;
+        }
+
+        return left >= right ? left - right : 0;
     }
 }

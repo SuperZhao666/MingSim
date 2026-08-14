@@ -47,6 +47,10 @@ public sealed class CommandFacade
         _runtime.EnqueueCreateShipment(new CreateShipmentCommand(
             commandId, actorId, shipmentId, routeId, grainQuantity, submittedAt, expectedWorldVersion, escort));
 
+    /// <summary>
+    /// 提交一道政令：命令只携带业务意图（含 DecreeKind），不携带任何审核策略
+    /// （P1-AUTH-01/02 修复）——签发人/承办人能力/资源域由内核 trusted 映射决定。
+    /// </summary>
     public RealtimeCommandReceipt EnqueueCreateDecree(
         string commandId,
         CharacterId actorId,
@@ -58,13 +62,21 @@ public sealed class CommandFacade
         GameTime deadline,
         string restrictions,
         string remarks,
-        GameCapability requiredCapability,
-        string? requiredResourceId,
         string? linkedShipmentId,
+        DecreeKind kind,
         DateTimeOffset submittedAt,
         long expectedWorldVersion) =>
         _runtime.EnqueueCreateDecree(new CreateDecreeCommand(
             commandId, actorId, decreeId, goal, regionScope, budget, responsibleActorId, deadline,
-            restrictions, remarks, requiredCapability, requiredResourceId, linkedShipmentId,
-            submittedAt, expectedWorldVersion));
+            restrictions, remarks, linkedShipmentId, submittedAt, expectedWorldVersion, kind));
+
+    /// <summary>批准一道已提交的请饷奏疏（批准时才扣预算并转可执行）。</summary>
+    public RealtimeCommandReceipt EnqueueApproveDecree(
+        string commandId,
+        CharacterId actorId,
+        DecreeId decreeId,
+        DateTimeOffset submittedAt,
+        long expectedWorldVersion) =>
+        _runtime.EnqueueApproveDecree(new ApproveDecreeCommand(
+            commandId, actorId, decreeId, submittedAt, expectedWorldVersion));
 }

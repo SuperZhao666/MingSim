@@ -299,9 +299,8 @@ public partial class DecreePanel : Panel
             new GameTime(model.GameTime.Value.AddDays(Math.Max(1, days))),
             restrictions,
             remarks,
-            GameCapability.PlanLogistics,
-            requiredResourceId: null,
             linkedShipmentId: null,
+            ToDecreeKind(template.Kind),
             model.GameTime.Value,
             model.WorldVersion);
         _lastCommandId = commandId;
@@ -310,6 +309,19 @@ public partial class DecreePanel : Panel
             : $"提交被拒：{CommandFailureText.Translate(receipt.Errors.FirstOrDefault()?.Code ?? "UNKNOWN")}";
         RefreshFromReadModel();
     }
+
+    /// <summary>
+    /// world.json 模板 kind（DESIGN 文书种类：催饷/拨饷/请饷）→ 内核 DecreeKind。
+    /// 政令只表达业务意图：面板不再传任何 capability，审核策略由内核 trusted 映射决定
+    /// （P1-AUTH-01/02 修复）；未识别的模板种类按普通政令处理。
+    /// </summary>
+    private static DecreeKind ToDecreeKind(string kind) => kind switch
+    {
+        "催饷" => DecreeKind.ExpediteSupply,
+        "拨饷" => DecreeKind.AllocateSupply,
+        "请饷" => DecreeKind.RequestSupply,
+        _ => DecreeKind.General,
+    };
 
     private static string ComposeGoal(DecreeTemplate template, IReadOnlyDictionary<string, string> values)
     {

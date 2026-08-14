@@ -69,6 +69,12 @@ internal static class Program
             ShouldRejectDecreeWithoutResponsibleCapability();
             ShouldRejectDecreeWhenTreasuryOrDeadlineInvalid();
             ShouldAcceptDecreeDeductBudgetAndBindShipment();
+            ShouldForbidForgedDecreePolicyAndFakeIssuer();
+            ShouldKeepRequestSupplyBudgetUntilApproval();
+            ShouldRejectUnauthorizedApproverAndKeepTreasury();
+            ShouldRejectApprovalWhenBoundShipmentAlreadyArrived();
+            ShouldRejectDecreeBindingToInvalidShipment();
+            ShouldCompleteOnlyBoundDecreeOnShipmentArrival();
             ShouldExpireDecreeAtDeadlineAndDropTrust();
             ShouldKeepDecreeIdempotent();
             ShouldTrackFrontierReadinessDaily();
@@ -77,6 +83,7 @@ internal static class Program
             ShouldKeepRationReductionInHashAndSnapshot();
             ShouldPenalizeTrustForUnplannedRationReduction();
             ShouldRejectLegacySnapshotSchemaVersion();
+            ShouldRejectV7SnapshotWithPendingDecreeCommands();
             ShouldFailHardAfterSevenZeroGrainDays();
             ShouldEvaluateEndgameTiers();
             ShouldReplayRiskSamplesDeterministically();
@@ -1007,11 +1014,25 @@ internal static class Program
             "两类非法政令都不能创建状态或扣预算");
     }
 
-    /// <summary>政令接纳：预算扣除、DecreeAccepted 事件；绑定粮运抵达后政令完成。</summary>
+    /// <summary>
+    /// 政令接纳：预算扣除、DecreeAccepted 事件；绑定粮运抵达后政令完成。
+    /// P1-DECREE-03 绑定不变量：政令接纳时绑定运输单必须已存在（Planned/InTransit），
+    /// 因此先创建运输单、再提交绑定它的政令。
+    /// </summary>
     private static void ShouldAcceptDecreeDeductBudgetAndBindShipment()
     {
         var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
         var before = runtime.ReadModel;
+
+        var shipment = new CreateShipmentCommand(
+            "shipment-decree-grain", new CharacterId("works"), new ShipmentId("shipment-decree-grain"),
+            new RouteId("capital-ningyuan-grain"), 5_000, runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion);
+        Require(runtime.EnqueueCreateShipment(shipment).Queued, "绑定粮运应进入收件箱");
+        runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        var boundShipment = runtime.ReadModel.Shipments.SingleOrDefault(item => item.Id.Value == "shipment-decree-grain");
+        Require(boundShipment is not null && boundShipment.Status != ShipmentStatus.Arrived,
+            "前置：绑定运输单必须先存在且未抵达（Planned/InTransit 均可绑定）");
+
         var decree = CreateDecree(runtime, "decree-grain", deadlineDays: 20, budget: 5_000,
             responsible: new CharacterId("works"), linkedShipmentId: "shipment-decree-grain");
         Require(runtime.EnqueueCreateDecree(decree).Queued, "有权限承办人的政令应进入收件箱");
@@ -1023,16 +1044,302 @@ internal static class Program
         Require(runtime.ReadModel.Scenario.SpentSilver == 5_000, "接纳必须把预算计入场景支出");
         Require(runtime.ReadModel.Decrees.Single().Status == DecreeStatus.Executing, "接纳后政令进入执行状态");
 
-        var shipment = new CreateShipmentCommand(
-            "shipment-decree-grain", new CharacterId("works"), new ShipmentId("shipment-decree-grain"),
-            new RouteId("capital-ningyuan-grain"), 5_000, runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion);
-        Require(runtime.EnqueueCreateShipment(shipment).Queued, "绑定粮运应进入收件箱");
-        runtime.AdvanceTo(runtime.ReadModel.GameTime);
         var arrived = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddDays(12)));
 
         Require(arrived.Events.Any(domainEvent => domainEvent.EventType == "DecreeCompleted"),
             "绑定单抵达必须触发 DecreeCompleted");
         Require(runtime.ReadModel.Decrees.Single().Status == DecreeStatus.Completed, "绑定单抵达后政令必须完成");
+    }
+
+    /// <summary>
+    /// P1-AUTH-01/02 修复验收：
+    /// 1) 编译期契约——CreateDecreeCommand 不再暴露 RequiredCapability/RequiredResourceId，
+    ///    调用方再也无法伪造审核策略（旧写法在字段移除后编译失败，即"编译器红"）；
+    /// 2) 越权签发人——不存在的角色不能签发政令（DECREE_ISSUER_UNAUTHORIZED）；
+    /// 3) trusted 映射不可降级——拨饷令要求承办人持 AllocateFinance，只持 PlanLogistics 的承办人
+    ///    必须被拒（调用方不能把拨饷降级为只查弱能力）。
+    /// </summary>
+    private static void ShouldForbidForgedDecreePolicyAndFakeIssuer()
+    {
+        // 1) 伪造策略入口已被移除：命令类型不再携带能力/资源域字段（反射断言编译期契约）。
+        Require(typeof(CreateDecreeCommand).GetProperty("RequiredCapability") is null,
+            "CreateDecreeCommand 不得再暴露 RequiredCapability（伪造策略入口必须被移除）");
+        Require(typeof(CreateDecreeCommand).GetProperty("RequiredResourceId") is null,
+            "CreateDecreeCommand 不得再暴露 RequiredResourceId（伪造策略入口必须被移除）");
+
+        // 2) 越权 issuer：签发人不存在的政令必须被结构化拒绝，不改变世界。
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var before = runtime.ReadModel;
+        var fakeIssuer = new CreateDecreeCommand(
+            "decree-fake-issuer", new CharacterId("ghost"), new DecreeId("decree-fake-issuer"),
+            "伪冒签发人政令", new ProvinceId("liaodong"), 1_000, new CharacterId("works"),
+            new GameTime(before.GameTime.Value.AddDays(10)), "", "测试", LinkedShipmentId: null,
+            before.GameTime.Value, before.WorldVersion, DecreeKind.General);
+        Require(runtime.EnqueueCreateDecree(fakeIssuer).Queued, "伪冒签发人政令应进入收件箱");
+        var issuerResult = runtime.AdvanceTo(before.GameTime);
+        Require(!issuerResult.CommandResults.Single().Accepted &&
+                issuerResult.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_ISSUER_UNAUTHORIZED"),
+            "不存在的签发人必须被拒绝 DECREE_ISSUER_UNAUTHORIZED");
+        Require(runtime.ReadModel.Decrees.Count == 0 && runtime.ReadModel.Scenario.SpentSilver == 0,
+            "伪冒签发人拒绝不能创建政令状态或扣预算");
+
+        // 3) trusted 映射不可降级：拨饷令（AllocateSupply）要求 AllocateFinance，works 只持
+        //    PlanLogistics，必须拒绝 DECREE_RESPONSIBLE_UNAUTHORIZED（调用方无法声明弱能力绕过）。
+        var downgraded = new CreateDecreeCommand(
+            "decree-downgrade", new CharacterId("emperor"), new DecreeId("decree-downgrade"),
+            "拨饷令：降级伪造", new ProvinceId("liaodong"), 1_000, new CharacterId("works"),
+            new GameTime(runtime.ReadModel.GameTime.Value.AddDays(10)), "", "测试", LinkedShipmentId: null,
+            runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion, DecreeKind.AllocateSupply);
+        Require(runtime.EnqueueCreateDecree(downgraded).Queued, "降级拨饷令应进入收件箱");
+        var downgradeResult = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!downgradeResult.CommandResults.Single().Accepted &&
+                downgradeResult.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_RESPONSIBLE_UNAUTHORIZED"),
+            "拨饷令承办人不持内核要求的 AllocateFinance 时必须被拒（策略不可降级）");
+        Require(runtime.ReadModel.Decrees.Count == 0 && runtime.ReadModel.Scenario.SpentSilver == 0,
+            "降级拨饷令拒绝不能创建政令状态或扣预算");
+    }
+
+    /// <summary>
+    /// 请饷奏疏（RequestSupply）是请愿文书：创建时不扣中央预算、进入 Submitted；
+    /// 批准（ApproveDecreeCommand）时才扣除批准预算并转为可执行（P1-AUTH-01 请饷语义）。
+    /// </summary>
+    private static void ShouldKeepRequestSupplyBudgetUntilApproval()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var before = runtime.ReadModel;
+        var petition = CreateDecree(runtime, "decree-request", deadlineDays: 10, budget: 2_000,
+            responsible: new CharacterId("war"), kind: DecreeKind.RequestSupply);
+        Require(runtime.EnqueueCreateDecree(petition).Queued, "请饷奏疏应进入收件箱");
+        var accepted = runtime.AdvanceTo(before.GameTime);
+
+        Require(accepted.CommandResults.Single().Accepted, "请愿文书必须被接纳（无承办能力要求）");
+        Require(runtime.ReadModel.Decrees.Single().Status == DecreeStatus.Submitted,
+            "请饷奏疏创建后必须处于 Submitted（等待批准）");
+        Require(runtime.ReadModel.Scenario.SpentSilver == 0, "请饷创建不能扣中央预算");
+
+        // 批准（审查 P1-A）：批准人必须持 AllocateFinance（财权），用 hubu（测试世界财权角色）。
+        var approve = new ApproveDecreeCommand(
+            "approve-request", new CharacterId("hubu"), new DecreeId("decree-request"),
+            runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion);
+        Require(runtime.EnqueueApproveDecree(approve).Queued, "批准命令应进入收件箱");
+        var approved = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(approved.CommandResults.Single().Accepted, "持财权的批准人必须被接纳");
+        Require(approved.Events.Any(domainEvent => domainEvent.EventType == "DecreeApproved"),
+            "批准必须留下 DecreeApproved 审计事件");
+        Require(runtime.ReadModel.Scenario.SpentSilver == 2_000, "批准时才扣除批准预算（2000 两）");
+        Require(runtime.ReadModel.Decrees.Single().Status == DecreeStatus.Executing,
+            "批准后请饷奏疏转为可执行（Executing）");
+
+        // 再次批准（新 CommandId，绕过幂等）：已转执行，不再处于待批准状态，必须结构化拒绝。
+        var reapprove = new ApproveDecreeCommand(
+            "approve-request-again", new CharacterId("hubu"), new DecreeId("decree-request"),
+            runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion);
+        Require(runtime.EnqueueApproveDecree(reapprove).Queued, "重复批准应进入安全点判定");
+        var reapproveResult = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!reapproveResult.CommandResults.Single().Accepted &&
+                reapproveResult.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_NOT_PENDING_APPROVAL"),
+            "已转执行的请饷不能再批准（DECREE_NOT_PENDING_APPROVAL）");
+        Require(runtime.ReadModel.Scenario.SpentSilver == 2_000, "重复批准不能二次扣预算");
+    }
+
+    /// <summary>
+    /// 审查 P1-A：批准人必须持 AllocateFinance（财权）。无授权角色（war，真实角色但无财权）
+    /// 批准请饷必须被拒，且国库/政令状态都不变——任意真实角色不能再"两步耗尽国库"。
+    /// </summary>
+    private static void ShouldRejectUnauthorizedApproverAndKeepTreasury()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var before = runtime.ReadModel;
+        var petition = CreateDecree(runtime, "decree-request-denied", deadlineDays: 10, budget: 3_000,
+            responsible: new CharacterId("war"), kind: DecreeKind.RequestSupply);
+        Require(runtime.EnqueueCreateDecree(petition).Queued, "请饷奏疏应进入收件箱");
+        var accepted = runtime.AdvanceTo(before.GameTime);
+        Require(accepted.CommandResults.Single().Accepted && runtime.ReadModel.Scenario.SpentSilver == 0,
+            "前置：请饷被接纳且未扣预算");
+
+        var unauthorized = new ApproveDecreeCommand(
+            "approve-unauthorized", new CharacterId("war"), new DecreeId("decree-request-denied"),
+            runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion);
+        Require(runtime.EnqueueApproveDecree(unauthorized).Queued, "无授权批准命令应进入收件箱");
+        var result = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!result.CommandResults.Single().Accepted &&
+                result.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_APPROVER_UNAUTHORIZED"),
+            "无 AllocateFinance 授权的批准人必须被拒绝 DECREE_APPROVER_UNAUTHORIZED");
+        Require(runtime.ReadModel.Scenario.SpentSilver == 0, "被拒批准不能扣国库");
+        Require(runtime.ReadModel.Decrees.Single().Status == DecreeStatus.Submitted, "被拒批准不能改变政令状态");
+
+        // 不存在的批准人也必须被拒（CapabilityAuthorizer 角色不存在即拒绝）。
+        var ghost = new ApproveDecreeCommand(
+            "approve-ghost", new CharacterId("ghost"), new DecreeId("decree-request-denied"),
+            runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion);
+        Require(runtime.EnqueueApproveDecree(ghost).Queued, "伪冒批准人命令应进入收件箱");
+        var ghostResult = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!ghostResult.CommandResults.Single().Accepted &&
+                ghostResult.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_APPROVER_UNAUTHORIZED"),
+            "不存在的批准人必须被拒绝 DECREE_APPROVER_UNAUTHORIZED");
+        Require(runtime.ReadModel.Scenario.SpentSilver == 0, "伪冒批准人不能扣国库");
+    }
+
+    /// <summary>
+    /// 审查 P2：批准路径复查绑定不变量——请饷绑定单先抵达后再批准必须被拒
+    /// （DECREE_SHIPMENT_ALREADY_ARRIVED），避免"先抵后批滞留死锁"（抵达完成只处理 Executing 政令）。
+    /// </summary>
+    private static void ShouldRejectApprovalWhenBoundShipmentAlreadyArrived()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld(travelHours: 2));
+        var start = runtime.ReadModel.GameTime;
+        Require(runtime.EnqueueCreateShipment(CreateShipment(runtime, "petition-ship", 300)).Queued,
+            "绑定运输单应进入收件箱");
+        runtime.AdvanceTo(start);
+        Require(runtime.ReadModel.Shipments.Single(item => item.Id.Value == "shipment-petition-ship").Status != ShipmentStatus.Arrived,
+            "前置：绑定运输单未抵达（Planned/InTransit）");
+
+        var petition = CreateDecree(runtime, "decree-petition-bind", deadlineDays: 20, budget: 1_000,
+            kind: DecreeKind.RequestSupply, linkedShipmentId: "shipment-petition-ship");
+        Require(runtime.EnqueueCreateDecree(petition).Queued, "绑定运输单的请饷应进入收件箱");
+        var accepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(accepted.CommandResults.Single().Accepted && runtime.ReadModel.Decrees.Single().Status == DecreeStatus.Submitted,
+            "绑定未抵达运输单的请饷必须被接纳且处于 Submitted");
+
+        // 运输单先抵达（2 小时行程，次日已抵达），批准在抵达后发起 → 必须被拒。
+        runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddDays(1)));
+        Require(runtime.ReadModel.Shipments.Single(item => item.Id.Value == "shipment-petition-ship").Status == ShipmentStatus.Arrived,
+            "前置：绑定运输单必须已抵达");
+        var approve = new ApproveDecreeCommand(
+            "approve-after-arrival", new CharacterId("hubu"), new DecreeId("decree-petition-bind"),
+            runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion);
+        Require(runtime.EnqueueApproveDecree(approve).Queued, "批准命令应进入收件箱");
+        var rejected = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!rejected.CommandResults.Single().Accepted &&
+                rejected.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_SHIPMENT_ALREADY_ARRIVED"),
+            "绑定单已抵达时批准必须被拒 DECREE_SHIPMENT_ALREADY_ARRIVED");
+        Require(runtime.ReadModel.Scenario.SpentSilver == 0 && runtime.ReadModel.Decrees.Single().Status == DecreeStatus.Submitted,
+            "被拒批准不能扣预算或改变状态");
+    }
+
+    /// <summary>
+    /// 审查 P1-C：v7 快照（命令指纹形状变更前，含 pending 政令命令）必须被版本门禁显式拒绝，
+    /// 而不是在哈希/校验和阶段偶然失败（RealtimeSnapshotSchema.Version 7→8）。
+    /// </summary>
+    private static void ShouldRejectV7SnapshotWithPendingDecreeCommands()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        // 只入队不推进：pending 收件箱里含政令命令——v7 时代指纹（含 RequiredCapability）与当前
+        // 指纹（字段已删 + 新增 ApproveDecreeCommand 分支）不同，恢复必然 StateHash/校验和失配。
+        var decree = CreateDecree(runtime, "decree-pending-v7", deadlineDays: 10, budget: 1_000);
+        Require(runtime.EnqueueCreateDecree(decree).Queued, "pending 政令命令应进入收件箱");
+        var snapshot = runtime.CaptureSnapshot();
+        Require(snapshot.SchemaVersion == RealtimeSnapshotSchema.Version,
+            "捕获快照必须携带当前快照 schema 版本");
+
+        // 把快照 schema 篡改为 v7（#43 命令指纹变更前的版本）：恢复必须被版本门禁显式拒绝。
+        var backingField = typeof(RealtimeSnapshot).GetField("<SchemaVersion>k__BackingField",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new MissingMemberException(typeof(RealtimeSnapshot).FullName, "SchemaVersion backing field");
+        const int v7SchemaBeforeFingerprintChange = 7;
+        backingField.SetValue(snapshot, v7SchemaBeforeFingerprintChange);
+
+        try
+        {
+            RealtimeSimulationRuntime.Restore(snapshot);
+            throw new InvalidOperationException("v7 快照必须被版本门禁显式拒绝，不能成功恢复。");
+        }
+        catch (InvalidDataException exception) when (exception.Message.Contains("不支持实时快照版本", StringComparison.Ordinal))
+        {
+            // 期望：版本门禁显式拒绝（fail-closed），而不是哈希失配的偶然失败。
+        }
+    }
+
+    /// <summary>
+    /// LinkedShipment 不变量（P1-DECREE-03）：接纳时绑定运输单必须存在且为 Planned/InTransit；
+    /// 已抵达的运输单不允许新绑定；同一运输单最多被一个 active 政令占用。全部返回明确错误码。
+    /// </summary>
+    private static void ShouldRejectDecreeBindingToInvalidShipment()
+    {
+        // 1) 绑定不存在的运输单
+        var missing = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        var missingBefore = missing.ReadModel;
+        var decreeToMissing = CreateDecree(missing, "decree-bind-missing", deadlineDays: 10, budget: 1_000,
+            linkedShipmentId: "shipment-ghost");
+        Require(missing.EnqueueCreateDecree(decreeToMissing).Queued, "绑定不存在运输单的政令应进入收件箱");
+        var missingResult = missing.AdvanceTo(missingBefore.GameTime);
+        Require(!missingResult.CommandResults.Single().Accepted &&
+                missingResult.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_SHIPMENT_NOT_FOUND"),
+            "绑定不存在的运输单必须拒绝 DECREE_SHIPMENT_NOT_FOUND");
+        Require(missing.ReadModel.Decrees.Count == 0 && missing.ReadModel.Scenario.SpentSilver == 0,
+            "拒绝不能创建政令状态或扣预算");
+
+        // 2) 绑定已抵达的运输单
+        var arrivedWorld = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld(travelHours: 2));
+        Require(arrivedWorld.EnqueueCreateShipment(CreateShipment(arrivedWorld, "arrived-ship", 300)).Queued,
+            "运输单应进入收件箱");
+        arrivedWorld.AdvanceTo(arrivedWorld.ReadModel.GameTime);
+        arrivedWorld.AdvanceTo(new GameTime(arrivedWorld.ReadModel.GameTime.Value.AddDays(1)));
+        Require(arrivedWorld.ReadModel.Shipments.Single(item => item.Id.Value == "shipment-arrived-ship").Status == ShipmentStatus.Arrived,
+            "前置：运输单必须已抵达");
+        var decreeToArrived = CreateDecree(arrivedWorld, "decree-bind-arrived", deadlineDays: 10, budget: 1_000,
+            linkedShipmentId: "shipment-arrived-ship");
+        Require(arrivedWorld.EnqueueCreateDecree(decreeToArrived).Queued, "绑定已抵达运输单的政令应进入收件箱");
+        var arrivedResult = arrivedWorld.AdvanceTo(arrivedWorld.ReadModel.GameTime);
+        Require(!arrivedResult.CommandResults.Single().Accepted &&
+                arrivedResult.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_SHIPMENT_ALREADY_ARRIVED"),
+            "已抵达运输单不允许新绑定（DECREE_SHIPMENT_ALREADY_ARRIVED）");
+
+        // 3) 绑定已被其他 active 政令占用的运输单
+        var occupiedWorld = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        Require(occupiedWorld.EnqueueCreateShipment(CreateShipment(occupiedWorld, "shared", 300)).Queued,
+            "共享运输单应进入收件箱");
+        occupiedWorld.AdvanceTo(occupiedWorld.ReadModel.GameTime);
+        var first = CreateDecree(occupiedWorld, "decree-first", deadlineDays: 20, budget: 1_000,
+            linkedShipmentId: "shipment-shared");
+        Require(occupiedWorld.EnqueueCreateDecree(first).Queued, "第一道绑定政令应进入收件箱");
+        var firstResult = occupiedWorld.AdvanceTo(occupiedWorld.ReadModel.GameTime);
+        Require(firstResult.CommandResults.Single().Accepted, "第一道绑定政令必须被接纳");
+        var second = CreateDecree(occupiedWorld, "decree-second", deadlineDays: 20, budget: 1_000,
+            linkedShipmentId: "shipment-shared");
+        Require(occupiedWorld.EnqueueCreateDecree(second).Queued, "第二道绑定政令应进入收件箱");
+        var secondResult = occupiedWorld.AdvanceTo(occupiedWorld.ReadModel.GameTime);
+        Require(!secondResult.CommandResults.Single().Accepted &&
+                secondResult.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_SHIPMENT_ALREADY_BOUND"),
+            "同一运输单最多被一个 active 政令占用（DECREE_SHIPMENT_ALREADY_BOUND）");
+        Require(occupiedWorld.ReadModel.Decrees.Count == 1, "被占用的第二道政令不能创建状态");
+    }
+
+    /// <summary>
+    /// 两政令同单按契约完成（P1-DECREE-03）：同一运输单最多一个 active 绑定——第二道政令
+    /// 因占用被拒；绑定单抵达时唯一被接纳的政令按稳定顺序完成（DecreeCompleted 一次）。
+    /// </summary>
+    private static void ShouldCompleteOnlyBoundDecreeOnShipmentArrival()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanScenarioWorld());
+        Require(runtime.EnqueueCreateShipment(CreateShipment(runtime, "two-decrees", 300)).Queued,
+            "共享运输单应进入收件箱");
+        runtime.AdvanceTo(runtime.ReadModel.GameTime);
+
+        var first = CreateDecree(runtime, "decree-a", deadlineDays: 20, budget: 1_000,
+            linkedShipmentId: "shipment-two-decrees");
+        Require(runtime.EnqueueCreateDecree(first).Queued, "第一道政令应进入收件箱");
+        var firstResult = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(firstResult.CommandResults.Single().Accepted, "第一道政令必须被接纳");
+
+        var second = CreateDecree(runtime, "decree-b", deadlineDays: 20, budget: 1_000,
+            linkedShipmentId: "shipment-two-decrees");
+        Require(runtime.EnqueueCreateDecree(second).Queued, "第二道政令应进入收件箱");
+        var secondResult = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!secondResult.CommandResults.Single().Accepted &&
+                secondResult.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_SHIPMENT_ALREADY_BOUND"),
+            "同单第二道政令必须因占用被拒（契约：最多一个 active 绑定）");
+
+        var arrived = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddDays(12)));
+        var completedIds = arrived.Events
+            .Where(domainEvent => domainEvent.EventType == "DecreeCompleted")
+            .Select(domainEvent => domainEvent.Data["decree_id"])
+            .ToArray();
+        Require(completedIds.SequenceEqual(new[] { "decree-a" }),
+            "抵达必须完成唯一匹配政令 decree-a（稳定顺序）");
+        Require(runtime.ReadModel.Decrees.Single(item => item.Id.Value == "decree-a").Status == DecreeStatus.Completed,
+            "decree-a 必须在绑定单抵达后完成");
+        Require(runtime.ReadModel.Decrees.Count == 1, "被拒的第二道政令不能创建状态");
     }
 
     /// <summary>甩责：政令到期未完成 → DecreeDeadlineExpired 事件、大臣信任 -5。</summary>
@@ -1959,6 +2266,11 @@ internal static class Program
     }
 
     /// <summary>宁远急饷场景世界：携带场景状态（前线粮仓），用于战备/负担/信任/风险样本/终局验收。</summary>
+    /// <remarks>
+    /// works 的 PlanLogistics 授予为任意辖区（resourceId=null）：P1-AUTH-01/02 修复后，
+    /// 政令承办策略由内核按 DecreeKind 的 trusted 映射决定，资源域固定为任意辖区（政令不绑定
+    /// 具体路线）；测试世界授权对齐该契约，不再依赖调用方提供路线作用域。
+    /// </remarks>
     private static WorldState CreateNingyuanScenarioWorld(
         long sourceGrain = 20_000,
         long destinationGrain = 5_400,
@@ -1989,10 +2301,15 @@ internal static class Program
                 new CharacterState(new CharacterId("war"), "无物流权限角色",
                     new CharacterAttributes(60, 40, 80, 50, 60),
                     new CharacterPersonality(true, true, true, false)),
+                new CharacterState(new CharacterId("hubu"), "户部财权角色",
+                    new CharacterAttributes(75, 65, 35, 45, 70),
+                    new CharacterPersonality(true, false, true, true)),
             ],
             capabilityGrants:
             [
-                new CapabilityGrant(new CharacterId("works"), GameCapability.PlanLogistics, "capital-ningyuan-grain"),
+                new CapabilityGrant(new CharacterId("works"), GameCapability.PlanLogistics, ResourceId: null),
+                // hubu 持 AllocateFinance：请饷批准必须经财权授权（审查 P1-A），测试世界对齐该契约。
+                new CapabilityGrant(new CharacterId("hubu"), GameCapability.AllocateFinance, ResourceId: null),
             ],
             stockpiles:
             [
@@ -2008,6 +2325,10 @@ internal static class Program
             scenario: new ScenarioState(frontStockpileId: new StockpileId("ningyuan-granary")));
     }
 
+    /// <summary>
+    /// 政令只表达业务意图（P1-AUTH-01/02 修复）：不再携带 RequiredCapability/RequiredResourceId，
+    /// 审核策略由内核按 Kind 的 trusted 映射决定；调用方指定这些字段的旧写法已编译失败（编译器红）。
+    /// </summary>
     private static CreateDecreeCommand CreateDecree(
         RealtimeSimulationRuntime runtime,
         string id,
@@ -2019,8 +2340,7 @@ internal static class Program
         new(id, new CharacterId("emperor"), new DecreeId(id), $"向宁远调运军粮 {id}", new ProvinceId("liaodong"),
             budget, responsible ?? new CharacterId("works"),
             new GameTime(runtime.ReadModel.GameTime.Value.AddDays(deadlineDays)),
-            "", "测试政令", GameCapability.PlanLogistics, "capital-ningyuan-grain",
-            linkedShipmentId, runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion,
+            "", "测试政令", linkedShipmentId, runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion,
             kind);
 
     /// <summary>只用于测试：注入终局分档所需的战备初值（评估函数本身可自动检查）。</summary>
