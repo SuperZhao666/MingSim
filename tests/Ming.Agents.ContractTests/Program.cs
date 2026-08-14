@@ -482,11 +482,12 @@ internal static partial class Program
     private static void ShouldHardStopWhenHeadersStall()
     {
         // 不合作 handler：完全忽略取消令牌，SendAsync 永不返回。
+        // TCS 从不完成，因此无需 RunContinuationsAsynchronously，保持默认同步续体即可。
         CancellationToken? capturedToken = null;
         var handler = new FakeHttpMessageHandler((_, cancellationToken) =>
         {
             capturedToken = cancellationToken;
-            return new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously).Task;
+            return new TaskCompletionSource<HttpResponseMessage>().Task;
         });
         using var client = CreateClient(handler);
         var provider = new OpenAiCompatibleModelProvider(
@@ -495,13 +496,21 @@ internal static partial class Program
             totalTimeout: TimeSpan.FromMilliseconds(80));
         var stopwatch = Stopwatch.StartNew();
 
-        var response = provider.GenerateAsync(Request).GetAwaiter().GetResult();
+        // 显式 watchdog：操作未在期限内完成时抛 TimeoutException（失败信息为"操作已超时"），
+        // 与操作完成但违反契约（Require 消息）区分开，避免把测试基础设施问题误报为契约违反。
+        var response = provider.GenerateAsync(Request)
+            .WaitAsync(TimeSpan.FromSeconds(2))
+            .GetAwaiter().GetResult();
 
         stopwatch.Stop();
         Require(!response.Succeeded, "a stalled header response should fail");
         Require(response.ErrorMessage == "Provider request timed out.", "header stall should use the fixed timeout summary");
         Require(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"header stall should finish within tolerance (took {stopwatch.Elapsed})");
-        Require(capturedToken is { IsCancellationRequested: true }, "the cooperative token must be signaled at the hard boundary");
+        // 取消从 provider 的令牌传播到 handler 收到的 token 是异步完成的：实测 GenerateAsync
+        // 返回时 token 可能尚未置位、稍后才置位，因此断言"最终置位"而非"返回时已置位"，
+        // 消除对调度时序的依赖（CI 负载下曾因此误报失败）。
+        Require(WaitUntil(() => capturedToken is { IsCancellationRequested: true }, TimeSpan.FromSeconds(2)),
+            "the cooperative token must eventually be signaled at the hard boundary");
     }
 
     private static void ShouldHardStopWhenGetStreamStalls()
@@ -647,6 +656,22 @@ internal static partial class Program
         {
             throw new InvalidOperationException(message);
         }
+    }
+
+    private static bool WaitUntil(Func<bool> condition, TimeSpan timeout)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        while (!condition())
+        {
+            if (stopwatch.Elapsed >= timeout)
+            {
+                return false;
+            }
+
+            Thread.Sleep(5);
+        }
+
+        return true;
     }
 
     private static void RequireThrows<TException>(Action action, string message)
