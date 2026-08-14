@@ -4,5 +4,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Ming.Domain\Ming.Domain.csproj" />
+    <!-- Agent 实时入口需要把意图转成内核命令并投递收件箱；Simulation 不反向依赖 Agents。 -->
+    <ProjectReference Include="..\Ming.Simulation\Ming.Simulation.csproj" />
   </ItemGroup>
 </Project>

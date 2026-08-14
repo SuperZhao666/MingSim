@@ -42,7 +42,9 @@ public sealed class AgentContextCompiler
             world.Economy.Treasury.Silver,
             world.Industry.Facilities.Count,
             armies,
-            capabilities);
+            capabilities,
+            world.WorldVersion,
+            world.GameTime);
     }
 }
 
