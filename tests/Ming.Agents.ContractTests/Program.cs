@@ -36,6 +36,7 @@ internal static class Program
             ShouldHardStopWhenGetStreamStalls();
             ShouldHardStopWhenBodyReadStalls();
             ShouldIsolateConcurrentStalledCalls();
+            ShouldHardStopWhenDisposeStalls();
 
             Console.WriteLine("Ming.Agents OpenAI-compatible contract tests passed.");
             return 0;
@@ -569,6 +570,57 @@ internal static class Program
         Require(stallingStream.IsDisposed, "the stalled body stream should be disposed after the hard boundary");
     }
 
+    private static void ShouldHardStopWhenDisposeStalls()
+    {
+        // 场景 A 最小复现：正文读停滞先把总超时击穿到 finally，而 DisposeAsync 同样永久停滞。
+        // 修复前 finally 内联等待 DisposeAsync 会让 GenerateAsync 卡死并击穿总超时；
+        // 修复后释放受同一硬边界约束，必须在外界 750ms 硬上限内返回。
+        var unobservedFault = false;
+        EventHandler<UnobservedTaskExceptionEventArgs>? unobservedHandler = null;
+        unobservedHandler = (_, eventArgs) =>
+        {
+            unobservedFault = true;
+            eventArgs.SetObserved();
+        };
+        TaskScheduler.UnobservedTaskException += unobservedHandler;
+        try
+        {
+            var content = new StallingDisposeContent(out var stream);
+            using var client = CreateClient(new FakeHttpMessageHandler((_, _) =>
+                Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = content,
+                })));
+            var provider = new OpenAiCompatibleModelProvider(
+                client,
+                "test-model",
+                totalTimeout: TimeSpan.FromMilliseconds(80));
+            var stopwatch = Stopwatch.StartNew();
+
+            var response = provider.GenerateAsync(Request).GetAwaiter().GetResult();
+
+            stopwatch.Stop();
+            Require(!response.Succeeded, "a stalled dispose must still fail");
+            Require(response.ErrorMessage == "Provider request timed out.", "dispose stall should use the fixed timeout summary");
+            Require(stopwatch.Elapsed < TimeSpan.FromMilliseconds(750), $"dispose stall must finish within the hard cap (took {stopwatch.Elapsed})");
+            Require(stream.DisposeAttempted, "stream disposal should still be attempted in the background");
+
+            // 尽力触发未观察异常检测：被放弃的释放任务由观察包装负责，不应产生未观察异常。
+            for (var i = 0; i < 3; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                Thread.Sleep(20);
+            }
+
+            Require(!unobservedFault, "abandoned tasks must be observed, not unobserved");
+        }
+        finally
+        {
+            TaskScheduler.UnobservedTaskException -= unobservedHandler;
+        }
+    }
+
     private static HttpClient CreateClient(
         FakeHttpMessageHandler handler,
         string baseAddress = "https://provider.test/v1/") =>
@@ -797,6 +849,99 @@ internal static class Program
 
         private static Task<int> NeverCompletingRead() =>
             new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously).Task;
+    }
+
+    private sealed class StallingDisposeContent : HttpContent
+    {
+        public StallingDisposeContent(out StallingDisposeStream stream)
+        {
+            stream = new StallingDisposeStream();
+            Stream = stream;
+        }
+
+        public StallingDisposeStream Stream { get; }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            throw new InvalidOperationException("serialization should not be used by the provider");
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override Task<Stream> CreateContentReadStreamAsync() =>
+            Task.FromResult<Stream>(Stream);
+    }
+
+    private sealed class StallingDisposeStream : Stream
+    {
+        private int _disposeCalls;
+
+        // 释放被尝试过（DisposeAsync 进入方法即记录，即使它永不完成）。
+        public bool DisposeAttempted => Volatile.Read(ref _disposeCalls) != 0;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        public override int Read(Span<byte> buffer) => throw new NotSupportedException();
+
+        // 正文读取永久停滞且忽略取消令牌：先把总超时击穿到读循环。
+        public override Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken = default) =>
+            NeverCompletingRead();
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            new(NeverCompletingRead());
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override void Write(ReadOnlySpan<byte> buffer) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            Interlocked.Exchange(ref _disposeCalls, 1);
+            base.Dispose(disposing);
+        }
+
+        // 连释放都永久停滞：修复前 finally 的内联等待会让整个调用卡死，击穿总超时。
+        public override ValueTask DisposeAsync()
+        {
+            Interlocked.Exchange(ref _disposeCalls, 1);
+            return new(NeverCompletingDispose());
+        }
+
+        private static Task<int> NeverCompletingRead() =>
+            new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously).Task;
+
+        private static Task NeverCompletingDispose() =>
+            new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously).Task;
     }
 
     private sealed class UnknownLengthContent : HttpContent

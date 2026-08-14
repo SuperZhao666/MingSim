@@ -235,13 +235,26 @@ public sealed class OpenAiCompatibleModelProvider : IModelProvider
         }
         finally
         {
+            Task? disposeTask = null;
             try
             {
-                await responseStream.DisposeAsync().ConfigureAwait(false);
+                // 释放本身也受同一总超时硬边界约束：恶意流可能连 DisposeAsync 都永久等待，
+                // 内联等待会让读循环超时后仍卡在 finally 里，击穿总超时。
+                disposeTask = responseStream.DisposeAsync().AsTask();
+                await disposeTask.WaitAsync(operationCancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (operationCancellationToken.IsCancellationRequested)
+            {
+                // 硬边界已到：改为后台完成释放并用观察包装，避免未观察任务异常；
+                // 每次调用至多放弃这一个释放任务，不阻塞返回路径，也不堆积。
+                if (disposeTask is not null)
+                {
+                    _ = ObserveInBackgroundAsync(disposeTask);
+                }
             }
             catch
             {
-                // 释放流失败不能覆盖主结果（例如挂起的读操作让某些流在释放时抛错），也不外泄细节。
+                // 释放失败不能覆盖主结果（例如挂起的读操作让某些流在释放时抛错），也不外泄细节。
             }
         }
     }
