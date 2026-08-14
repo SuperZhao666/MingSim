@@ -27,7 +27,8 @@ public static class RealtimeWorldBridge
         return (runtime, new CommandFacade(runtime));
     }
 
-    private static string ResolveWorldJsonPath()
+    /// <summary>解析剧本 world.json 的磁盘路径（先相对工作目录，再按 res:// 定位仓库根）。</summary>
+    public static string ResolveWorldJsonPath()
     {
         const string relative = "content/scenarios/ming_1629/world.json";
         if (File.Exists(relative)) return relative;
