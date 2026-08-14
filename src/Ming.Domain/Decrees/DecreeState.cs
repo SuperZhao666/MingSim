@@ -26,7 +26,8 @@ public sealed class DecreeState
         string remarks,
         GameCapability requiredCapability,
         string? requiredResourceId = null,
-        string? linkedShipmentId = null)
+        string? linkedShipmentId = null,
+        DecreeStatus initialStatus = DecreeStatus.Executing)
     {
         Id = id;
         IssuerId = issuerId;
@@ -41,8 +42,9 @@ public sealed class DecreeState
         RequiredResourceId = requiredResourceId;
         LinkedShipmentId = linkedShipmentId;
         // 命令被接纳即视为已进入执行：命令拒绝根本不会创建政令状态，
-        // 因此这里不需要 Draft/Submitted 过渡态。
-        Status = DecreeStatus.Executing;
+        // 因此这里不需要 Draft/Submitted 过渡态。例外：请饷奏疏是请愿文书，
+        // 创建后进入 Submitted，批准（ApproveDecreeCommand）后才转为 Executing。
+        Status = initialStatus;
     }
 
     public DecreeId Id { get; }
@@ -55,7 +57,7 @@ public sealed class DecreeState
     /// <summary>范围：作用于哪个地区。MVP 只支持单一地区。</summary>
     public ProvinceId RegionScope { get; }
 
-    /// <summary>预算：批准并立即从国库扣除的银两。</summary>
+    /// <summary>预算：批准并立即从国库扣除的银两；请饷奏疏创建时不扣，批准时才扣。</summary>
     public long Budget { get; }
 
     /// <summary>承办人：对期限负责的角色。</summary>
@@ -70,10 +72,14 @@ public sealed class DecreeState
     /// <summary>备注：给玩家和审计读的一句说明。</summary>
     public string Remarks { get; }
 
-    /// <summary>承办人必须具备的能力；CreateDecreeCommand 据此做权限检查。</summary>
+    /// <summary>
+    /// 承办人必须具备的能力（审计记录）。内核按 <see cref="DecreeKind"/> 的 trusted 映射
+    /// 在接纳时写入（P1-AUTH-01/02 修复）：调用方不可提供审核策略，此值只作审计，
+    /// 不再参与任何权限裁决。请愿类政令（请饷）无承办能力要求，写入默认值占位。
+    /// </summary>
     public GameCapability RequiredCapability { get; }
 
-    /// <summary>能力的作用范围（例如路线号）；为空表示任意范围。</summary>
+    /// <summary>能力的作用范围（内核 trusted 映射决定；当前契约固定为任意辖区 null）。</summary>
     public string? RequiredResourceId { get; }
 
     /// <summary>可选绑定：政令与哪张粮运单绑定；绑定单抵达即视为政令完成。</summary>
@@ -85,10 +91,10 @@ public sealed class DecreeState
 
     internal void Expire() => Status = DecreeStatus.Expired;
 
+    /// <summary>请饷奏疏批准：Submitted → Executing（只有 Simulation 命令管线可调用）。</summary>
+    internal void Approve() => Status = DecreeStatus.Executing;
+
     internal DecreeState Clone() => new(
         Id, IssuerId, Goal, RegionScope, Budget, ResponsibleActorId, Deadline,
-        Restrictions, Remarks, RequiredCapability, RequiredResourceId, LinkedShipmentId)
-    {
-        Status = Status,
-    };
+        Restrictions, Remarks, RequiredCapability, RequiredResourceId, LinkedShipmentId, Status);
 }

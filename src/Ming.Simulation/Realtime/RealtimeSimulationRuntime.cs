@@ -341,6 +341,8 @@ public sealed class RealtimeSimulationRuntime
 
     public RealtimeCommandReceipt EnqueueCreateDecree(CreateDecreeCommand command) => Enqueue(command);
 
+    public RealtimeCommandReceipt EnqueueApproveDecree(ApproveDecreeCommand command) => Enqueue(command);
+
     public RealtimeCommandReceipt EnqueueSetPaused(SetPausedCommand command) => Enqueue(command);
 
     public RealtimeCommandReceipt EnqueueSetSimulationSpeed(SetSimulationSpeedCommand command) => Enqueue(command);
@@ -730,6 +732,7 @@ public sealed class RealtimeSimulationRuntime
                 MoveArmyCommand move => ApplyMove(candidate, move, ingressSequence, acceptedAt, events),
                 CreateShipmentCommand shipment => ApplyShipment(candidate, shipment, ingressSequence, acceptedAt, events),
                 CreateDecreeCommand decree => ApplyDecree(candidate, decree, ingressSequence, acceptedAt, events),
+                ApproveDecreeCommand approve => ApplyApproveDecree(candidate, approve, ingressSequence, acceptedAt, events),
                 SetPausedCommand pause => ApplyPause(candidate, pause, ingressSequence, acceptedAt),
                 SetSimulationSpeedCommand speed => ApplySpeed(candidate, speed, ingressSequence, acceptedAt),
                 _ => Reject(command.CommandId, "未知实时命令类型。", "UNKNOWN_COMMAND", ingressSequence, acceptedAt, candidate.State.WorldVersion),
@@ -944,26 +947,70 @@ public sealed class RealtimeSimulationRuntime
             return RejectDecree(candidate, command, "RESPONSIBLE_ACTOR_NOT_FOUND", "政令承办人不存在。", ingressSequence, acceptedAt, events);
         }
 
-        // 承办人必须持有对应 CapabilityGrant（doc 03 §4 P0 政令行：承办人须持对应能力）。
-        // 为什么拒绝不改世界：业务拒绝按 doc 08 §5 只原子记录 CommandId 终态 Outcome，
-        // 绝不能在"世界和时间不变"的拒绝路径上偷偷扣预算或改信任。
-        var authorization = _authorizer.Check(candidate.State, command.ResponsibleActorId, command.RequiredCapability, command.RequiredResourceId);
-        if (!authorization.Allowed)
+        // P1-AUTH-02：签发人必须是世界内真实角色。旧实现只校验承办人存在，
+        // 签发人（ActorId）可被任意伪造；现在先做签发人真实性校验，防伪冒 issuer。
+        if (!candidate.State.Characters.ContainsKey(command.ActorId))
         {
-            return RejectDecree(candidate, command, "DECREE_RESPONSIBLE_UNAUTHORIZED", authorization.Reason, ingressSequence, acceptedAt, events);
+            return RejectDecree(candidate, command, "DECREE_ISSUER_UNAUTHORIZED", "政令签发人不存在。", ingressSequence, acceptedAt, events);
         }
 
-        if (!candidate.State.Economy.Treasury.TrySpend(command.Budget))
+        var policy = ResolveDecreePolicy(command.Kind);
+
+        // P1-DECREE-03：LinkedShipment 不变量。接纳时绑定运输单必须存在且为 Planned/InTransit；
+        // 同一运输单最多被一个 active（Executing/Submitted）政令占用；已抵达运输单不允许新绑定。
+        // 全部返回结构化错误码，拒绝路径不改变世界。
+        if (command.LinkedShipmentId is not null)
         {
-            return RejectDecree(candidate, command, "DECREE_BUDGET_EXCEEDS_TREASURY", "国库银两不足以批准该政令预算。", ingressSequence, acceptedAt, events);
+            if (!candidate.State.Logistics.Shipments.TryGetValue(new ShipmentId(command.LinkedShipmentId), out var boundShipment))
+            {
+                return RejectDecree(candidate, command, "DECREE_SHIPMENT_NOT_FOUND", $"绑定运输单 {command.LinkedShipmentId} 不存在。", ingressSequence, acceptedAt, events);
+            }
+
+            if (boundShipment.Status == ShipmentStatus.Arrived)
+            {
+                return RejectDecree(candidate, command, "DECREE_SHIPMENT_ALREADY_ARRIVED", $"绑定运输单 {command.LinkedShipmentId} 已抵达，不允许再绑定。", ingressSequence, acceptedAt, events);
+            }
+
+            var occupiedByActiveDecree = candidate.State.Decrees.Values.Any(decree =>
+                decree.LinkedShipmentId == command.LinkedShipmentId &&
+                (decree.Status == DecreeStatus.Executing || decree.Status == DecreeStatus.Submitted));
+            if (occupiedByActiveDecree)
+            {
+                return RejectDecree(candidate, command, "DECREE_SHIPMENT_ALREADY_BOUND", $"运输单 {command.LinkedShipmentId} 已被其他 active 政令占用。", ingressSequence, acceptedAt, events);
+            }
         }
 
-        // 预算在接纳时扣除并计入场景支出：这是"政令可与粮运绑定（预算扣除）"的落地。
-        candidate.State.Scenario.AddSpentSilver(command.Budget);
+        // 承办人能力由内核按 DecreeKind 的 trusted 映射决定（P1-AUTH-01 修复）：
+        // 命令只表达业务意图，调用方不能再声明 RequiredCapability/RequiredResourceId 来降级审核策略。
+        // 请愿类政令（请饷奏疏）无承办能力要求。为什么拒绝不改世界：业务拒绝按 doc 08 §5
+        // 只原子记录 CommandId 终态 Outcome，绝不能在"世界和时间不变"的拒绝路径上偷偷扣预算或改信任。
+        if (policy.ResponsibleCapability is not null)
+        {
+            var authorization = _authorizer.Check(candidate.State, command.ResponsibleActorId, policy.ResponsibleCapability.Value, resourceId: null);
+            if (!authorization.Allowed)
+            {
+                return RejectDecree(candidate, command, "DECREE_RESPONSIBLE_UNAUTHORIZED", authorization.Reason, ingressSequence, acceptedAt, events);
+            }
+        }
+
+        // 预算：普通/减耗/催饷/拨饷政令在接纳时扣除并计入场景支出；
+        // 请饷奏疏是请愿文书，创建时不扣中央预算，批准（ApplyApproveDecree）时才扣。
+        if (!policy.IsPetition)
+        {
+            if (!candidate.State.Economy.Treasury.TrySpend(command.Budget))
+            {
+                return RejectDecree(candidate, command, "DECREE_BUDGET_EXCEEDS_TREASURY", "国库银两不足以批准该政令预算。", ingressSequence, acceptedAt, events);
+            }
+
+            candidate.State.Scenario.AddSpentSilver(command.Budget);
+        }
+
+        var initialStatus = policy.IsPetition ? DecreeStatus.Submitted : DecreeStatus.Executing;
         candidate.State.AddDecree(new DecreeState(
             command.DecreeId, command.ActorId, command.Goal, command.RegionScope, command.Budget,
             command.ResponsibleActorId, command.Deadline, command.Restrictions, command.Remarks,
-            command.RequiredCapability, command.RequiredResourceId, command.LinkedShipmentId));
+            policy.ResponsibleCapability ?? default, requiredResourceId: null, command.LinkedShipmentId,
+            initialStatus));
         events.Add(CreateEvent(candidate, command.CommandId, "DecreeAccepted", acceptedAt,
             ("decree_id", command.DecreeId.Value), ("goal", command.Goal), ("budget", command.Budget.ToString()),
             ("responsible_actor", command.ResponsibleActorId.Value), ("deadline", command.Deadline.ToString()),
@@ -995,7 +1042,9 @@ public sealed class RealtimeSimulationRuntime
             }
         }
 
-        return Accepted(command.CommandId, "政令已接纳并扣除预算。", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        return Accepted(command.CommandId,
+            policy.IsPetition ? "请饷奏疏已接纳，等待批准。" : "政令已接纳并扣除预算。",
+            ingressSequence, acceptedAt, candidate.State.WorldVersion);
     }
 
     private RealtimeCommandResult RejectDecree(
@@ -1013,6 +1062,69 @@ public sealed class RealtimeSimulationRuntime
         candidate.Outbox.Add(events[^1]);
         return Reject(command.CommandId, message, code, ingressSequence, acceptedAt, candidate.State.WorldVersion);
     }
+
+    /// <summary>
+    /// 批准一道已提交的请饷奏疏（P1-AUTH-01 请饷语义）：扣除批准预算、Submitted → Executing。
+    /// 只有 Simulation 命令管线可调用；重复批准/批准非待批准政令都被结构化拒绝。
+    /// </summary>
+    private RealtimeCommandResult ApplyApproveDecree(
+        WorkingCopy candidate,
+        ApproveDecreeCommand command,
+        long ingressSequence,
+        GameTime acceptedAt,
+        List<DomainEvent> events)
+    {
+        if (!IsValidId(command.CommandId) || !IsValidId(command.ActorId.Value) ||
+            !IsValidId(command.DecreeId.Value))
+        {
+            return Reject(command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
+        if (!candidate.State.Characters.ContainsKey(command.ActorId))
+        {
+            return Reject(command.CommandId, "批准人不存在。", "DECREE_ISSUER_UNAUTHORIZED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
+        if (!candidate.State.Decrees.TryGetValue(command.DecreeId, out var decree))
+        {
+            return Reject(command.CommandId, "政令不存在。", "DECREE_NOT_FOUND", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
+        if (decree.Status != DecreeStatus.Submitted)
+        {
+            return Reject(command.CommandId, "只有已提交的请饷奏疏可以被批准。", "DECREE_NOT_PENDING_APPROVAL", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
+        if (!candidate.State.Economy.Treasury.TrySpend(decree.Budget))
+        {
+            return Reject(command.CommandId, "国库银两不足以批准该请饷预算。", "DECREE_BUDGET_EXCEEDS_TREASURY", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
+        candidate.State.Scenario.AddSpentSilver(decree.Budget);
+        decree.Approve();
+        events.Add(CreateEvent(candidate, command.CommandId, "DecreeApproved", acceptedAt,
+            ("decree_id", decree.Id.Value), ("budget", decree.Budget.ToString()),
+            ("responsible_actor", decree.ResponsibleActorId.Value)));
+        candidate.Outbox.Add(events[^1]);
+        return Accepted(command.CommandId, "请饷奏疏已批准并转可执行。", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+    }
+
+    /// <summary>政令审核策略（trusted 映射，P1-AUTH-01/02 修复）：承办人能力（请愿类为 null）+ 是否请愿文书。</summary>
+    private sealed record DecreePolicy(GameCapability? ResponsibleCapability, bool IsPetition);
+
+    /// <summary>
+    /// DecreeKind → 审核策略的内置 trusted 映射：命令只表达业务意图，承办人能力与资源域由内核决定，
+    /// 调用方不可覆盖。资源域固定为 null（任意辖区）：政令不绑定具体路线，承办人持相应能力即可（DESIGN）。
+    /// 请饷（RequestSupply）是请愿文书：创建时不校验承办能力、不扣预算，进入 Submitted 等待批准。
+    /// </summary>
+    private static DecreePolicy ResolveDecreePolicy(DecreeKind kind) => kind switch
+    {
+        DecreeKind.ExpediteSupply => new(GameCapability.PlanLogistics, IsPetition: false),
+        DecreeKind.AllocateSupply => new(GameCapability.AllocateFinance, IsPetition: false),
+        DecreeKind.RequestSupply => new(null, IsPetition: true),
+        DecreeKind.RationReduction => new(GameCapability.PlanLogistics, IsPetition: false),
+        _ => new(GameCapability.PlanLogistics, IsPetition: false),
+    };
 
     private RealtimeCommandResult ApplyPause(WorkingCopy candidate, SetPausedCommand command, long ingressSequence, GameTime acceptedAt)
     {
@@ -1219,12 +1331,14 @@ public sealed class RealtimeSimulationRuntime
                 ("raid_loss_grain", shipment.RaidLossGrain.ToString())));
             candidate.Outbox.Add(events[^1]);
 
-            // 政令绑定：绑定单抵达即视为政令完成（期限约束的另一半）。
-            var linkedDecree = candidate.State.Decrees.Values
+            // 政令绑定（P1-DECREE-03）：绑定单抵达即视为政令完成（期限约束的另一半）。
+            // 同一运输单最多被一个 active 政令占用（接纳时不变量），但这里仍按政令编号
+            // 稳定排序后完成全部处于 Executing 的匹配政令，保证确定性（"全部匹配按稳定顺序完成"）。
+            var linkedDecrees = candidate.State.Decrees.Values
                 .Where(decree => decree.LinkedShipmentId == shipment.Id.Value && decree.Status == DecreeStatus.Executing)
                 .OrderBy(decree => decree.Id.Value, StringComparer.Ordinal)
-                .FirstOrDefault();
-            if (linkedDecree is not null)
+                .ToArray();
+            foreach (var linkedDecree in linkedDecrees)
             {
                 linkedDecree.Complete();
                 events.Add(CreateEvent(candidate, scheduled.CausalCommandId, "DecreeCompleted", candidate.State.GameTime,
@@ -1584,12 +1698,18 @@ public sealed class RealtimeSimulationRuntime
                 writer.Write(decree.Deadline.Value.UtcTicks);
                 WriteFingerprintString(writer, decree.Restrictions);
                 WriteFingerprintString(writer, decree.Remarks);
-                WriteFingerprintString(writer, decree.RequiredCapability.ToString());
-                WriteFingerprintString(writer, decree.RequiredResourceId ?? string.Empty);
                 WriteFingerprintString(writer, decree.LinkedShipmentId ?? string.Empty);
                 WriteFingerprintString(writer, decree.Kind.ToString());
                 writer.Write(decree.SubmittedAt.UtcTicks);
                 writer.Write(decree.ExpectedWorldVersion);
+                break;
+            case ApproveDecreeCommand approve:
+                WriteFingerprintString(writer, "approve-decree");
+                WriteFingerprintString(writer, approve.CommandId);
+                WriteFingerprintString(writer, approve.ActorId.Value);
+                WriteFingerprintString(writer, approve.DecreeId.Value);
+                writer.Write(approve.SubmittedAt.UtcTicks);
+                writer.Write(approve.ExpectedWorldVersion);
                 break;
             case SetPausedCommand pause:
                 WriteFingerprintString(writer, "pause");
