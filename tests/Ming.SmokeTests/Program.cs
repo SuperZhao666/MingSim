@@ -1786,6 +1786,7 @@ internal static class Program
         var restored = RealtimeSimulationRuntime.Restore(
             SnapshotCodec.Deserialize(SnapshotCodec.Serialize(runtime.CaptureSnapshot())));
         Require(restored.StateHash == runtime.StateHash, "含任命的完整快照往返后 canonical hash 必须一致");
+    }
 
     /// <summary>
     /// I2 终验收：真实 world.json 世界跑完 90 日垂直切片并产出六维终局报告。
