@@ -14,10 +14,16 @@ public sealed class InstitutionState
     private readonly HashSet<GameCapability> _capabilities = [];
     private readonly HashSet<CharacterId> _members = [];
 
-    public InstitutionState(InstitutionId id, string name)
+    public InstitutionState(
+        InstitutionId id,
+        string name,
+        IEnumerable<GameCapability>? capabilities = null,
+        IEnumerable<CharacterId>? members = null)
     {
         Id = id;
         Name = name;
+        foreach (var capability in capabilities ?? []) _capabilities.Add(capability);
+        foreach (var member in members ?? []) _members.Add(member);
     }
 
     public InstitutionId Id { get; }
@@ -28,11 +34,11 @@ public sealed class InstitutionState
 
     public IReadOnlySet<CharacterId> Members => _members;
 
-    public void ExposeCapability(GameCapability capability) => _capabilities.Add(capability);
+    internal void ExposeCapability(GameCapability capability) => _capabilities.Add(capability);
 
-    public void AddMember(CharacterId characterId) => _members.Add(characterId);
+    internal void AddMember(CharacterId characterId) => _members.Add(characterId);
 
-    public InstitutionState Clone()
+    internal InstitutionState Clone()
     {
         var clone = new InstitutionState(Id, Name);
         foreach (var capability in _capabilities)

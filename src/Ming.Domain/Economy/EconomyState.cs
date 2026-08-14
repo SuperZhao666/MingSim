@@ -12,7 +12,7 @@ public sealed class TreasuryState
 
     public long Silver { get; private set; }
 
-    public bool TrySpend(long amount)
+    internal bool TrySpend(long amount)
     {
         if (amount < 0 || Silver < amount)
         {
@@ -23,7 +23,7 @@ public sealed class TreasuryState
         return true;
     }
 
-    public void Receive(long amount)
+    internal void Receive(long amount)
     {
         if (amount < 0)
         {
@@ -33,7 +33,7 @@ public sealed class TreasuryState
         Silver += amount;
     }
 
-    public TreasuryState Clone() => new(Silver);
+    internal TreasuryState Clone() => new(Silver);
 }
 
 /// <summary>一类实物库存。</summary>
@@ -51,7 +51,7 @@ public sealed class ResourceStock
 
     public long Reserved { get; private set; }
 
-    public bool TryReserve(long amount)
+    internal bool TryReserve(long amount)
     {
         if (amount < 0 || Reserved + amount > Quantity)
         {
@@ -62,7 +62,7 @@ public sealed class ResourceStock
         return true;
     }
 
-    public bool TryConsume(long amount)
+    internal bool TryConsume(long amount)
     {
         if (amount < 0 || amount > Quantity - Reserved)
         {
@@ -73,7 +73,7 @@ public sealed class ResourceStock
         return true;
     }
 
-    public void Add(long amount)
+    internal void Add(long amount)
     {
         if (amount < 0)
         {
@@ -83,7 +83,7 @@ public sealed class ResourceStock
         Quantity += amount;
     }
 
-    public ResourceStock Clone()
+    internal ResourceStock Clone()
     {
         var clone = new ResourceStock(ResourceType, Quantity);
         if (Reserved > 0)
@@ -100,9 +100,10 @@ public sealed class InventoryState
 {
     private readonly Dictionary<string, ResourceStock> _stocks = new(StringComparer.Ordinal);
 
-    public IReadOnlyDictionary<string, ResourceStock> Stocks => _stocks;
+    public IReadOnlyDictionary<string, ResourceStock> Stocks =>
+        new System.Collections.ObjectModel.ReadOnlyDictionary<string, ResourceStock>(_stocks);
 
-    public ResourceStock GetOrCreate(string resourceType)
+    internal ResourceStock GetOrCreate(string resourceType)
     {
         if (!_stocks.TryGetValue(resourceType, out var stock))
         {
@@ -113,7 +114,7 @@ public sealed class InventoryState
         return stock;
     }
 
-    public InventoryState Clone()
+    internal InventoryState Clone()
     {
         var clone = new InventoryState();
         foreach (var (resourceType, stock) in _stocks)
@@ -137,7 +138,7 @@ public sealed class EconomyState
 
     public InventoryState Inventory { get; } = new();
 
-    public EconomyState Clone()
+    internal EconomyState Clone()
     {
         var clone = new EconomyState(Treasury.Silver);
         foreach (var (resourceType, stock) in Inventory.Stocks)

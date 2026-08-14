@@ -60,7 +60,7 @@ public sealed class FacilityState
 
     public long ProducedThisTurn { get; private set; }
 
-    public void AdvanceConstruction()
+    internal void AdvanceConstruction()
     {
         if (Status != FacilityStatus.Building)
         {
@@ -74,9 +74,9 @@ public sealed class FacilityState
         }
     }
 
-    public void RecordProduction(long quantity) => ProducedThisTurn = Math.Max(0, quantity);
+    internal void RecordProduction(long quantity) => ProducedThisTurn = Math.Max(0, quantity);
 
-    public FacilityState Clone()
+    internal FacilityState Clone()
     {
         var clone = new FacilityState(
             Id,
@@ -100,11 +100,12 @@ public sealed class IndustryState
 {
     private readonly Dictionary<FacilityId, FacilityState> _facilities = [];
 
-    public IReadOnlyDictionary<FacilityId, FacilityState> Facilities => _facilities;
+    public IReadOnlyDictionary<FacilityId, FacilityState> Facilities =>
+        new System.Collections.ObjectModel.ReadOnlyDictionary<FacilityId, FacilityState>(_facilities);
 
     public bool Contains(FacilityId facilityId) => _facilities.ContainsKey(facilityId);
 
-    public void Add(FacilityState facility)
+    internal void Add(FacilityState facility)
     {
         if (!_facilities.TryAdd(facility.Id, facility))
         {
@@ -112,7 +113,7 @@ public sealed class IndustryState
         }
     }
 
-    public IndustryState Clone()
+    internal IndustryState Clone()
     {
         var clone = new IndustryState();
         foreach (var (id, facility) in _facilities)

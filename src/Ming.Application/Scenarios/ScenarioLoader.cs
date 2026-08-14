@@ -40,63 +40,27 @@ public sealed class ScenarioLoader
                 province.Name,
                 (province.AdjacentTo ?? []).Select(id => new ProvinceId(id)))));
 
-        var world = new WorldState(
-            new WorldId(definition.Id),
-            definition.StartTurn,
-            definition.TreasurySilver,
-            map);
-
-        foreach (var character in definition.Characters)
+        var characters = definition.Characters.Select(character =>
         {
-            var state = new CharacterState(
-                new CharacterId(character.Id),
-                character.Name,
-                character.Attributes.Normalize(),
-                character.Personality);
-            state.MoveTo(new ProvinceId(character.LocationId));
-            state.AssignOffice(character.OfficeId);
-            world.AddCharacter(state);
-        }
+            return new CharacterState(new CharacterId(character.Id), character.Name,
+                character.Attributes.Normalize(), character.Personality,
+                new ProvinceId(character.LocationId), character.OfficeId);
+        }).ToArray();
 
-        foreach (var institution in definition.Institutions)
+        var institutions = definition.Institutions.Select(institution =>
         {
-            var state = new InstitutionState(new InstitutionId(institution.Id), institution.Name);
-            foreach (var capability in institution.Capabilities)
-            {
-                state.ExposeCapability(capability);
-            }
+            return new InstitutionState(new InstitutionId(institution.Id), institution.Name,
+                institution.Capabilities, institution.Members.Select(member => new CharacterId(member)));
+        }).ToArray();
 
-            foreach (var member in institution.Members)
-            {
-                state.AddMember(new CharacterId(member));
-            }
+        var grants = definition.CapabilityGrants.Select(grant => new CapabilityGrant(
+            new CharacterId(grant.ActorId), grant.Capability, grant.ResourceId, grant.ExpiresAtTurn)).ToArray();
+        var inventory = definition.Inventory.Select(item => (item.ResourceType, item.Quantity)).ToArray();
+        var armies = definition.Armies.Select(army => new ArmyState(new ArmyId(army.Id), army.Name,
+            new ProvinceId(army.LocationId), army.Auxiliaries, army.LineInfantry)).ToArray();
 
-            world.AddInstitution(state);
-        }
-
-        foreach (var grant in definition.CapabilityGrants)
-        {
-            world.GrantCapability(new CapabilityGrant(
-                new CharacterId(grant.ActorId),
-                grant.Capability,
-                grant.ResourceId,
-                grant.ExpiresAtTurn));
-        }
-
-        foreach (var inventory in definition.Inventory)
-        {
-            world.Economy.Inventory.GetOrCreate(inventory.ResourceType).Add(inventory.Quantity);
-        }
-
-        foreach (var army in definition.Armies)
-        {
-            world.Military.Add(new ArmyState(
-                new ArmyId(army.Id),
-                army.Name,
-                new ProvinceId(army.LocationId),
-                army.Auxiliaries,
-                army.LineInfantry));
-        }
+        var world = WorldState.CreateInitial(new WorldId(definition.Id), definition.StartTurn,
+            definition.TreasurySilver, map, characters, institutions, grants, inventory, armies);
 
         return world;
     }
