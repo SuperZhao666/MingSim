@@ -1,0 +1,12 @@
+docs/地图与UI制作/02-1629辽东辽西史实态势证据账本.md text eol=lf
+content/scenarios/ming_1629/evidence/liaodong-1629-evidence.json text eol=lf
+content/scenarios/ming_1629/map/places.json text eol=lf
+content/scenarios/ming_1629/map/routes.json text eol=lf
+content/scenarios/ming_1629/map/historical-overlays.json text eol=lf
+content/scenarios/ming_1629/map/source-ledger.csv text eol=lf
+tools/maps/build_east_asia_map.py text eol=lf
+tools/maps/requirements.txt text eol=lf
+assets/maps/generated/ming_1629/*.json text eol=lf
+assets/maps/generated/ming_1629/*.geojson text eol=lf
+assets/maps/generated/ming_1629_liaoxi/*.json text eol=lf
+assets/maps/generated/ming_1629_liaoxi/*.geojson text eol=lf

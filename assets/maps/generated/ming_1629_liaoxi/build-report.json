@@ -1,13 +1,20 @@
 {
   "counts": {
-    "admitted_claims": 10,
-    "evidence_claims": 17,
+    "admission_status_counts": {
+      "DESIGN": 4,
+      "EVIDENCE": 0
+    },
+    "admitted_claims": 4,
+    "evidence_claims": 24,
     "historical_baseline_regions": 15,
-    "historical_regions": 2,
-    "places": 11,
-    "routes": 4,
+    "historical_regions": 0,
+    "place_inputs": 5,
+    "places": 5,
+    "route_inputs": 2,
+    "routes": 2,
     "source_ledger_entries": 13,
-    "suppressed_routes": 1,
+    "suppressed_places": 0,
+    "suppressed_routes": 0,
     "visible_lake_points": 58,
     "visible_lake_rings": 3,
     "visible_lake_shape_records": 3,
@@ -20,17 +27,18 @@
   },
   "generator": "tools/maps/build_east_asia_map.py",
   "generator_version": 2,
-  "historical_content_status": "reviewed_p0_evidence_with_open_items",
+  "historical_content_status": "design_only_no_reviewed_evidence",
   "notes": [
     "build-report.json 不记录自身哈希，以避免递归哈希。",
+    "source_sha256 对 UTF-8 文本输入使用 canonical LF 字节；二进制输入使用 checkout 原始字节。",
     "历史区域几何仅供表现；本构建器不读取、推导或写入 Simulation 拓扑。"
   ],
   "output_sha256": {
-    "debug-map.png": "090379cc8e37f8b2cde261311b24707455561e61c0f107f6486393b1c52f320b",
-    "history-overlay.png": "a4648521b548841995fcc06462d7f8aa954531c11daaf8813103f9442a2f998a",
-    "map-manifest.json": "8406445e29a3a942489aec09cd042fbc30a1efc674cc47ece83ea057f30acd5c",
+    "debug-map.png": "f721fe7a9f7bf6a835a40e3455c6b225ab23b92b37c397d7be6f054a26e76938",
+    "history-overlay.png": "e91d7adb0c0494fb1e079ed9355f3f95f6e4f0488e677ef11c2b79156c73adc1",
+    "map-manifest.json": "07c56dffc07bdcd6eae66cee7fd7566e1e0b8651fdd1a1fd429edab4f999da04",
     "physical-base.png": "1c1e5e5adb78daf3088017cffcc6132fb1ceec24aeb45a187db37e464932bbc9",
-    "regions.geojson": "9f734ca7c8be3a3c4c601ae30d7b7ef6224410e4d5d2207b54ccdef796b63069"
+    "regions.geojson": "c87b50ac53547b6eba155f629dfead2b903c42a950eddef4ce304424f1be821d"
   },
   "scenario_id": "ming_1629_liaoxi_detail",
   "schema_version": 1,
@@ -39,31 +47,34 @@
     "assets/maps/sources/natural-earth-physical/lakes/ne_10m_lakes.shp": "11064fa55ed91b56a0d86733643c1a5bfcc137fdf044e83f471978a5b86617e1",
     "assets/maps/sources/natural-earth-physical/land/ne_10m_land.shp": "4cad3a49bc75c1a4c2f3d7efae04f2f8e63151c96764b2658effabf524331fa6",
     "assets/maps/sources/natural-earth-physical/rivers/ne_10m_rivers_lake_centerlines.shp": "f9a1cf6d9f58c0a6f182a7f25771a03e0a48026253d4484aab782b2586354d78",
-    "content/scenarios/ming_1629/evidence/liaodong-1629-evidence.json": "149c43f23cc71535e1e95bb826a82e0720384ddbf1c119df7fd5580f37b8394c",
-    "content/scenarios/ming_1629/map/historical-overlays.json": "c22af1c82e51ed1eef300fe23479eb82a9a7a8255da253c0b90f938915686a91",
-    "content/scenarios/ming_1629/map/historical-regions.json": "ecaa3c1f16b866506c93b8ad59ee2458a08387bc779b7ec428e7a088cc678074",
-    "content/scenarios/ming_1629/map/map-build-liaoxi.json": "f280eef8a7651ab7f15125493a8f86685c9b6e240df7ee68cb62d5d05d433387",
-    "content/scenarios/ming_1629/map/places.json": "26cd94b2a605264e8eeb39a9343f8f2c83d83c7b3ee2a628b1d52c262ca8425f",
-    "content/scenarios/ming_1629/map/routes.json": "07bfb05547fc452c6e7264a915df5166e2b00329f18e4d1dd62f76f9fbe661d5",
-    "content/scenarios/ming_1629/map/source-ledger.csv": "c91e3d6a46291b835d86f8a65b233e1b23b8a34f16b65e56f8ea5e54988c18b1"
+    "content/scenarios/ming_1629/evidence/liaodong-1629-evidence.json": "68f081bb8574526017e3f4f6f3f883cd84ec16c2a90d65fa82dffedaafc77f84",
+    "content/scenarios/ming_1629/map/historical-overlays.json": "f4c4c3e4f5eb0d59e6f7cc63739a58876f0f7a194372f188fddcc936aa5d2ff3",
+    "content/scenarios/ming_1629/map/historical-regions.json": "0fbc48a56c71c5742e48a47b9d15f3c6bc4a5ad1e58c3ae9e93e0033bec46f6a",
+    "content/scenarios/ming_1629/map/map-build-liaoxi.json": "95f774446079e168f20fe6857065b4a7a5e33b3664b1791f2f8d495d9c94017c",
+    "content/scenarios/ming_1629/map/places.json": "ba03ba14838575e26c9aaad3778063b60698ec5b8afae382b38b3794d64fb955",
+    "content/scenarios/ming_1629/map/routes.json": "cd76ace7b36a1f67c76ea2d733e65d2597bf0266b6aa6d71cb54c7f551f0ce9d",
+    "content/scenarios/ming_1629/map/source-ledger.csv": "174f48ab4465fe3b43fa25874e3c9f3e3bea480f7c283cb80f634668827f1311"
   },
-  "status": "technical_validation_passed_reviewed_evidence",
-  "technical_validation": "passed",
+  "status": "built_with_design_preview_and_open_items",
   "validation": {
+    "admission_contracts_complete": true,
+    "date_contracts_validated": true,
+    "design_admissions_not_reviewed": true,
     "evidence_claims_have_sources": true,
     "geometry_structurally_valid": true,
     "hartwell_baseline_not_rendered": true,
-    "open_claims_not_rendered": true,
-    "open_routes_not_rendered": true,
     "optional_physical_layers": {
       "lakes": "rendered",
       "rivers": "rendered"
     },
     "place_ids_unique": true,
+    "rendered_claims_are_not_open": true,
     "route_endpoints_known_and_aligned": true,
     "route_ids_unique": true,
+    "route_inputs_accounted_for": true,
     "source_features_unique": true,
+    "source_hashes_collected": true,
     "source_ids_known": true,
-    "volatile_metadata_included": false
+    "temporary_asset_hashes_match": true
   }
 }
