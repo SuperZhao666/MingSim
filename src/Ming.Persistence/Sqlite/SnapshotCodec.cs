@@ -28,7 +28,9 @@ namespace MingSim.Persistence.Sqlite;
 /// </remarks>
 public static class SnapshotCodec
 {
-    private const byte FormatVersion = 1;
+    // 格式版本 1→2：WorldState 编码新增 AppointmentState 段（任命必须随快照持久化）。
+    // 版本递增让旧存档被显式拒绝而不是静默误读（fail-closed）；旧存档需迁移或重建。
+    private const byte FormatVersion = 2;
 
     private static readonly byte[] Magic = "MSNAP"u8.ToArray();
     private static readonly byte[] WorldMagic = "MSWLD"u8.ToArray();
@@ -387,6 +389,25 @@ public static class SnapshotCodec
             WriteInt64(writer, movement.DueGameTime.Value.UtcTicks);
             WriteString(writer, movement.RouteFingerprint);
         }
+
+        // 任命段（格式版本 2 起）：排序键与 CanonicalStateHasher.WriteAppointments 完全一致，
+        // 保证"同状态 → 同字节 → 同哈希"，也保证快照字节往返稳定。
+        var appointments = state.Appointments
+            .OrderBy(item => item.PersonId.Value, StringComparer.Ordinal)
+            .ThenBy(item => item.OfficeId.Value, StringComparer.Ordinal)
+            .ThenBy(item => item.Scope, StringComparer.Ordinal)
+            .ThenBy(item => item.EffectiveFrom.Value.UtcTicks)
+            .ToArray();
+        WriteInt32(writer, appointments.Length);
+        foreach (var appointment in appointments)
+        {
+            WriteString(writer, appointment.PersonId.Value);
+            WriteString(writer, appointment.OfficeId.Value);
+            WriteNullableString(writer, appointment.Scope);
+            WriteNullableInt64(writer, appointment.Limit);
+            WriteInt64(writer, appointment.EffectiveFrom.Value.UtcTicks);
+            WriteNullableInt64(writer, appointment.EffectiveTo?.Value.UtcTicks);
+        }
     }
 
     private static WorldState ReadWorldState(BinaryReader reader)
@@ -559,6 +580,20 @@ public static class SnapshotCodec
                 ReadString(reader)));
         }
 
+        // 任命段（格式版本 2 起）：写入顺序 personId、officeId、scope、limit、effectiveFrom、effectiveTo
+        var appointmentCount = ReadInt32(reader);
+        var appointments = new List<AppointmentState>(appointmentCount);
+        for (var index = 0; index < appointmentCount; index++)
+        {
+            appointments.Add(new AppointmentState(
+                new CharacterId(ReadString(reader)),
+                new InstitutionId(ReadString(reader)),
+                ReadNullableString(reader),
+                ReadNullableInt64(reader),
+                new GameTime(new DateTimeOffset(ReadInt64(reader), TimeSpan.Zero)),
+                ReadNullableTicks(reader)));
+        }
+
         var world = WorldState.CreateInitial(
             worldId,
             turnNumber,
@@ -571,7 +606,8 @@ public static class SnapshotCodec
             inventory,
             armies,
             stockpiles,
-            routes);
+            routes,
+            appointments);
 
         for (var index = 0; index < characters.Count; index++)
         {
