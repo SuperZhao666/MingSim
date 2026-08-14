@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- 与 Ming.Persistence 同步：仅在联网环境（CI）或显式启用时编译 SQLite 分支 -->
+    <MingSimEnableSqliteStore Condition="'$(MingSimEnableSqliteStore)' == '' and '$(GITHUB_ACTIONS)' == 'true'">true</MingSimEnableSqliteStore>
+    <MingSimEnableSqliteStore Condition="'$(MingSimEnableSqliteStore)' == ''">false</MingSimEnableSqliteStore>
+    <DefineConstants Condition="'$(MingSimEnableSqliteStore)' == 'true'">$(DefineConstants);MINGSIM_SQLITE_STORE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Ming.Application\Ming.Application.csproj" />
+    <ProjectReference Include="..\..\src\Ming.Domain\Ming.Domain.csproj" />
+    <!--
+      InMemoryCommitStore 位于 Ming.Persistence（InMemory），长跑默认用它做持久化往返，
+      因此必须引用 Persistence；SQLite 适配器本身仍由上面条件开关控制，本地离线不启用。
+    -->
+    <ProjectReference Include="..\..\src\Ming.Persistence\Ming.Persistence.csproj" />
+    <ProjectReference Include="..\..\src\Ming.Simulation\Ming.Simulation.csproj" />
+  </ItemGroup>
+</Project>
