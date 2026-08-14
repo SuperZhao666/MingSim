@@ -4,6 +4,7 @@
 [ext_resource type="Script" path="res://src/Ming.Godot/scripts/MapView.cs" id="2_map"]
 [ext_resource type="Script" path="res://src/Ming.Godot/scripts/DecreePanel.cs" id="3_decree"]
 [ext_resource type="Script" path="res://src/Ming.Godot/scripts/EndgameReportPanel.cs" id="4_endgame"]
+[ext_resource type="Script" path="res://src/Ming.Godot/scripts/GuidePanel.cs" id="5_guide"]
 
 [node name="ImperialDesk" type="Control"]
 layout_mode = 3
@@ -40,3 +41,12 @@ offset_top = 130.0
 offset_right = 1170.0
 offset_bottom = 750.0
 script = ExtResource("4_endgame")
+
+[node name="GuidePanel" type="Panel" parent="."]
+visible = false
+layout_mode = 0
+offset_left = 420.0
+offset_top = 190.0
+offset_right = 1180.0
+offset_bottom = 750.0
+script = ExtResource("5_guide")
