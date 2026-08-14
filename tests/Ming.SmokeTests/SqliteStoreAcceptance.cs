@@ -169,7 +169,10 @@ internal static class SqliteStoreAcceptance
             File.WriteAllBytes(dbPath, header);
             Program.RequireThrowsAny(() => SqliteCommitStore.RestoreLatest(dbPath, worldId));
 
-            // (b) 在干净库上翻转"世界编号"内容字节：校验和/世界号校验失败
+            // (b) 在干净库上翻转"state hash"内容字节：state_hash 只出现在状态行/快照行/meta 中，
+            // 且这些行的 world_id 未变（仍在校验范围内）→ 重算校验和必然不一致 → 恢复失败。
+            // 不能用 world_id 作为篡改靶点：world_id 是校验查询的过滤键，翻转它会把这行移出
+            // 当前世界的校验范围，两侧一致导致恢复不报错（这是测试靶点问题，不是校验缺陷）。
             DeleteDbFiles(dbPath); // 文件头已被破坏，删掉重来
             using (var rewrite = new SqliteCommitStore(dbPath, worldId))
             {
@@ -177,9 +180,9 @@ internal static class SqliteStoreAcceptance
             }
 
             var bytes = File.ReadAllBytes(dbPath);
-            var needle = Encoding.UTF8.GetBytes(worldId.Value);
+            var needle = Encoding.UTF8.GetBytes(runtime.CaptureSnapshot().StateHash);
             var index = IndexOf(bytes, needle);
-            Program.Require(index >= 0, "库文件中必须能找到世界编号字节（用于定向篡改）");
+            Program.Require(index >= 0, "库文件中必须能找到 state hash 字节（用于定向篡改）");
             bytes[index] ^= 0x01;
             File.WriteAllBytes(dbPath, bytes);
             Program.RequireThrowsAny(() => SqliteCommitStore.RestoreLatest(dbPath, worldId));
