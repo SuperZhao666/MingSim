@@ -71,16 +71,24 @@ internal static partial class Program
                 $"无调粮授权的 {actor} 必须被入口结构化拒绝且不产生命令编号");
         }
 
-        var advanced = runtime.AdvanceTo(before.GameTime);
-        Require(advanced.CommandResults.Count == 1 && advanced.CommandResults.Single().Accepted,
-            "只有 duliaoxiang-slot 的意图进入内核收件箱");
-        Require(advanced.CommandResults.Single().CommandId == $"{duliaoxiang.DecisionId}-1",
-            "内核必须受理宿主派生命令编号");
-        Require(advanced.ReadModel.Shipments.Count == 1 &&
-                advanced.ReadModel.Shipments.Single().Id.Value == $"shipment-{duliaoxiang.DecisionId}-1",
+        // P1-AGENT-05 契约变化：宿主在首位角色提交成功后即把收件箱在当前安全点真实推进
+        // （下一角色必须从权威状态重取版本），因此批次返回时 duliaoxiang 的命令已经生效——
+        // 组合根接线的模型意图必须真正生效（创建运输单），权威版本已推进 +2。
+        Require(runtime.ReadModel.Shipments.Count == 1 &&
+                runtime.ReadModel.Shipments.Single().Id.Value == $"shipment-{duliaoxiang.DecisionId}-1",
             "组合根接线的模型意图必须真正生效（创建运输单）");
-        Require(advanced.ReadModel.WorldVersion == before.WorldVersion + 2,
+        Require(runtime.ReadModel.WorldVersion == before.WorldVersion + 2,
             "受理命令 +1 与出发事件 +1 各一次原子提交");
+        var outcome = runtime.CommandOutcomes.Single();
+        Require(outcome.Accepted && outcome.CommandId == $"{duliaoxiang.DecisionId}-1",
+            "内核必须受理宿主派生命令编号并记录 Accepted Outcome");
+        Require(outcome.ExpectedWorldVersion == before.WorldVersion,
+            "首位角色命令必须携带批次起始的权威版本");
+
+        // 宿主已逐角色推进收件箱，调用方后续安全点不再有未受理命令（幂等空转）。
+        var advanced = runtime.AdvanceTo(before.GameTime);
+        Require(advanced.CommandResults.Count == 0 && advanced.ReadModel.WorldVersion == before.WorldVersion + 2,
+            "宿主推进后调用方安全点不得重复受理已生效的命令");
     }
 
     /// <summary>
