@@ -43,6 +43,11 @@ internal static partial class Program
             ShouldSubmitAuthorizedMoveArmyIntentThroughKernel();
             ShouldRequireNoModelProviderForRulesPath();
             ShouldNotLeakSecretsInAgentEntrySources();
+            ShouldChooseDeterministicallyByUtilityScoring();
+            ShouldSubmitFreshModelDecisionThroughKernel();
+            ShouldDiscardExpiredModelResultAndFallBackToRules();
+            ShouldFallBackToRulesWhenModelOutputIsInvalid();
+            ShouldRunRulesPathWithoutModelCalls();
 
             Console.WriteLine("Ming.Agents OpenAI-compatible contract tests passed.");
             return 0;
