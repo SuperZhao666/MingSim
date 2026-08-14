@@ -553,7 +553,11 @@ public sealed class RealtimeSimulationRuntime
     private List<RealtimeCommandResult> DrainInbox(List<DomainEvent> events)
     {
         var results = new List<RealtimeCommandResult>();
-        while (_inbox.TryDequeue(out var command))
+        // 先窥视队首再处理，只有该命令提交成功后才出队。
+        // 为什么：出队本身也是权威状态的一部分，若处理时抛出未预期异常，
+        // 命令必须继续留在收件箱等待诊断/重试，而不是被静默消费造成丢命令；
+        // 这样“出队、状态、Outcome、事件”仍与设计文档一致地同批原子提交。
+        while (_inbox.TryPeek(out var command))
         {
             var candidate = CreateWorkingCopy();
             var ingressSequence = candidate.NextIngressSequence++;
@@ -572,6 +576,7 @@ public sealed class RealtimeSimulationRuntime
                     candidate.State.GameTime, ("ingress_sequence", ingressSequence.ToString()), ("command_id", command.CommandId)));
                 candidate.Outbox.Add(duplicateEvents[^1]);
                 CommitWorkingCopy(candidate);
+                _inbox.TryDequeue(out _);
                 events.AddRange(duplicateEvents);
                 results.Add(duplicateResult);
                 continue;
@@ -579,6 +584,7 @@ public sealed class RealtimeSimulationRuntime
 
             var result = ValidateAndApplyCommand(candidate, command, ingressSequence, fingerprint, events);
             CommitWorkingCopy(candidate);
+            _inbox.TryDequeue(out _);
             results.Add(result);
         }
 
@@ -1137,7 +1143,17 @@ public sealed class RealtimeSimulationRuntime
                 writer.Write(speed.ExpectedWorldVersion);
                 break;
             default:
-                throw new InvalidOperationException("未知命令类型。");
+                // 未知命令类型没有稳定的负载字段；用类型名兜底生成指纹。
+                // 为什么：ValidateAndApplyCommand 的 switch 已经用 UNKNOWN_COMMAND
+                // 结构化拒绝未知类型，Fingerprint 若在这里抛异常反而会在拒绝之前
+                // 让整个推进崩溃；稳定的类型指纹让同一命令编号的重放得到同一拒绝结果。
+                WriteFingerprintString(writer, "unknown");
+                WriteFingerprintString(writer, command.GetType().FullName ?? command.GetType().Name);
+                WriteFingerprintString(writer, command.CommandId);
+                WriteFingerprintString(writer, command.ActorId.Value);
+                writer.Write(command.SubmittedAt.UtcTicks);
+                writer.Write(command.ExpectedWorldVersion);
+                break;
         }
 
         writer.Flush();
