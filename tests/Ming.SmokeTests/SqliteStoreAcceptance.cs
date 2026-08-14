@@ -296,9 +296,10 @@ internal static class SqliteStoreAcceptance
 
     /// <summary>
     /// v1 档成功迁移到 v2 并恢复同一世界：已提交存档的快照行替换为**真实 v1 档**
-    /// （v1 布局 + schema4 权威哈希，见 Program.BuildRealV1Fixture/RealV1StateHash）。
-    /// RestoreLatest 先按 v1 记录版本校验载荷哈希（P1-1）再 re-seal 为当前规则（P1），
-    /// 权威恢复后得到与迁移前完全相同的世界。
+    /// （v1 布局 + schema4 权威哈希 + v1 时代 checksum（Version=6），见
+    /// Program.BuildRealV1Fixture/RealV1StateHash；P1-2 正向回归——未损坏真实 v1 档必须迁移成功）。
+    /// RestoreLatest 先按 v1 记录版本校验载荷哈希（P1-1，校验基准 v6/v4 与真实旧档一致）再
+    /// re-seal 为当前规则（P1），权威恢复后得到与迁移前完全相同的世界。
     /// </summary>
     private static void SqliteV1ArchiveMigratesAndRestoresSameWorld()
     {

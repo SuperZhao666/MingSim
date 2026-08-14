@@ -144,8 +144,11 @@ internal static class SnapshotCodecAcceptance
     /// <summary>
     /// v1→v2 迁移（本地等价验收；SQLite 全量路径见 SqliteStoreAcceptance.SqliteV1ArchiveMigratesAndRestoresSameWorld）：
     /// 载荷携带**真实 v1 哈希**（schema4、无任命段，见 Program.RealV1StateHash——由 #28 之前的
-    /// v1 hasher 对确定性夹具世界计算）。迁移先按 v1 记录版本校验载荷自带哈希（P1-1），
+    /// v1 hasher 对确定性夹具世界计算）与 **v1 时代 payload checksum（头部 Version=6，P1-2）**。
+    /// 迁移先按 v1 记录版本校验载荷自带哈希（P1-1，校验基准与真实 v1 档一致——不误拒），
     /// 校验通过后 re-seal 为当前规则（P1），恢复出与原始快照相同的世界。
+    /// 本样本即 P1-2 的正向回归：未损坏的真实 v1 档（v6 checksum）必须迁移成功，
+    /// 否则无法区分"正确拒绝损坏档"与"误拒真实旧档"。
     /// </summary>
     private static void CodecMigratesV1PayloadToV2AndRestoresSameWorld()
     {

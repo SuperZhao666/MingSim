@@ -135,14 +135,15 @@ public static class RealtimeSnapshotHash
     public static string ComputePayloadChecksum(RealtimeSnapshot snapshot, string stateHash) =>
         ComputePayloadChecksum(stateHash, snapshot.PendingCommands, snapshot.OutboxEvents, snapshot.NextCreationSequence,
             snapshot.NextIngressSequence, snapshot.NextEventSequence, snapshot.ProcessedScheduledEventCount,
-            snapshot.RealGameTickRemainder, snapshot.IsPaused, snapshot.Speed, snapshot.RandomState);
+            snapshot.RealGameTickRemainder, snapshot.IsPaused, snapshot.Speed, snapshot.RandomState,
+            RealtimeSnapshotSchema.Version);
 
     /// <summary>
-    /// V1 校验专用入口（独立审查 P1-1）：按 v1 时代哈希规则（schema4、无任命段）重算
-    /// StateHash/PayloadChecksum。迁移用它与 v1 载荷自带的校验字段逐字节比对——内容损坏但
-    /// 结构可解码的旧档会在这里失配而被拒绝（fail-closed），绝不带病 re-seal 静默通过。
-    /// payload checksum 逻辑在 v1 时代与当前一致（RealtimeSnapshotSchema.Version 同为当前值），
-    /// 只是 stateHash 输入不同。
+    /// V1 校验专用入口（独立审查 P1-1/P1-2）：按 v1 时代规则重算 StateHash/PayloadChecksum——
+    /// 状态哈希用 schema4（无任命段、无减耗令标志），payload checksum 头部显式写 v1 时代版本
+    /// （<see cref="RealtimeSnapshotSchema.LegacyVersionV1"/> = 6，不是当前 7）。
+    /// 迁移用它与 v1 载荷自带的校验字段逐字节比对——内容损坏但结构可解码的旧档会失配而被拒绝
+    /// （fail-closed），绝不带病 re-seal 静默通过；校验基准与真实 v1 档一致，不会误拒。
     /// </summary>
     public static (string StateHash, string PayloadChecksum) ComputeV1Hashes(RealtimeSnapshot snapshot)
     {
@@ -152,7 +153,10 @@ public static class RealtimeSnapshotHash
             snapshot.InitialGameTime, snapshot.InitialWorldVersion, snapshot.ProcessedScheduledEventCount, snapshot.IsPaused,
             snapshot.Speed, snapshot.PendingCommands.Select(Fingerprint), snapshot.NextEventSequence,
             hashSchemaVersion: CanonicalStateHasher.LegacySchemaVersionV1);
-        return (stateHash, ComputePayloadChecksum(snapshot, stateHash));
+        return (stateHash, ComputePayloadChecksum(stateHash, snapshot.PendingCommands, snapshot.OutboxEvents,
+            snapshot.NextCreationSequence, snapshot.NextIngressSequence, snapshot.NextEventSequence,
+            snapshot.ProcessedScheduledEventCount, snapshot.RealGameTickRemainder, snapshot.IsPaused, snapshot.Speed,
+            snapshot.RandomState, RealtimeSnapshotSchema.LegacyVersionV1));
     }
 
     /// <summary>按当前权威规则计算 StateHash + PayloadChecksum（快照对象版；迁移 re-seal 与测试使用）。</summary>
@@ -184,7 +188,8 @@ public static class RealtimeSnapshotHash
             commandOutcomes, randomState, outboxEvents, realGameTickRemainder, initialGameTime, initialWorldVersion,
             processedScheduledEventCount, isPaused, speed, nextEventSequence);
         return (stateHash, ComputePayloadChecksum(stateHash, pendingCommands, outboxEvents, nextCreationSequence,
-            nextIngressSequence, nextEventSequence, processedScheduledEventCount, realGameTickRemainder, isPaused, speed, randomState));
+            nextIngressSequence, nextEventSequence, processedScheduledEventCount, realGameTickRemainder, isPaused, speed,
+            randomState, RealtimeSnapshotSchema.Version));
     }
 
     private static string ComputePayloadChecksum(
@@ -198,11 +203,14 @@ public static class RealtimeSnapshotHash
         decimal realGameTickRemainder,
         bool isPaused,
         double speed,
-        string randomState)
+        string randomState,
+        int snapshotSchemaVersion)
     {
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream, new UTF8Encoding(false), leaveOpen: true);
-        writer.Write(RealtimeSnapshotSchema.Version);
+        // 头部写调用方指定的运行时快照 schema 版本：当前校验写当前版本，v1 时代校验显式写
+        // LegacyVersionV1（=6）——用当前版本（7）比对 v6 时代旧档必然误拒（独立审查 P1-2）。
+        writer.Write(snapshotSchemaVersion);
         writer.Write(stateHash);
         writer.Write(nextCreationSequence);
         writer.Write(nextIngressSequence);

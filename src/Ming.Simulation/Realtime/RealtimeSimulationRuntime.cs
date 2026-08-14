@@ -1547,4 +1547,9 @@ public static class RealtimeSnapshotSchema
     // （Restore 的版本检查先于哈希校验，返回"不支持实时快照版本"），而不是以哈希失配的偶然失败收场。
     // 旧存档不再兼容，恢复即拒绝（fail-closed），与 doc 08 存档版本约定一致。
     public const int Version = 7;
+
+    /// <summary>v1 载荷时代（#28 之前，4b035ab 及以前）的运行时快照 schema 版本：
+    /// 当时 payload checksum 头部写入 6（与当前 7 不同）。迁移按 v1 时代规则校验旧档
+    /// 自带 checksum 时必须用本常量（独立审查 P1-2：用当前版本比对必然误拒真实 v1 档）。</summary>
+    public const int LegacyVersionV1 = 6;
 }

@@ -1555,14 +1555,22 @@ internal static class Program
     /// <summary>
     /// 测试夹具：构造"真实 v1 档"样本——v1 字节布局（无任命段 + 版本字节 1）+
     /// schema4 时代的权威 StateHash（见 <see cref="RealV1StateHash"/>）与配套 payload checksum
-    /// （对旧哈希重算，与 v1 时代校验语义一致）。当前 hasher 无法在夹具内容上复现这对校验字段，
-    /// 迁移必须 re-seal（用当前规则重算）才能通过 RealtimeSimulationRuntime.Restore 权威校验；
+    /// （按 v1 时代规则计算：checksum 头部显式写 LegacyVersionV1=6，独立审查 P1-2——
+    /// 用当前版本 7 计算会自洽但不真实，掩盖对真实 v1 档的误拒）。
+    /// 当前 hasher 无法在夹具内容上复现这对校验字段（schema4 哈希 ≠ schema6 哈希、v6 checksum ≠ v7
+    /// checksum），迁移必须 re-seal 才能通过 RealtimeSimulationRuntime.Restore 权威校验；
     /// 若迁移原样保留这对字段，Restore 必然失败（独立审查 P1 回归点）。
     /// </summary>
     internal static byte[] BuildRealV1Fixture(RealtimeSnapshot snapshot, byte[] magic, string currentStateHash, string currentChecksum)
     {
+        var v1Hashes = RealtimeSnapshotHash.ComputeV1Hashes(snapshot);
+        Require(StringComparer.Ordinal.Equals(v1Hashes.StateHash, RealV1StateHash),
+            "schema4 重算必须复现真实 v1 哈希常量（夹具基准漂移检测）");
+        Require(!StringComparer.Ordinal.Equals(v1Hashes.PayloadChecksum,
+                RealtimeSnapshotHash.ComputePayloadChecksum(snapshot, RealV1StateHash)),
+            "v1 时代 checksum（v6）必须与当前版本（v7）不同——夹具必须是真实 v1 档而非自洽替身");
         var v1 = DowngradePayloadToV1(SnapshotCodec.Serialize(snapshot), magic);
-        var staleChecksum = RealtimeSnapshotHash.ComputePayloadChecksum(snapshot, RealV1StateHash);
+        var staleChecksum = v1Hashes.PayloadChecksum; // v6 时代 checksum（P1-2）
         var withStaleHash = ReplaceLastAscii(v1, currentStateHash, RealV1StateHash);
         return ReplaceLastAscii(withStaleHash, currentChecksum, staleChecksum);
     }
