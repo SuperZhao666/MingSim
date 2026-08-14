@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Reflection;
 using MingSim.Domain;
 using MingSim.Domain.Authorization;
@@ -52,6 +53,11 @@ internal static class Program
             ShouldIgnoreDuplicateShipmentArrivalWithoutDoubleDelivery();
             ShouldRestoreShipmentCheckpointsAndPendingInbox();
             ShouldRejectTamperedSnapshotOutbox();
+            ShouldRejectUnknownCommandTypeWithoutMutation();
+            ShouldEnforceInTransitRouteAndDestinationReservations();
+            ShouldKeepLossDeterministicAcrossHaulLengths();
+            ShouldRejectTamperedSnapshotState();
+            ShouldCompleteFiveThousandGrainNingyuanClosedLoop();
             ShouldCaptureSnapshotsAtomicallyUnderConcurrency();
             ShouldKeepEventIdentityAndCommitMetadataStable();
             ShouldAuditPauseAndSpeedAsCommands();
@@ -448,16 +454,22 @@ internal static class Program
         Require(deliveredCapacityResult.CommandResults.Single().Accepted,
             "目的地容量应按实际交付量而非含损耗毛量预留");
 
+        // 拆单不能规避每单向上取整的损耗：4 石拆成两单 2 石，每单损耗 1、总损耗 2，
+        // 而单笔 4 石只损耗 1；用可送达的 2 石/单（实到 1）确保断言非空集真空通过。
         var splitLoss = new RealtimeSimulationRuntime(CreateLogisticsWorld(destinationCapacity: 20));
-        Require(splitLoss.EnqueueCreateShipment(CreateShipment(splitLoss, "grain-split-a", 1)).Queued,
+        Require(splitLoss.EnqueueCreateShipment(CreateShipment(splitLoss, "grain-split-a", 2)).Queued,
             "拆单损耗第一条命令应该进入收件箱");
         splitLoss.AdvanceTo(splitLoss.ReadModel.GameTime);
-        Require(splitLoss.EnqueueCreateShipment(CreateShipment(splitLoss, "grain-split-b", 1)).Queued,
+        Require(splitLoss.EnqueueCreateShipment(CreateShipment(splitLoss, "grain-split-b", 2)).Queued,
             "拆单损耗第二条命令应该进入收件箱");
         splitLoss.AdvanceTo(splitLoss.ReadModel.GameTime);
         var splitArrived = splitLoss.AdvanceTo(new GameTime(splitLoss.ReadModel.GameTime.Value.AddHours(2)));
-        Require(splitArrived.ReadModel.Shipments.All(item => item.Status == ShipmentStatus.Arrived && item.LossGrain == 1),
+        Require(splitArrived.ReadModel.Shipments.Count == 2 &&
+                splitArrived.ReadModel.Shipments.All(item => item.Status == ShipmentStatus.Arrived && item.LossGrain == 1),
             "每单损耗取整必须不能通过拆单规避");
+        Require(splitArrived.ReadModel.Shipments.Sum(item => item.LossGrain) == 2 &&
+                splitArrived.ReadModel.Shipments.Sum(item => item.DeliveredGrain) == 2,
+            "拆单后的总损耗必须按单累加，不能免费合并");
 
         var denied = new RealtimeSimulationRuntime(CreateLogisticsWorld());
         var deniedBefore = denied.ReadModel;
@@ -601,6 +613,238 @@ internal static class Program
         RequireThrows<InvalidDataException>(() => RealtimeSimulationRuntime.Restore(snapshot));
     }
 
+    private static void ShouldRejectUnknownCommandTypeWithoutMutation()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        var before = runtime.ReadModel;
+        var inbox = (ConcurrentQueue<RealtimeCommand>)typeof(RealtimeSimulationRuntime)
+            .GetField("_inbox", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(runtime)!;
+        inbox.Enqueue(new UnknownCommand("unknown-command", new CharacterId("war"), FixedUtc, before.WorldVersion));
+
+        var result = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(result.CommandResults.Single().Errors.Any(error => error.Code == "UNKNOWN_COMMAND"),
+            "未知命令类型必须结构化拒绝而不是崩溃");
+        // 拒绝必须不改变权威版本与游戏时间；Outcome 仍会按设计原子记录，
+        // 因此 StateHash 允许变化（幂等记录本身属于权威状态），但不产生业务状态。
+        Require(result.ReadModel.WorldVersion == before.WorldVersion && result.ReadModel.GameTime == before.GameTime,
+            "未知命令拒绝不能改变世界版本或游戏时间");
+        Require(runtime.ReadModel.Shipments.Count == 0 && runtime.ReadModel.Movements.Count == 0,
+            "未知命令拒绝不能产生任何业务状态");
+
+        inbox.Enqueue(new UnknownCommand("unknown-command", new CharacterId("war"), FixedUtc, before.WorldVersion));
+        var replay = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(replay.CommandResults.Single().Errors.Any(error => error.Code == "UNKNOWN_COMMAND") &&
+                replay.CommandResults.Single().Message.Contains("幂等", StringComparison.Ordinal),
+            "未知命令重放必须按幂等记录返回原拒绝结果");
+    }
+
+    private static void ShouldEnforceInTransitRouteAndDestinationReservations()
+    {
+        // 路线在途预留：第一单 300 在途后，第二单 201 超过剩余 200 容量必须拒绝
+        var routeRuntime = new RealtimeSimulationRuntime(CreateLogisticsWorld(routeCapacity: 500));
+        Require(routeRuntime.EnqueueCreateShipment(CreateShipment(routeRuntime, "grain-route-a", 300)).Queued,
+            "路线预留第一单应进入收件箱");
+        var routeFirst = routeRuntime.AdvanceTo(routeRuntime.ReadModel.GameTime);
+        Require(routeFirst.CommandResults.Single().Accepted, "路线预留第一单必须接纳");
+        Require(routeRuntime.EnqueueCreateShipment(CreateShipment(routeRuntime, "grain-route-b", 201)).Queued,
+            "路线预留第二单应进入收件箱");
+        var routeSecond = routeRuntime.AdvanceTo(routeRuntime.ReadModel.GameTime);
+        Require(!routeSecond.CommandResults.Single().Accepted &&
+                routeSecond.CommandResults.Single().Errors.Any(error => error.Code == "ROUTE_CAPACITY_EXCEEDED"),
+            "在途运输必须计入路线容量，超出的第二单必须拒绝");
+        Require(routeRuntime.ReadModel.Stockpiles.Single(item => item.Id == new StockpileId("capital-granary")).GrainQuantity == 1_000 - 300,
+            "路线容量拒绝不能扣除第二单起点库存");
+
+        // 目的地在途预留：第一单 500（实到 450 预留）后，第二单 60（实到 54）超过剩余 50 必须拒绝。
+        // 路线容量放大到 1000，确保先命中的是目的地容量而不是路线容量。
+        var destinationRuntime = new RealtimeSimulationRuntime(CreateLogisticsWorld(destinationCapacity: 500, routeCapacity: 1_000));
+        Require(destinationRuntime.EnqueueCreateShipment(CreateShipment(destinationRuntime, "grain-dest-a", 500)).Queued,
+            "目的地预留第一单应进入收件箱");
+        var destinationFirst = destinationRuntime.AdvanceTo(destinationRuntime.ReadModel.GameTime);
+        Require(destinationFirst.CommandResults.Single().Accepted, "目的地预留第一单必须接纳");
+        Require(destinationRuntime.EnqueueCreateShipment(CreateShipment(destinationRuntime, "grain-dest-b", 60)).Queued,
+            "目的地预留第二单应进入收件箱");
+        var destinationSecond = destinationRuntime.AdvanceTo(destinationRuntime.ReadModel.GameTime);
+        Require(!destinationSecond.CommandResults.Single().Accepted &&
+                destinationSecond.CommandResults.Single().Errors.Any(error => error.Code == "DESTINATION_CAPACITY_EXCEEDED"),
+            "在途实到量必须计入目的地容量预留，超出的第二单必须拒绝");
+        Require(destinationRuntime.ReadModel.Shipments.Count(item => item.Id.Value.StartsWith("shipment-grain-dest")) == 1,
+            "目的地容量拒绝不能创建第二张运输单");
+    }
+
+    private static void ShouldKeepLossDeterministicAcrossHaulLengths()
+    {
+        // 同一损耗率下，长途与短途的实到/损耗必须一致（损耗只由数量与损耗率决定，与行程时长无关）
+        var shortHaul = new RealtimeSimulationRuntime(CreateNingyuanWorld(travelHours: 2));
+        var longHaul = new RealtimeSimulationRuntime(CreateNingyuanWorld(travelHours: 24 * 30));
+        Require(shortHaul.EnqueueCreateShipment(CreateShipment(shortHaul, "short-haul", 5_000)).Queued,
+            "短途命令应进入收件箱");
+        Require(longHaul.EnqueueCreateShipment(CreateShipment(longHaul, "long-haul", 5_000)).Queued,
+            "长途命令应进入收件箱");
+        shortHaul.AdvanceTo(shortHaul.ReadModel.GameTime);
+        longHaul.AdvanceTo(longHaul.ReadModel.GameTime);
+
+        var early = longHaul.AdvanceTo(new GameTime(longHaul.ReadModel.GameTime.Value.AddDays(29)));
+        Require(early.ReadModel.Shipments.Single(item => item.Id.Value == "shipment-long-haul").Status == ShipmentStatus.InTransit,
+            "长途运输在计划到达前必须仍然在途，不能被提前结算");
+        var shortArrival = shortHaul.AdvanceTo(new GameTime(shortHaul.ReadModel.GameTime.Value.AddHours(2)));
+        var longArrival = longHaul.AdvanceTo(new GameTime(longHaul.ReadModel.GameTime.Value.AddDays(30)));
+        var shortShipment = shortArrival.ReadModel.Shipments.Single(item => item.Id.Value == "shipment-short-haul");
+        var longShipment = longArrival.ReadModel.Shipments.Single(item => item.Id.Value == "shipment-long-haul");
+        Require(shortShipment.DeliveredGrain == 4_600 && shortShipment.LossGrain == 400,
+            "短途 5000 石按 8% 损耗应实到 4600、损耗 400");
+        Require(longShipment.DeliveredGrain == 4_600 && longShipment.LossGrain == 400,
+            "长途 5000 石按 8% 损耗必须与短途完全一致");
+        Require(GrainLedgerTotal(shortArrival.ReadModel) == GrainLedgerTotal(new RealtimeSimulationRuntime(CreateNingyuanWorld(travelHours: 2)).ReadModel),
+            "短途抵达后粮食账本必须守恒");
+
+        // 每单向上取整与行程时长无关：1 石在 8% 损耗下损耗 1 石、实到 0。
+        // 直接验证领域公式的确定性；实到 0 的运输单会在创建时被目的地容量检查拒绝，
+        // 所以这里同时断言“拒绝”这一端到端结果，而不是虚构一次送达。
+        var roundingShort = new RouteState(new RouteId("rounding-short"), new StockpileId("a"), new StockpileId("b"), 10_000, 2, 80);
+        var roundingLong = new RouteState(new RouteId("rounding-long"), new StockpileId("a"), new StockpileId("b"), 10_000, 24 * 30, 80);
+        var shortCalculable = roundingShort.TryCalculateDeliveredGrain(1, out var oneShortDelivered, out var oneShortLoss);
+        var longCalculable = roundingLong.TryCalculateDeliveredGrain(1, out var oneLongDelivered, out var oneLongLoss);
+        Require(shortCalculable && longCalculable, "单石损耗公式必须可计算");
+        Require(oneShortDelivered == 0 && oneShortLoss == 1 &&
+                oneLongDelivered == oneShortDelivered && oneLongLoss == oneShortLoss,
+            "单石向上取整损耗必须确定，且与行程时长无关");
+
+        var single = new RealtimeSimulationRuntime(CreateNingyuanWorld(travelHours: 24 * 30));
+        Require(single.EnqueueCreateShipment(CreateShipment(single, "long-single", 1)).Queued,
+            "单石长途命令应进入收件箱");
+        var singleBefore = single.ReadModel.WorldVersion;
+        var singleResult = single.AdvanceTo(single.ReadModel.GameTime);
+        Require(!singleResult.CommandResults.Single().Accepted &&
+                singleResult.CommandResults.Single().Errors.Any(error => error.Code == "DESTINATION_CAPACITY_EXCEEDED"),
+            "实到为 0 的单石运输必须在创建时被目的地容量检查拒绝");
+        Require(single.ReadModel.WorldVersion == singleBefore && single.ReadModel.Shipments.Count == 0,
+            "单石运输拒绝不能创建运输单或提交版本");
+    }
+
+    private static void ShouldRejectTamperedSnapshotState()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateLogisticsWorld());
+        Require(runtime.EnqueueCreateShipment(CreateShipment(runtime, "tamper-state", 200)).Queued,
+            "状态篡改测试命令应进入收件箱");
+        runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        var snapshot = runtime.CaptureSnapshot();
+        var stockpile = GetSnapshotState(snapshot).Logistics.Stockpiles[new StockpileId("capital-granary")];
+        Require(InvokeStockpileMutation(stockpile, "TryTakeGrain", 1), "测试必须先篡改库存字节");
+        RequireThrows<InvalidDataException>(() => RealtimeSimulationRuntime.Restore(snapshot));
+    }
+
+    private static void ShouldCompleteFiveThousandGrainNingyuanClosedLoop()
+    {
+        // 宁远急饷纸面推演（docs/玩法验证/宁远急饷90日纸面推演.md）L1 批次：
+        // 5000 石、8% 损耗、12 游戏日到达、实到 4600；这里是内核级验收，不是纸面复算。
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanWorld());
+        var before = runtime.ReadModel;
+        var beforeLedger = GrainLedgerTotal(before);
+        var command = CreateShipment(runtime, "ningyuan-5000", 5_000);
+        var store = new InMemorySnapshotStore();
+        var journal = new InMemoryAuditJournal();
+
+        // 1) 出发提交原子性：命令与出发恰好两个 +1 Commit，事件与状态同批可见
+        Require(runtime.EnqueueCreateShipment(command).Queued, "5000 石命令应进入收件箱");
+        var accepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(accepted.CommandResults.Single().Accepted, "5000 石计划必须接纳");
+        Require(accepted.ReadModel.WorldVersion == before.WorldVersion + 2,
+            "出发提交必须恰好包含命令与出发两个 +1 Commit");
+        Require(accepted.Events.Count(item => item.EventType == "ShipmentPlanned") == 1,
+            "计划事件只能出现一次");
+        Require(accepted.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
+            "出发后必须进入在途");
+        Require(accepted.ReadModel.Stockpiles.Single(item => item.Id == new StockpileId("capital-granary")).GrainQuantity == 20_000 - 5_000,
+            "出发必须先扣 5000 石");
+        Require(GrainLedgerTotal(accepted.ReadModel) == beforeLedger, "出发后粮食账本必须守恒");
+
+        // 2) 持久化往返：在途快照 Prepare/Promote 与真实 Restore 两条路径都必须一致
+        var inTransitSnapshot = runtime.CaptureSnapshot();
+        var prepared = store.Prepare(GetSnapshotState(inTransitSnapshot), runtime.OutboxEvents);
+        Require(prepared.IsValid, "在途快照 Prepare 必须校验通过");
+        store.Promote(prepared);
+        Require(store.Current is not null && store.Current.StateHash == prepared.StateHash,
+            "校验通过的快照必须提升为当前快照");
+        var restored = RealtimeSimulationRuntime.Restore(inTransitSnapshot);
+        Require(restored.ReadModel.StateHash == runtime.ReadModel.StateHash,
+            "恢复实例的 canonical hash 必须与原始一致");
+
+        // 3) 幂等重放：同一命令不得二次扣粮、不得再产生计划/出发事件
+        Require(restored.EnqueueCreateShipment(command).Queued, "重放命令应进入恢复实例收件箱");
+        var replay = restored.AdvanceTo(restored.ReadModel.GameTime);
+        Require(replay.CommandResults.Single().Accepted && replay.CommandResults.Single().Message.Contains("幂等", StringComparison.Ordinal),
+            "重放必须按幂等记录返回原结果");
+        Require(replay.Events.All(item => item.EventType is not ("ShipmentPlanned" or "ShipmentDeparted")),
+            "重放不得再次产生计划或出发事件");
+        Require(restored.ReadModel.Stockpiles.Single(item => item.Id == new StockpileId("capital-granary")).GrainQuantity == 15_000,
+            "重放不得二次扣粮");
+        Require(restored.ReadModel.WorldVersion == accepted.ReadModel.WorldVersion,
+            "幂等重放不得再增加 WorldVersion");
+
+        // 4) 并发：并行投递 + 快照捕获必须原子一致；同一版本并发命令只有一个生效
+        var concurrent = new RealtimeSimulationRuntime(CreateNingyuanWorld());
+        Require(concurrent.EnqueueCreateShipment(CreateShipment(concurrent, "ningyuan-5000", 5_000)).Queued,
+            "并发实例主命令应进入收件箱");
+        var concurrentMain = concurrent.AdvanceTo(concurrent.ReadModel.GameTime);
+        Require(concurrentMain.CommandResults.Single().Accepted, "并发实例主命令必须接纳");
+        var concurrentVersion = concurrent.ReadModel.WorldVersion;
+        RealtimeSnapshot? captured = null;
+        var captureTask = Task.Run(() =>
+        {
+            for (var index = 0; index < 60; index++)
+            {
+                captured = concurrent.CaptureSnapshot();
+            }
+        });
+        // 每个并发命令装 2 石：80‰ 损耗下实到 1，确保业务检查能通过，
+        // 只有第一个（版本匹配）会被接纳，其余都因版本过期被拒绝。
+        var enqueueTasks = Enumerable.Range(0, 40)
+            .Select(index => Task.Run(() => concurrent.EnqueueCreateShipment(new CreateShipmentCommand(
+                $"concurrent-{index}", new CharacterId("works"), new ShipmentId($"shipment-concurrent-{index}"),
+                new RouteId("capital-ningyuan-grain"), 2, FixedUtc, concurrentVersion))))
+            .ToArray();
+        Task.WaitAll(enqueueTasks.Append(captureTask).ToArray());
+        Require(captured is not null, "并发快照线程必须至少捕获一次快照");
+        _ = RealtimeSimulationRuntime.Restore(captured!);
+        var drained = concurrent.AdvanceTo(concurrent.ReadModel.GameTime);
+        Require(drained.CommandResults.Count == 40, "并发命令必须全部进入安全点判定");
+        Require(drained.CommandResults.Count(result => result.Accepted) == 1,
+            "同一版本并发命令只能有一个被接纳，其余必须版本冲突拒绝");
+        Require(concurrent.ReadModel.Shipments.Count(item => item.Id.Value.StartsWith("shipment-concurrent")) == 1,
+            "并发只允许一个运输单生效");
+        Require(concurrent.ReadModel.Stockpiles.Single(item => item.Id == new StockpileId("capital-granary")).GrainQuantity == 20_000 - 5_000 - 2,
+            "并发接纳必须恰好只扣一次粮");
+
+        // 5) 12 游戏日抵达：实到 4600、损耗 400、账本守恒、事件唯一；恢复实例推进到同一目标必须一致
+        var target = new GameTime(runtime.ReadModel.GameTime.Value.AddDays(12));
+        var arrived = runtime.AdvanceTo(target);
+        var shipment = arrived.ReadModel.Shipments.Single(item => item.Id.Value == "shipment-ningyuan-5000");
+        Require(shipment.Status == ShipmentStatus.Arrived && shipment.DeliveredGrain == 4_600 && shipment.LossGrain == 400,
+            "5000 石按 8% 损耗必须实到 4600、损耗 400");
+        Require(arrived.ReadModel.Stockpiles.Single(item => item.Id == new StockpileId("ningyuan-granary")).GrainQuantity == 4_600,
+            "宁远库存必须收到实到量");
+        Require(GrainLedgerTotal(arrived.ReadModel) == beforeLedger, "全程粮食账本必须守恒");
+        Require(arrived.Events.Count(item => item.EventType == "ShipmentArrived") == 1,
+            "到达事件只能发生一次");
+        Require(arrived.ReadModel.WorldVersion > accepted.ReadModel.WorldVersion,
+            "到达推进必须产生新的权威提交");
+        // 用一个“没有重放过命令”的独立恢复实例做推进一致性比较：
+        // 重放本身会写入 CommandDeduplicated 审计事件并消耗事件序号，属于不同的输入流，
+        // 因此与“原实例未收到重复投递”的事件编号必然错位，不能混在同一次比较里。
+        var arrivalRestored = RealtimeSimulationRuntime.Restore(inTransitSnapshot);
+        var restoredArrival = arrivalRestored.AdvanceTo(target);
+        Require(restoredArrival.ReadModel.StateHash == arrived.ReadModel.StateHash &&
+                EventFingerprints(restoredArrival.Events).SequenceEqual(EventFingerprints(arrived.Events)),
+            "无重放的恢复实例推进到同一目标必须与原实例哈希、事件流一致");
+
+        // 6) 审计持久化：outbox 事件必须可完整写入只追加日志并读回
+        journal.Append(runtime.ReadModel.WorldId, runtime.OutboxEvents);
+        Require(journal.Read(runtime.ReadModel.WorldId).Count == runtime.OutboxEvents.Count,
+            "审计日志必须完整持久化全部 outbox 事件");
+    }
+
     private static void ShouldCaptureSnapshotsAtomicallyUnderConcurrency()
     {
         var runtime = new RealtimeSimulationRuntime(CreateWorld());
@@ -721,6 +965,22 @@ internal static class Program
             .GetField("_state", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(runtime)!;
 
+    private static WorldState GetSnapshotState(RealtimeSnapshot snapshot) =>
+        (WorldState)typeof(RealtimeSnapshot)
+            .GetProperty("State", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(snapshot)!;
+
+    /// <summary>只用于测试：模拟调用方错误地投递了内核不认识的命令子类型。
+    /// 必须是 record 才能继承抽象的 RealtimeCommand record；不声明自己的位置参数，
+    /// 避免与基类的 CommandId/ActorId 等属性重名产生隐藏警告。</summary>
+    private sealed record UnknownCommand : RealtimeCommand
+    {
+        public UnknownCommand(string commandId, CharacterId actorId, DateTimeOffset submittedAt, long expectedWorldVersion)
+            : base(commandId, actorId, submittedAt, expectedWorldVersion)
+        {
+        }
+    }
+
     private static bool InvokeStockpileMutation(StockpileState stockpile, string methodName, long quantity) =>
         (bool)typeof(StockpileState)
             .GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -756,6 +1016,48 @@ internal static class Program
     private static decimal SnapshotRemainder(RealtimeSimulationRuntime runtime) =>
         (decimal)typeof(RealtimeSnapshot).GetProperty("RealGameTickRemainder", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(runtime.CaptureSnapshot())!;
+
+    /// <summary>宁远急饷 L1 批次的世界：5000 石、8% 损耗、12 游戏日到达（纸面推演 DESIGN 数值）。</summary>
+    private static WorldState CreateNingyuanWorld(
+        long sourceGrain = 20_000,
+        long routeCapacity = 6_000,
+        long destinationCapacity = 30_000,
+        int travelHours = 12 * 24,
+        int lossPerThousand = 80)
+    {
+        var map = new MapDefinition(
+            "ningyuan-map",
+            [
+                new ProvinceDefinition(new ProvinceId("capital"), "京师", [new ProvinceId("liaodong")]),
+                new ProvinceDefinition(new ProvinceId("liaodong"), "辽东", [new ProvinceId("capital")]),
+            ]);
+        return WorldState.CreateInitial(
+            new WorldId("ningyuan-1629"),
+            1,
+            200_000,
+            map,
+            characters:
+            [
+                new CharacterState(new CharacterId("works"), "户部运粮官",
+                    new CharacterAttributes(80, 60, 30, 40, 70),
+                    new CharacterPersonality(true, false, true, true)),
+            ],
+            capabilityGrants:
+            [
+                new CapabilityGrant(new CharacterId("works"), GameCapability.PlanLogistics, "capital-ningyuan-grain"),
+            ],
+            stockpiles:
+            [
+                new StockpileState(new StockpileId("capital-granary"), new ProvinceId("capital"), 30_000, sourceGrain),
+                new StockpileState(new StockpileId("ningyuan-granary"), new ProvinceId("liaodong"), destinationCapacity, 0),
+            ],
+            routes:
+            [
+                new RouteState(new RouteId("capital-ningyuan-grain"),
+                    new StockpileId("capital-granary"), new StockpileId("ningyuan-granary"),
+                    routeCapacity, travelHours, lossPerThousand),
+            ]);
+    }
 
     private static WorldState CreateLogisticsWorld(
         long destinationCapacity = 1_000,
