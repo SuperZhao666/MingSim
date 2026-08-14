@@ -492,6 +492,10 @@ public partial class MainUi : Control
         button.AddThemeFontOverride("font", _titleFont);
         button.AddThemeFontSizeOverride("font_size", 19);
         button.AddThemeColorOverride("font_color", new Color("#F4E5C5"));
+        button.AddThemeColorOverride("font_disabled_color", new Color("#4A241C"));
+        button.AddThemeColorOverride("font_outline_color", new Color("#2A1510"));
+        button.AddThemeColorOverride("font_disabled_outline_color", new Color("#F1DEC0"));
+        button.AddThemeConstantOverride("outline_size", 2);
         button.AddThemeStyleboxOverride("normal", MakeTextureStyle("buttons/seal-normal.png", 22, 8));
         button.AddThemeStyleboxOverride("hover", MakeTextureStyle("buttons/seal-hover.png", 22, 8));
         button.AddThemeStyleboxOverride("pressed", MakeTextureStyle("buttons/seal-pressed.png", 22, 8));

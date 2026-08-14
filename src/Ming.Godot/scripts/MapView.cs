@@ -61,6 +61,14 @@ public partial class MapView : Control
 
     private const float MinimumStrategicZoom = 1.0f;
     private const float MaximumStrategicZoom = 4.0f;
+    private const int AuthoritativeCanvasWidth = 2400;
+    private const int AuthoritativeCanvasHeight = 1600;
+
+    private readonly record struct PresentationRasterContract(
+        string Path,
+        string Sha256,
+        int Width,
+        int Height);
 
     private sealed class Manifest
     {
@@ -165,10 +173,20 @@ public partial class MapView : Control
     private Vector2 _dragStart;
     private string _loadError = "地图清单不可用；已停止显示。";
     private MapMode _mode = MapMode.DeskOverview;
-    private static readonly Dictionary<string, string> PresentationPhysicalTextures = new(StringComparer.Ordinal)
+    // UI 纸色图是玩家真正看到的像素，不能只验证正式研究底图后再偷偷替换。
+    // 路径、字节 SHA 和固定画布都在代码侧构成权威契约；manifest 不能自报一套新尺寸/哈希来绕过。
+    private static readonly Dictionary<string, PresentationRasterContract> PresentationPhysicalTextures = new(StringComparer.Ordinal)
     {
-        ["res://assets/maps/generated/ming_1629/map-manifest.json"] = "res://assets/ui/generated/ming_ui_v2/maps/ming_1629-physical.png",
-        ["res://assets/maps/generated/ming_1629_liaoxi/map-manifest.json"] = "res://assets/ui/generated/ming_ui_v2/maps/ming_1629_liaoxi-physical.png"
+        ["res://assets/maps/generated/ming_1629/map-manifest.json"] = new(
+            "res://assets/ui/generated/ming_ui_v2/maps/ming_1629-physical.png",
+            "2963036ed798a2d3c1713008a438df75af7b3d63c6db161138010c7cbdb0f0a2",
+            AuthoritativeCanvasWidth,
+            AuthoritativeCanvasHeight),
+        ["res://assets/maps/generated/ming_1629_liaoxi/map-manifest.json"] = new(
+            "res://assets/ui/generated/ming_ui_v2/maps/ming_1629_liaoxi-physical.png",
+            "d5591ab2d2ba7efa2bbbe05b663e4a760a4a634f847da0104999f10541bf496f",
+            AuthoritativeCanvasWidth,
+            AuthoritativeCanvasHeight)
     };
 
     public event Action<string>? PlaceSelected;
@@ -244,9 +262,17 @@ public partial class MapView : Control
             var historyPath = candidate.Assets!["history_overlay"];
             // 正式地图及其 manifest 始终由地图构建器校验；UI 纸本处理位于独立派生路径，
             // 不反写、不污染 assets/maps/generated/** 的研究与构建契约。
-            var presentationPhysicalPath = PresentationPhysicalTextures.TryGetValue(manifestPath, out var derivedPath)
-                ? derivedPath
-                : physicalPath;
+            var presentationPhysicalPath = physicalPath;
+            if (PresentationPhysicalTextures.TryGetValue(manifestPath, out var presentationContract))
+            {
+                if (!ValidateRasterAssetAgainstFixedContract(presentationContract, "界面显示底图", out validationError))
+                {
+                    _loadError = validationError;
+                    GD.PushWarning($"界面显示底图校验失败，已安全关闭地图层：{_loadError}");
+                    return;
+                }
+                presentationPhysicalPath = presentationContract.Path;
+            }
             var physicalTexture = GD.Load<Texture2D>(presentationPhysicalPath);
             var historyTexture = GD.Load<Texture2D>(historyPath);
             if (physicalTexture == null || historyTexture == null)
@@ -700,7 +726,13 @@ public partial class MapView : Control
             error = "地图清单缺少资源或资产哈希；已停止显示。";
             return false;
         }
-        if (manifest.Canvas is null || manifest.Canvas.Width <= 0 || manifest.Canvas.Height <= 0 ||
+        if (manifest.Canvas is null || manifest.Canvas.Width != AuthoritativeCanvasWidth ||
+            manifest.Canvas.Height != AuthoritativeCanvasHeight)
+        {
+            error = $"地图清单画布必须为权威 {AuthoritativeCanvasWidth}×{AuthoritativeCanvasHeight}；已停止显示。";
+            return false;
+        }
+        if (
             manifest.Canvas.ContentRect is not { Count: 4 } rect || rect.Any(value => !double.IsFinite(value)) ||
             rect[2] <= 0 || rect[3] <= 0 || rect[0] < 0 || rect[1] < 0 ||
             rect[0] + rect[2] > manifest.Canvas.Width || rect[1] + rect[3] > manifest.Canvas.Height)
@@ -848,6 +880,44 @@ public partial class MapView : Control
         if (!TryReadPngDimensions(absolutePath, out var width, out var height) || width != canvas.Width || height != canvas.Height)
         {
             error = $"{role}文件尺寸与清单画布不一致；已停止显示。";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool ValidateRasterAssetAgainstFixedContract(
+        PresentationRasterContract contract,
+        string role,
+        out string error)
+    {
+        error = "地图清单不可用；已停止显示。";
+        if (string.IsNullOrWhiteSpace(contract.Path) || !contract.Path.StartsWith("res://", StringComparison.Ordinal) ||
+            contract.Sha256.Length != 64 || contract.Sha256.Any(character => !Uri.IsHexDigit(character)) ||
+            contract.Width != AuthoritativeCanvasWidth || contract.Height != AuthoritativeCanvasHeight)
+        {
+            error = $"{role}权威契约无效；已停止显示。";
+            return false;
+        }
+
+        var absolutePath = ProjectSettings.GlobalizePath(contract.Path);
+        if (!File.Exists(absolutePath))
+        {
+            error = $"{role}文件不可用；已停止显示。";
+            return false;
+        }
+
+        var actualHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(absolutePath))).ToLowerInvariant();
+        if (!string.Equals(actualHash, contract.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            error = $"{role} SHA-256 不匹配；已停止显示。";
+            return false;
+        }
+
+        if (!TryReadPngDimensions(absolutePath, out var width, out var height) ||
+            width != contract.Width || height != contract.Height)
+        {
+            error = $"{role}必须为权威 {contract.Width}×{contract.Height}；已停止显示。";
             return false;
         }
 

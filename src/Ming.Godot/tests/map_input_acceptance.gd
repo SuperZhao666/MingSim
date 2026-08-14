@@ -2,6 +2,10 @@ extends SceneTree
 
 const GOOD_MANIFEST := "res://assets/maps/generated/ming_1629/map-manifest.json"
 const SMALL_IMAGE := "res://assets/ui/generated/ming_ui_v2/icons/icon-decree.png"
+# P1-2：实际显示底图由代码侧权威契约锁定；以下负例直接操纵磁盘字节，
+# 校验契约必须在 GD.Load/状态发布前 fail-closed。
+const DERIVED_MING_1629 := "res://assets/ui/generated/ming_ui_v2/maps/ming_1629-physical.png"
+const FORMAL_PHYSICAL := "res://assets/maps/generated/ming_1629/physical-base.png"
 
 var failures: Array[String] = []
 
@@ -29,6 +33,8 @@ func _init() -> void:
 		_test_semantic_surface(map)
 		await _test_actual_label_count(map)
 		_test_fail_closed_manifests(map)
+		_test_self_consistent_small_canvas(map)
+		_test_derived_texture_contract(map)
 
 	root.queue_free()
 	await process_frame
@@ -164,6 +170,136 @@ func _assert_fail_closed(map: Control, scenario: String) -> void:
 	_assert(not map.LoadedFromManifest, "%s：地图保持关闭" % scenario)
 	_assert(map.PlaceCount == 0 and map.RouteCount == 0, "%s：没有发布部分 manifest 状态" % scenario)
 	_assert(str(map.LoadError) != "" and str(map.SelectedPlaceSummary).begins_with("OPEN"), "%s：只显示中性错误语义" % scenario)
+
+
+func _test_self_consistent_small_canvas(map: Control) -> void:
+	# P1-1：完整自洽错误尺寸负例。manifest 的画布、两张纹理、content_rect、
+	# 节点/路线坐标全部按 416x756 自洽，唯一"错误"是画布不是权威 2400x1600。
+	# 这种清单也必须 fail-closed 且不发布任何部分状态。
+	var small_sha := FileAccess.get_sha256(SMALL_IMAGE)
+	_assert(small_sha.length() == 64, "416x756 夹具可取得真实纹理哈希")
+	var small_manifest := {
+		"schema_version": 1,
+		"scenario_id": "test-416x756-self-consistent",
+		"snapshot_date": "1629-01-01",
+		"canvas": {
+			"width": 416,
+			"height": 756,
+			"padding": 10,
+			"content_rect": [10.0, 10.0, 396.0, 736.0]
+		},
+		"assets": {
+			"physical_base": SMALL_IMAGE,
+			"history_overlay": SMALL_IMAGE
+		},
+		"asset_sha256": {
+			"icon-decree.png": small_sha
+		},
+		"historical_content": {
+			"snapshot_date": "1629-01-01",
+			"warning": "自洽小画布负例",
+			"claim_status": "reviewed_p0_evidence",
+			"geometry_role": "presentation_only_not_simulation_topology"
+		},
+		"research_baseline": {
+			"geometry_depict_date": "1391-01-01",
+			"historical_fit_status": "research_baseline_only",
+			"visible": false
+		},
+		"places": [
+			_small_place("beijing", 200.0, 300.0),
+			_small_place("ningyuan", 300.0, 500.0)
+		],
+		"routes": [
+			{
+				"id": "route-1",
+				"from_place_id": "beijing",
+				"to_place_id": "ningyuan",
+				"review_status": "accepted",
+				"evidence_status": "accepted",
+				"claim_status": "reviewed_inference",
+				"points": [
+					{"map_x": 200.0, "map_y": 300.0},
+					{"map_x": 300.0, "map_y": 500.0}
+				]
+			}
+		]
+	}
+	_load_invalid_manifest(map, JSON.stringify(small_manifest), "self-consistent-416x756")
+	_assert_fail_closed(map, "416x756 全自洽错误画布")
+	_assert(str(map.LoadError).contains("2400"), "416x756 画布负例的错误信息指明权威画布")
+
+
+func _small_place(id: String, map_x: float, map_y: float) -> Dictionary:
+	return {
+		"id": id,
+		"kind": "city",
+		"name_zh": id,
+		"review_status": "accepted",
+		"evidence_status": "accepted_anchor",
+		"historical_site_status": "open",
+		"coordinate_epoch": "modern_anchor",
+		"map_representation": "approximate_point",
+		"map_x": map_x,
+		"map_y": map_y
+	}
+
+
+func _test_derived_texture_contract(map: Control) -> void:
+	# P1-2：界面显示底图（UI 纸色派生图）的路径 + SHA-256 + 2400x1600
+	# 是代码侧权威契约。三种攻击都必须 fail-closed；每次操作后立即恢复字节，
+	# 并验证能重新完整加载，避免把工作树留在被篡改状态。
+	var derived_original := FileAccess.get_file_as_bytes(DERIVED_MING_1629)
+	_assert(derived_original.size() > 0, "派生底图原字节可备份")
+
+	# 1) 同尺寸篡改：2400x1600 纯紫图，尺寸相同但字节不同 → SHA-256 契约拒绝
+	var purple := Image.create(2400, 1600, false, Image.FORMAT_RGB8)
+	purple.fill(Color(0.5, 0.0, 0.6))
+	var save_error := purple.save_png(DERIVED_MING_1629)
+	_assert(save_error == OK, "可写入同尺寸篡改夹具")
+	map.LoadManifest(GOOD_MANIFEST)
+	_assert_fail_closed(map, "派生显示底图同尺寸篡改")
+	_assert(str(map.LoadError).contains("SHA-256"), "同尺寸篡改命中 SHA-256 契约")
+	_restore_bytes(DERIVED_MING_1629, derived_original)
+	map.LoadManifest(GOOD_MANIFEST)
+	_assert(map.LoadedFromManifest, "恢复派生底图字节后重新加载成功")
+
+	# 2) 缺文件：移除派生底图文件 → 契约文件检查拒绝
+	var moved := ProjectSettings.globalize_path(DERIVED_MING_1629) + ".moved-away"
+	var rename_error := DirAccess.rename_absolute(
+		ProjectSettings.globalize_path(DERIVED_MING_1629), moved)
+	_assert(rename_error == OK, "可移走派生底图文件")
+	map.LoadManifest(GOOD_MANIFEST)
+	_assert_fail_closed(map, "派生显示底图缺失")
+	_assert(str(map.LoadError).contains("文件不可用"), "缺文件命中契约文件检查")
+	rename_error = DirAccess.rename_absolute(moved, ProjectSettings.globalize_path(DERIVED_MING_1629))
+	_assert(rename_error == OK, "可恢复派生底图文件")
+	map.LoadManifest(GOOD_MANIFEST)
+	_assert(map.LoadedFromManifest, "恢复派生底图文件后重新加载成功")
+
+	# 3) 错 hash：manifest 声明的正式底图哈希与磁盘字节不符
+	# （同尺寸不同内容，画布与 manifest 其余部分不变）→ manifest 级哈希校验拒绝
+	var formal_original := FileAccess.get_file_as_bytes(FORMAL_PHYSICAL)
+	_assert(formal_original.size() > 0, "正式物理底图原字节可备份")
+	var swapped := Image.create(2400, 1600, false, Image.FORMAT_RGB8)
+	swapped.fill(Color(0.62, 0.18, 0.1))
+	save_error = swapped.save_png(FORMAL_PHYSICAL)
+	_assert(save_error == OK, "可写入错哈希夹具")
+	map.LoadManifest(GOOD_MANIFEST)
+	_assert_fail_closed(map, "manifest 声明哈希与磁盘字节不符")
+	_assert(str(map.LoadError).contains("SHA-256"), "错哈希命中 manifest 哈希校验")
+	_restore_bytes(FORMAL_PHYSICAL, formal_original)
+	map.LoadManifest(GOOD_MANIFEST)
+	_assert(map.LoadedFromManifest, "恢复正式底图字节后重新加载成功")
+
+
+func _restore_bytes(path: String, bytes: PackedByteArray) -> void:
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	_assert(file != null, "可打开恢复目标：%s" % path)
+	if file == null:
+		return
+	file.store_buffer(bytes)
+	file = null
 
 
 func _send_click(map: Control, position: Vector2) -> void:

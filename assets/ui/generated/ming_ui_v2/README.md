@@ -18,7 +18,7 @@ python tools/ui/ming_ui_assets.py snapshot-ledger
 python tools/ui/ming_ui_assets.py build --output "$env:TEMP\mingsim-ui-rebuild"
 ```
 
-当前覆盖：8 张交付源图、29 张“精确切图 + 一像素 Alpha 收边 + 透明像素 RGB 清零”的确定性派生图、2 张坐标不变的确定性地图派生图、15 张来源/编辑过程尚不能从仓库重建的 external 成品，以及 1 张有明确 ImageGen 编辑记录的成品。目录内当前没有 preview 角色 PNG；`assets/ui/previews/` 不属于本账本根目录。31 张可重建派生图连续两次构建的文件 SHA 必须一致。
+当前覆盖：55 张交付 PNG 的许可与来源全部闭合（`ASSET_PROVENANCE.md` 是仓库内证据，账本拒绝任何 `OPEN` 条目）：8 张 Pillow 程序化源图集（PROJECT_ORIGINAL_MIT）、43 张源图集精确切图派生图（含一像素 Alpha 收边）、2 张坐标不变的 Natural Earth 公共领域地图派生图、1 张有明确 ImageGen 编辑记录的御书房底图（PROJECT_GENERATED）、1 张 Pillow 程序化册页九宫格。目录内当前没有 preview 角色 PNG；`assets/ui/previews/` 不属于本账本根目录。全部 55 张可重建资产连续两次构建的文件 SHA 必须一致。
 
 透明切片的收边已进入规范构建：只收缩外沿一个像素、把极低 Alpha 置零并清空对应 RGB，避免缩放采样把旧红/黄/绿底色带回画面；主体纸色、墨色和朱砂不参与颜色替换。`--clean-green-fringe` 仅保留为仓库外额外试验开关，规范账本不依赖它。
 
@@ -86,10 +86,10 @@ python tools/ui/ming_ui_assets.py derive-map `
 | 1. 御书房与御案空间 | `backgrounds/ming-imperial-study-desk-map.png` | 作为总界面空间基底；中央空白卷轴由实时地图纹理按桌面透视覆盖，近案面由待办队列摆放奏疏，不在其上覆盖四角金属 HUD | 生成底图不含固定奏疏，避免画面数量与业务队列失配；若后续拆层，应保持书房、案面和窗景的空间连续性 |
 | 2. 桌面奏疏实体 | `memorials/memorial-*.png` | 按待处理奏疏队列实例化；数量、紧急度和选中状态来自真实队列，点击后展开对应奏疏 | 五状态已从 `source/memorial-paper-states-source.png` 精确切分，无固定装饰数量 |
 | 3. 桌面舆图卷轴与全屏入口 | `maps/ming_1629-physical.png`、`maps/ming_1629_liaoxi-physical.png` | 两图由正式地图与 manifest 确定性派生，坐标/尺寸不变；桌面卷轴接受滚轮与点击，连续放大进入全屏舆图 | 正式 `assets/maps/generated/**` 不再手改；UI 纸色处理只写独立派生路径 |
-| 4. 册页、宣纸与内容承载 | `cards/ming-booklet-paper-ninepatch.png`、无金属纸张新版 | 奏疏正文、批示、确认和方案内容落在纸张 / 册页上，由 `StyleBoxTexture` 或独立纸页节点消费 | `cards/paper-card-ninepatch.png` 如有金属边线则降级为旧版，不作为默认 |
+| 4. 册页、宣纸与内容承载 | `cards/ming-booklet-paper-ninepatch.png`（Pillow 程序化成品） | 奏疏正文、批示、确认和方案内容落在纸张 / 册页上，由 `StyleBoxTexture` 或独立纸页节点消费；右上折角位于固定区内，中央纸面可安全拉伸 | 旧 ImageGen 批次无补证记录，已删除；不再引用 `paper-card-ninepatch.png` |
 | 5. 朱批、印玺与确认动作 | `buttons/seal-*.png` | 确认 / 批红表现为纸签上的朱砂落印，状态映射 `normal/hover/pressed/disabled` | 已替换为无金属四状态；`source/seal-paper-states-source.png` 保留生成溯源 |
-| 6. 通用操作按钮 | `buttons/primary-*.png` 的无金属新版 | 使用纸签、木签、竹简或墨线文字区域表达主次动作；交互状态靠明暗、墨色与朱砂克制区分 | 现有乌木 / 金属框按钮不得继续作为运行时默认 |
-| 7. 页签与分类签 | `tabs/tab-*.png` 的纸签 / 竹签新版 | 用于奏疏分类、地图图层和政务分组；应像册页签、题签或竹签，不占用大块地图空间 | 现有金属顶饰和包边页签待替换；旧横向状态图仅溯源 |
+| 6. 通用操作按钮 | `buttons/primary-*.png`（程序化纸签五态） | 使用纸签、木签、竹简或墨线文字区域表达主次动作；交互状态靠明暗、墨色与朱砂克制区分 | 已由 `source/primary-paper-states-source.png` 程序化重建并切图，不再使用旧乌木/金属框按钮 |
+| 7. 页签与分类签 | `tabs/tab-*.png`（程序化纸签五态） | 用于奏疏分类、地图图层和政务分组；应像册页签、题签或竹签，不占用大块地图空间 | 已由 `source/tab-paper-states-source.png` 程序化重建并切图，旧金属顶饰和包边页签不再使用 |
 | 8. 时间与速度控制 | `speed/speed-*.png` | 暂停与倍率使用竹木题签、墨痕和朱绳；状态清晰，但不做成金属仪表盘 | 已从 `source/speed-bamboo-states-transparent.png` 切分并验证透明四角 |
 | 9. 状态标记与功能图标 | `badges/`、`icons/` | FACT / DESIGN / OPEN、急报、军务、钱粮、消息等以印章、墨记、纸签或小型具象物表达；只在相关对象附近出现 | 五枚功能图标已换为纸本水墨具象图，无金属方框 |
 | 10. 小零件、地图 LOD 与选中反馈 | `parts/`，以及地图运行时标记 / 标签 | 滚动条、焦点、选择、提示和地图选中采用墨线、纸边、木竹或朱砂；地图负责 LOD、标签碰撞、标记聚合和边界 clamp | 九枚小件已换为墨线、纸签、竹木与朱砂方向，不再使用金属包边 |

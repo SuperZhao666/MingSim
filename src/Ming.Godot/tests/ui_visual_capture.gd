@@ -147,10 +147,13 @@ func _parse_capture_size(value: String) -> bool:
 	if normalized in ["1280", "1280x768"]:
 		capture_size = Vector2i(1280, 768)
 		return true
+	if normalized == "1280x960":
+		capture_size = Vector2i(1280, 960)
+		return true
 	if normalized in ["1600", "1600x960"]:
 		capture_size = Vector2i(1600, 960)
 		return true
-	_record_failure("UI_VISUAL_CAPTURE_INVALID_SIZE: '%s'; expected 1280, 1280x768, 1600, or 1600x960" % value)
+	_record_failure("UI_VISUAL_CAPTURE_INVALID_SIZE: '%s'; expected 1280, 1280x768, 1280x960, 1600, or 1600x960" % value)
 	return false
 
 

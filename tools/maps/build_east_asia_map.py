@@ -22,9 +22,9 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import struct
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
@@ -1416,8 +1416,21 @@ def build(config_path: Path) -> dict[str, Any]:
         "build_report": "build-report.json",
     }
 
-    with tempfile.TemporaryDirectory(prefix=".ming-map-build-", dir=output_dir.parent) as temporary:
-        temporary_dir = Path(temporary)
+    # 本环境（Windows 文件沙箱）下 tempfile.mkdtemp 的"建文件探测→删除→再 mkdir"
+    # 序列会让目标目录变为只读，目录内无法写入任何产物。这里用 pathlib 显式创建
+    # 一个进程唯一的临时目录，构建完成后整体清理，行为与 mkdtemp 等价。
+    temporary_dir: Path | None = None
+    for attempt in range(100):
+        candidate = output_dir.parent / f".ming-map-build-{os.getpid()}-{attempt}"
+        try:
+            candidate.mkdir()
+            temporary_dir = candidate
+            break
+        except FileExistsError:
+            continue
+    if temporary_dir is None:
+        raise BuildError("无法创建地图构建临时目录")
+    try:
         physical_path = temporary_dir / output_names["physical_base"]
         history_path = temporary_dir / output_names["history_overlay"]
         debug_path = temporary_dir / output_names["debug_map"]
@@ -1558,6 +1571,8 @@ def build(config_path: Path) -> dict[str, Any]:
         output_dir.mkdir(parents=True, exist_ok=True)
         for key, filename in output_names.items():
             os.replace(temporary_dir / filename, target_paths[key])
+    finally:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
 
     return {
         "output_dir": relative_path(repo_root, output_dir),

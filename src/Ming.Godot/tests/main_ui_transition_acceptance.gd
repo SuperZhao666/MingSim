@@ -93,10 +93,25 @@ func _init() -> void:
 	_assert(bool(root.get("Transitioning")) and bool(root.get("InputLocked")), "转场期间真实锁住输入")
 	_assert(blocker.visible and blocker.mouse_filter == Control.MOUSE_FILTER_STOP, "透明输入阻断层实际接管鼠标")
 
-	await create_timer(0.12).timeout
-	var enter_progress := float(root.get("TransitionProgress"))
+	# headless 帧率不稳定（可能只有几帧/秒），不能用固定 0.12s 恰好采到中间帧；
+	# 改为轮询捕捉真正处于中间态的样本，转场确实连续放大才算通过。
+	var enter_progress := 0.0
 	var enter_mid_rect := Rect2(map.position, map.size)
-	_assert(enter_progress > 0.0 and enter_progress < 1.0, "进入舆图存在可观测的连续中间进度")
+	var observed_enter_mid := false
+	var enter_elapsed := 0.0
+	while bool(root.get("Transitioning")) and enter_elapsed < 1.0:
+		enter_progress = float(root.get("TransitionProgress"))
+		enter_mid_rect = Rect2(map.position, map.size)
+		if enter_progress > 0.02 and enter_progress < 0.98 \
+				and not enter_mid_rect.is_equal_approx(desk_rect) \
+				and enter_mid_rect.size.x > desk_rect.size.x \
+				and enter_mid_rect.size.y > desk_rect.size.y:
+			observed_enter_mid = true
+			break
+		await create_timer(0.02).timeout
+		enter_elapsed += 0.02
+	_assert(observed_enter_mid, "进入舆图存在可观测的连续中间进度")
+	_assert(enter_progress > 0.0 and enter_progress < 1.0, "进入中间帧进度位于 0..1 之间")
 	_assert(not enter_mid_rect.is_equal_approx(desk_rect), "进入中间帧已离开桌面舆图矩形")
 	_assert(enter_mid_rect.size.x > desk_rect.size.x and enter_mid_rect.size.y > desk_rect.size.y, "进入中间帧连续放大舆图")
 	_assert(bool(root.get("InputLocked")), "进入中间帧仍保持输入锁")
@@ -108,10 +123,22 @@ func _init() -> void:
 
 	root.call("SetStrategicView", false)
 	_assert(not bool(root.get("StrategicView")) and bool(root.get("InputLocked")), "收卷开始时目标回到御案且锁住输入")
-	await create_timer(0.12).timeout
-	var exit_progress := float(root.get("TransitionProgress"))
+	var exit_progress := 0.0
 	var exit_mid_rect := Rect2(map.position, map.size)
-	_assert(exit_progress > 0.0 and exit_progress < 1.0, "收卷存在可观测的连续中间进度")
+	var observed_exit_mid := false
+	var exit_elapsed := 0.0
+	while bool(root.get("Transitioning")) and exit_elapsed < 1.0:
+		exit_progress = float(root.get("TransitionProgress"))
+		exit_mid_rect = Rect2(map.position, map.size)
+		if exit_progress > 0.02 and exit_progress < 0.98 \
+				and exit_mid_rect.size.x < strategic_rect.size.x \
+				and exit_mid_rect.size.x > desk_rect.size.x:
+			observed_exit_mid = true
+			break
+		await create_timer(0.02).timeout
+		exit_elapsed += 0.02
+	_assert(observed_exit_mid, "收卷存在可观测的连续中间进度")
+	_assert(exit_progress > 0.0 and exit_progress < 1.0, "收卷中间帧进度位于 0..1 之间")
 	_assert(exit_mid_rect.size.x < strategic_rect.size.x and exit_mid_rect.size.x > desk_rect.size.x, "收卷中间帧位于全屏与桌面矩形之间")
 	_assert(await _wait_for_transition(root, 2.0), "收卷归案转场在时限内完成")
 	_assert(not bool(root.get("InputLocked")) and not bool(root.get("Transitioning")), "收卷完成后解除输入锁")
