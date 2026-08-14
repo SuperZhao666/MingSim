@@ -43,7 +43,9 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
     {
         ArgumentNullException.ThrowIfNull(databasePath);
         _worldId = worldId;
-        _connection = new SqliteConnection($"Data Source={databasePath}");
+        // Pooling=false：Microsoft.Data.Sqlite 默认连接池会在 Dispose 后仍持有文件句柄，
+        // 导致删除/导出 .db 失败；单写者存档不需要连接池，关闭它让 Dispose 立即释放句柄。
+        _connection = new SqliteConnection($"Data Source={databasePath};Pooling=false");
         _connection.Open();
         InitializeSchema();
     }
@@ -264,7 +266,8 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             throw new FileNotFoundException("存档数据库不存在。", databasePath);
         }
 
-        using var connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadOnly");
+        // Pooling=false：恢复是只读的一次性操作，Dispose 后必须立即释放文件句柄（与写路径一致）。
+        using var connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadOnly;Pooling=false");
         connection.Open();
         using (var command = connection.CreateCommand())
         {

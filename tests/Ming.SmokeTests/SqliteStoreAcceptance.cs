@@ -303,6 +303,9 @@ internal static class SqliteStoreAcceptance
 
     private static void DeleteDbFiles(string dbPath)
     {
+        // 清理前清空连接池：即使某个连接串漏写 Pooling=false，池中句柄也会阻止删除，
+        // ClearAllPools 强制关闭全部池化连接，保证文件句柄释放后再删文件。
+        SqliteConnection.ClearAllPools();
         foreach (var suffix in new[] { "", "-wal", "-shm" })
         {
             var file = dbPath + suffix;
