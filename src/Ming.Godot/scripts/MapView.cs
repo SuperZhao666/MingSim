@@ -1,5 +1,6 @@
 using Godot;
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -16,6 +17,38 @@ namespace Ming.Godot;
 /// </summary>
 public partial class MapView : Control
 {
+    private readonly struct MapViewportTransform
+    {
+        public MapViewportTransform(Rect2 contentRect, float scale, Transform2D mapToViewport)
+        {
+            ContentRect = contentRect;
+            Scale = scale;
+            MapToViewport = mapToViewport;
+        }
+
+        public Rect2 ContentRect { get; }
+        public float Scale { get; }
+        public Transform2D MapToViewport { get; }
+        public Transform2D ViewportToMap => MapToViewport.AffineInverse();
+        public Rect2 ContentViewportRect => new(
+            MapToViewport * ContentRect.Position,
+            ContentRect.Size * Scale);
+    }
+
+    private readonly struct LabelLayout
+    {
+        public LabelLayout(PlaceDefinition place, Vector2 baseline, int fontSize)
+        {
+            Place = place;
+            Baseline = baseline;
+            FontSize = fontSize;
+        }
+
+        public PlaceDefinition Place { get; }
+        public Vector2 Baseline { get; }
+        public int FontSize { get; }
+    }
+
     /// <summary>
     /// 地图只保存呈现模式，不保存或修改任何世界状态。
     /// DeskOverview 是御案上的静态舆图；StrategicMap 是 MainUi 展开后的全屏策略地图。
@@ -132,9 +165,13 @@ public partial class MapView : Control
     private Vector2 _dragStart;
     private string _loadError = "地图清单不可用；已停止显示。";
     private MapMode _mode = MapMode.DeskOverview;
+    private static readonly Dictionary<string, string> PresentationPhysicalTextures = new(StringComparer.Ordinal)
+    {
+        ["res://assets/maps/generated/ming_1629/map-manifest.json"] = "res://assets/ui/generated/ming_ui_v2/maps/ming_1629-physical.png",
+        ["res://assets/maps/generated/ming_1629_liaoxi/map-manifest.json"] = "res://assets/ui/generated/ming_ui_v2/maps/ming_1629_liaoxi-physical.png"
+    };
 
     public event Action<string>? PlaceSelected;
-    public event Action<MapMode>? ModeChanged;
     public event Action? ExitRequested;
     public string ManifestPath { get; private set; } = "";
     public bool LoadedFromManifest => _manifest != null && _physicalTexture != null && _historyTexture != null;
@@ -142,6 +179,11 @@ public partial class MapView : Control
     public bool RoutesVisible => _routesVisible;
     public float Zoom => _zoom;
     public string SelectedPlaceId => _selectedPlaceId;
+    public string SelectedPlaceSummary => _placesById.TryGetValue(_selectedPlaceId, out var place)
+        ? FormatPlaceSemanticSummary(place)
+        : "OPEN · 未选择有效地图节点";
+    public string SemanticLegend => "空心环=OPEN/modern_anchor/approximate_point；虚线=INFERENCE；实线=FACT";
+    public string RouteSemanticLegend => BuildRouteSemanticLegend();
     public string GeometryDepictDate => _manifest?.ResearchBaseline?.GeometryDepictDate ?? "OPEN";
     public string SnapshotDate => _manifest?.HistoricalContent?.SnapshotDate ?? "OPEN";
     public string HistoricalWarning => _manifest?.HistoricalContent?.Warning ?? _loadError;
@@ -155,7 +197,9 @@ public partial class MapView : Control
     public int PlaceCount => _manifest?.Places?.Count ?? 0;
     public int RouteCount => _manifest?.Routes?.Count ?? 0;
     public int VisiblePlaceCount => _manifest?.Places?.Count(ShouldDrawPlace) ?? 0;
-    public int VisibleLabelCount => _manifest?.Places?.Count(ShouldDrawLabel) ?? 0;
+    public int VisibleLabelCount => TryGetMapViewportTransform(out var transform)
+        ? BuildVisibleLabelLayout(transform).Count
+        : 0;
 
     public override void _Ready()
     {
@@ -198,7 +242,12 @@ public partial class MapView : Control
 
             var physicalPath = candidate.Assets!["physical_base"];
             var historyPath = candidate.Assets!["history_overlay"];
-            var physicalTexture = GD.Load<Texture2D>(physicalPath);
+            // 正式地图及其 manifest 始终由地图构建器校验；UI 纸本处理位于独立派生路径，
+            // 不反写、不污染 assets/maps/generated/** 的研究与构建契约。
+            var presentationPhysicalPath = PresentationPhysicalTextures.TryGetValue(manifestPath, out var derivedPath)
+                ? derivedPath
+                : physicalPath;
+            var physicalTexture = GD.Load<Texture2D>(presentationPhysicalPath);
             var historyTexture = GD.Load<Texture2D>(historyPath);
             if (physicalTexture == null || historyTexture == null)
             {
@@ -207,16 +256,29 @@ public partial class MapView : Control
                 return;
             }
 
-            // 只有候选清单、资源哈希、纹理和全部索引都通过校验后，才一次性提交呈现状态。
+            if (physicalTexture.GetWidth() != candidate.Canvas!.Width || physicalTexture.GetHeight() != candidate.Canvas.Height ||
+                historyTexture.GetWidth() != candidate.Canvas.Width || historyTexture.GetHeight() != candidate.Canvas.Height)
+            {
+                _loadError = "地图纹理尺寸与清单画布不一致；已停止显示。";
+                GD.PushWarning($"地图纹理尺寸校验失败，已安全关闭地图层：{manifestPath}");
+                return;
+            }
+
+            var candidatePlaces = candidate.Places!.ToDictionary(place => place.Id!, StringComparer.Ordinal);
+            var candidateSelectedPlaceId = candidatePlaces.ContainsKey(_selectedPlaceId)
+                ? _selectedPlaceId
+                : candidate.Places![0].Id!;
+
+            // 候选清单、两张必需图片的文件哈希/尺寸、导入纹理尺寸和全部索引均通过后，
+            // 才一次性发布给绘制与输入路径；此前的任何失败都只会留下中性错误层。
             _manifest = candidate;
             _physicalTexture = physicalTexture;
             _historyTexture = historyTexture;
-            foreach (var place in candidate.Places!)
+            foreach (var pair in candidatePlaces)
             {
-                _placesById.Add(place.Id!, place);
+                _placesById.Add(pair.Key, pair.Value);
             }
-            if (!_placesById.ContainsKey(_selectedPlaceId))
-                _selectedPlaceId = candidate.Places![0].Id!;
+            _selectedPlaceId = candidateSelectedPlaceId;
             _loadError = "";
             ClampPan();
         }
@@ -251,6 +313,13 @@ public partial class MapView : Control
         QueueRedraw();
     }
 
+    public string GetRouteSemanticSummary(string routeId)
+    {
+        var route = _manifest?.Routes?.FirstOrDefault(candidate => string.Equals(candidate.Id, routeId, StringComparison.Ordinal));
+        if (route == null) return "OPEN · 未找到路线";
+        return $"{RouteKnowledgeClass(route)} · review_status={route.ReviewStatus} · evidence_status={route.EvidenceStatus} · claim_status={route.ClaimStatus}";
+    }
+
     public void ResetView()
     {
         _zoom = MinimumStrategicZoom;
@@ -270,7 +339,6 @@ public partial class MapView : Control
         _pan = Vector2.Zero;
         _isDragging = false;
         ClampPan();
-        ModeChanged?.Invoke(_mode);
         QueueRedraw();
     }
 
@@ -285,7 +353,6 @@ public partial class MapView : Control
         _pan = Vector2.Zero;
         _isDragging = false;
         ClampPan();
-        ModeChanged?.Invoke(_mode);
         QueueRedraw();
     }
 
@@ -356,13 +423,12 @@ public partial class MapView : Control
             return;
         }
 
-        var contentRect = _manifest.Canvas!.ContentRect!;
-        var content = new Rect2((float)contentRect[0], (float)contentRect[1], (float)contentRect[2], (float)contentRect[3]);
-        ClampPan();
-        var viewport = new Rect2(0, 0, Size.X, Size.Y);
-        var fit = CalculateFit(content.Size) * _zoom;
-        var origin = viewport.Position + (viewport.Size - content.Size * fit) / 2f + _pan;
-        var transform = MakeTransform(fit, origin - content.Position * fit);
+        if (!TryGetMapViewportTransform(out var mapTransform))
+        {
+            DrawString(ThemeDB.FallbackFont, new Vector2(26, 48), "地图变换不可用；已停止显示。", HorizontalAlignment.Left, -1, 18, new Color("#F4E9D8"));
+            return;
+        }
+        var transform = mapTransform.MapToViewport;
 
         DrawTextureTransform(_physicalTexture!, transform, new Color("#D8CFAD"));
         // 矿物青绿只给证据层一层克制的罩染，不让 GIS 蓝色成为主视觉。
@@ -373,11 +439,17 @@ public partial class MapView : Control
             foreach (var route in _manifest.Routes!)
             {
                 for (var i = 1; i < route.Points!.Count; i++)
-                    DrawDashedLine(transform * ToVector(route.Points[i - 1]), transform * ToVector(route.Points[i]), new Color("#A23C32"), Mathf.Clamp(1.35f * _zoom, 1.2f, 2.2f), 7.0f, true);
+                {
+                    var from = transform * ToVector(route.Points[i - 1]);
+                    var to = transform * ToVector(route.Points[i]);
+                    if (IsInferenceRoute(route))
+                        DrawDashedLine(from, to, new Color(0.55f, 0.19f, 0.16f, 0.76f), Mathf.Clamp(1.25f * _zoom, 1.1f, 2.0f), 7.0f, true);
+                    else
+                        DrawLine(from, to, new Color("#6F1F1B"), Mathf.Clamp(1.55f * _zoom, 1.4f, 2.5f), true);
+                }
             }
         }
 
-        var labelCandidates = new List<(PlaceDefinition Place, Vector2 Point, bool Selected)>();
         foreach (var place in _manifest.Places!)
         {
             if (!ShouldDrawPlace(place)) continue;
@@ -385,45 +457,36 @@ public partial class MapView : Control
             var selected = place.Id == _selectedPlaceId;
             // 标记与地图共同缩放，但限制屏幕尺寸；远景不会互相覆盖，近景仍可辨认。
             var radius = Mathf.Clamp((selected ? 4.4f : 3.1f) * _zoom, selected ? 4.4f : 3.1f, selected ? 8.2f : 5.8f);
-            DrawCircle(point, radius + 2.0f, new Color(0.12f, 0.10f, 0.07f, 0.82f));
-            DrawCircle(point, radius, selected ? new Color("#A83B32") : new Color("#E7D9B6"));
-            DrawArc(point, radius + 1.8f, 0, Mathf.Tau, 24, selected ? new Color("#D5A54B") : new Color("#547C73"), 1.15f, true);
-            if (ShouldDrawLabel(place)) labelCandidates.Add((place, point, selected));
-        }
-
-        var occupiedLabels = new List<Rect2>();
-        foreach (var candidate in labelCandidates.OrderBy(item => PlacePriority(item.Place)))
-        {
-            var place = candidate.Place;
-            var point = candidate.Point;
-            var selected = candidate.Selected;
-            var labelOffset = place.Id switch
+            if (IsApproximatePoint(place))
             {
-                "beijing" => new Vector2(-18, -18),
-                "tongzhou" => new Vector2(14, 22),
-                "shanhaiguan" => new Vector2(14, 20),
-                "ningyuan" => new Vector2(-48, -18),
-                "jinzhou" => new Vector2(16, -18),
-                "dengzhou" => new Vector2(-14, 24),
-                _ => new Vector2(12, -10)
-            };
-            var labelSize = Mathf.RoundToInt(Mathf.Clamp((selected ? 12f : 10f) * Mathf.Sqrt(_zoom), 10f, selected ? 16f : 14f));
-            var textSize = ThemeDB.FallbackFont.GetStringSize(place.NameZh!, HorizontalAlignment.Left, -1, labelSize);
-            var labelPosition = point + labelOffset;
-            var labelRect = new Rect2(labelPosition.X - 2, labelPosition.Y - textSize.Y, textSize.X + 4, textSize.Y + 3);
-            var viewportRect = new Rect2(6, 6, Size.X - 12, Size.Y - 12);
-            if (!viewportRect.Encloses(labelRect)) continue;
-            if (occupiedLabels.Any(rect => rect.Intersects(labelRect))) continue;
-            occupiedLabels.Add(labelRect);
-            var ink = selected ? new Color("#7E231F") : new Color("#26241F");
-            DrawStringOutline(ThemeDB.FallbackFont, labelPosition, place.NameZh!, HorizontalAlignment.Left, -1, labelSize, 1, new Color(0.90f, 0.85f, 0.70f, 0.72f));
-            DrawString(ThemeDB.FallbackFont, labelPosition, place.NameZh!, HorizontalAlignment.Left, -1, labelSize, ink);
+                // 空心双环明确表示“现代锚点上的近似位置”，不能误读为精确城址。
+                DrawArc(point, radius + 1.8f, 0, Mathf.Tau, 28, new Color(0.12f, 0.10f, 0.07f, 0.88f), 2.0f, true);
+                DrawArc(point, radius - 0.8f, 0, Mathf.Tau, 24, selected ? new Color("#D5A54B") : new Color("#6C9288"), 1.35f, true);
+            }
+            else
+            {
+                // 只有未来清单明确声明的精确事实点才使用实心标记。
+                DrawCircle(point, radius + 1.8f, new Color(0.12f, 0.10f, 0.07f, 0.88f));
+                DrawCircle(point, radius, selected ? new Color("#A83B32") : new Color("#E7D9B6"));
+            }
         }
 
-        DrawStyleBox(MakePanel(new Color(0.86f, 0.80f, 0.63f, 0.88f), new Color("#5E5040"), 1, 2), new Rect2(18, Size.Y - 54, 382, 34));
+        foreach (var layout in BuildVisibleLabelLayout(mapTransform))
+        {
+            var place = layout.Place;
+            var selected = place.Id == _selectedPlaceId;
+            var ink = selected ? new Color("#7E231F") : new Color("#26241F");
+            DrawStringOutline(ThemeDB.FallbackFont, layout.Baseline, place.NameZh!, HorizontalAlignment.Left, -1, layout.FontSize, 1, new Color(0.90f, 0.85f, 0.70f, 0.72f));
+            DrawString(ThemeDB.FallbackFont, layout.Baseline, place.NameZh!, HorizontalAlignment.Left, -1, layout.FontSize, ink);
+        }
+
+        var legendWidth = Mathf.Max(120f, Mathf.Min(Size.X - 36f, 1180f));
+        DrawStyleBox(MakePanel(new Color(0.86f, 0.80f, 0.63f, 0.90f), new Color("#5E5040"), 1, 2), new Rect2(18, Size.Y - 96, legendWidth, 78));
         var geometryDate = string.IsNullOrWhiteSpace(GeometryDepictDate) ? "OPEN" : GeometryDepictDate;
         var snapshotDate = string.IsNullOrWhiteSpace(SnapshotDate) ? "OPEN" : SnapshotDate;
-        DrawString(ThemeDB.FallbackFont, new Vector2(32, Size.Y - 32), $"呈现层 · {geometryDate} 近似基线 · {snapshotDate} OPEN", HorizontalAlignment.Left, -1, 13, new Color("#332B20"));
+        DrawString(ThemeDB.FallbackFont, new Vector2(32, Size.Y - 73), $"{SemanticLegend} · 呈现层 {geometryDate}/{snapshotDate}", HorizontalAlignment.Left, -1, 12, new Color("#332B20"));
+        DrawString(ThemeDB.FallbackFont, new Vector2(32, Size.Y - 52), RouteSemanticLegend, HorizontalAlignment.Left, -1, 11, new Color("#332B20"));
+        DrawString(ThemeDB.FallbackFont, new Vector2(32, Size.Y - 31), SelectedPlaceSummary, HorizontalAlignment.Left, -1, 11, new Color("#332B20"));
     }
 
     private static Vector2 ToVector(MapPoint point) => new((float)point.MapX, (float)point.MapY);
@@ -435,19 +498,15 @@ public partial class MapView : Control
 
     private void SelectPlaceAt(Vector2 position)
     {
-        if (_manifest?.Canvas?.ContentRect is not { Count: 4 } contentRect) return;
-        var content = new Rect2((float)contentRect[0], (float)contentRect[1], (float)contentRect[2], (float)contentRect[3]);
-        ClampPan();
-        var fit = Mathf.Min(Size.X / content.Size.X, Size.Y / content.Size.Y) * _zoom;
-        var origin = (Size - content.Size * fit) / 2f + _pan;
-        var transform = MakeTransform(fit, origin - content.Position * fit);
-        var inverse = transform.AffineInverse();
-        var mapPoint = inverse * position;
-        var hitRadius = Mathf.Clamp(12f / fit, 8f, 20f);
+        if (_manifest == null || !TryGetMapViewportTransform(out var transform)) return;
+        var mapPoint = transform.ViewportToMap * position;
+        var hitRadius = 14f / transform.Scale;
         var nearest = "";
         var nearestDistance = hitRadius;
         foreach (var place in _manifest.Places!)
         {
+            // 交互候选与绘制 LOD 完全一致；未画出的节点绝不可能抢走点击。
+            if (!ShouldDrawPlace(place)) continue;
             var distance = mapPoint.DistanceTo(new Vector2((float)place.MapX, (float)place.MapY));
             if (distance < nearestDistance)
             {
@@ -485,15 +544,115 @@ public partial class MapView : Control
         _ => 5
     };
 
+    private List<LabelLayout> BuildVisibleLabelLayout(MapViewportTransform transform)
+    {
+        var layouts = new List<LabelLayout>();
+        if (_manifest?.Places == null || Size.X <= 12 || Size.Y <= 12) return layouts;
+
+        var occupied = new List<Rect2>();
+        var viewportRect = new Rect2(6, 6, Size.X - 12, Size.Y - 12);
+        var candidates = _manifest.Places
+            .Where(ShouldDrawLabel)
+            .OrderBy(PlacePriority);
+
+        foreach (var place in candidates)
+        {
+            var point = transform.MapToViewport * new Vector2((float)place.MapX, (float)place.MapY);
+            var selected = place.Id == _selectedPlaceId;
+            var fontSize = Mathf.RoundToInt(Mathf.Clamp((selected ? 12f : 10f) * Mathf.Sqrt(_zoom), 10f, selected ? 16f : 14f));
+            var textSize = ThemeDB.FallbackFont.GetStringSize(place.NameZh!, HorizontalAlignment.Left, -1, fontSize);
+            var preferred = place.Id switch
+            {
+                "beijing" => new Vector2(-18, -18),
+                "tongzhou" => new Vector2(14, 22),
+                "shanhaiguan" => new Vector2(14, 20),
+                "ningyuan" => new Vector2(-48, -18),
+                "jinzhou" => new Vector2(16, -18),
+                "dengzhou" => new Vector2(-14, 24),
+                _ => new Vector2(12, -10)
+            };
+            var alternatives = new[]
+            {
+                preferred,
+                new Vector2(12, -10),
+                new Vector2(12, textSize.Y + 8),
+                new Vector2(-textSize.X - 12, -10),
+                new Vector2(-textSize.X - 12, textSize.Y + 8),
+                new Vector2(-textSize.X / 2f, -16),
+                new Vector2(-textSize.X / 2f, textSize.Y + 15)
+            };
+
+            foreach (var offset in alternatives)
+            {
+                var baseline = point + offset;
+                var labelRect = new Rect2(baseline.X - 2, baseline.Y - textSize.Y, textSize.X + 4, textSize.Y + 3);
+                if (!viewportRect.Encloses(labelRect)) continue;
+                if (occupied.Any(rect => rect.Intersects(labelRect))) continue;
+                occupied.Add(labelRect);
+                layouts.Add(new LabelLayout(place, baseline, fontSize));
+                break;
+            }
+        }
+
+        return layouts;
+    }
+
+    private bool TryGetMapViewportTransform(out MapViewportTransform transform)
+    {
+        transform = default;
+        if (_manifest?.Canvas?.ContentRect is not { Count: 4 } contentRect || Size.X <= 0 || Size.Y <= 0)
+            return false;
+
+        var content = new Rect2(
+            (float)contentRect[0],
+            (float)contentRect[1],
+            (float)contentRect[2],
+            (float)contentRect[3]);
+        ClampPan();
+        var scale = CalculateCoverScale(content.Size) * _zoom;
+        if (!float.IsFinite(scale) || scale <= 0) return false;
+        var contentViewportOrigin = (Size - content.Size * scale) / 2f + _pan;
+        var mapToViewport = MakeTransform(scale, contentViewportOrigin - content.Position * scale);
+        transform = new MapViewportTransform(content, scale, mapToViewport);
+        return true;
+    }
+
+    private static bool IsApproximatePoint(PlaceDefinition place) =>
+        string.Equals(place.MapRepresentation, "approximate_point", StringComparison.Ordinal);
+
+    private static bool IsInferenceRoute(RouteDefinition route) =>
+        route.ClaimStatus?.Contains("inference", StringComparison.OrdinalIgnoreCase) == true;
+
+    private static string PlaceKnowledgeClass(PlaceDefinition place)
+    {
+        var evidenceClass = string.Equals(place.EvidenceStatus, "accepted_evidence", StringComparison.Ordinal)
+            ? "FACT"
+            : "INFERENCE";
+        var openClass = string.Equals(place.HistoricalSiteStatus, "open", StringComparison.OrdinalIgnoreCase)
+            ? "OPEN"
+            : "";
+        return string.IsNullOrEmpty(openClass) ? evidenceClass : $"{evidenceClass}/{openClass}";
+    }
+
+    private static string RouteKnowledgeClass(RouteDefinition route) => IsInferenceRoute(route) ? "INFERENCE" : "FACT";
+
+    private string BuildRouteSemanticLegend()
+    {
+        if (_manifest?.Routes is not { Count: > 0 } routes) return "路线 OPEN";
+        var statuses = routes
+            .Select(route => $"{RouteKnowledgeClass(route)}(claim_status={route.ClaimStatus}, evidence_status={route.EvidenceStatus})")
+            .Distinct(StringComparer.Ordinal);
+        return "路线：" + string.Join("；", statuses);
+    }
+
+    private static string FormatPlaceSemanticSummary(PlaceDefinition place) =>
+        $"{place.NameZh} [{PlaceKnowledgeClass(place)}] · review_status={place.ReviewStatus} · evidence_status={place.EvidenceStatus} · coordinate_epoch={place.CoordinateEpoch} · map_representation={place.MapRepresentation} · historical_site_status={place.HistoricalSiteStatus}";
+
     public Vector2 GetViewportPointForPlace(string placeId)
     {
-        if (_manifest?.Canvas?.ContentRect is not { Count: 4 } contentRect || !_placesById.TryGetValue(placeId, out var place))
+        if (!_placesById.TryGetValue(placeId, out var place) || !TryGetMapViewportTransform(out var transform))
             return new Vector2(-1, -1);
-        var content = new Rect2((float)contentRect[0], (float)contentRect[1], (float)contentRect[2], (float)contentRect[3]);
-        ClampPan();
-        var fit = CalculateFit(content.Size) * _zoom;
-        var origin = (Size - content.Size * fit) / 2f + _pan;
-        return MakeTransform(fit, origin - content.Position * fit) * new Vector2((float)place.MapX, (float)place.MapY);
+        return transform.MapToViewport * new Vector2((float)place.MapX, (float)place.MapY);
     }
 
     private void ClampPan()
@@ -507,7 +666,7 @@ public partial class MapView : Control
             _zoom = MinimumStrategicZoom;
             _pan = Vector2.Zero;
         }
-        var fit = CalculateFit(content.Size) * _zoom;
+        var fit = CalculateCoverScale(content.Size) * _zoom;
         var scaledSize = content.Size * fit;
         // 边缘约束：缩放内容比视口大时，左右/上下边缘最多刚好贴住视口；
         // 内容比视口小时则固定居中，不能继续拖出清单之外的海面。
@@ -519,7 +678,7 @@ public partial class MapView : Control
             Mathf.Clamp(_pan.Y, -maxPan.Y, maxPan.Y));
     }
 
-    private float CalculateFit(Vector2 contentSize)
+    private float CalculateCoverScale(Vector2 contentSize)
     {
         if (contentSize.X <= 0 || contentSize.Y <= 0 || Size.X <= 0 || Size.Y <= 0)
             return 0;
@@ -530,12 +689,7 @@ public partial class MapView : Control
 
     private Rect2 CalculateContentViewportRect()
     {
-        if (_manifest?.Canvas?.ContentRect is not { Count: 4 } contentRect || Size.X <= 0 || Size.Y <= 0)
-            return new Rect2();
-        var contentSize = new Vector2((float)contentRect[2], (float)contentRect[3]);
-        ClampPan();
-        var scaledSize = contentSize * CalculateFit(contentSize) * _zoom;
-        return new Rect2((Size - scaledSize) / 2f + _pan, scaledSize);
+        return TryGetMapViewportTransform(out var transform) ? transform.ContentViewportRect : new Rect2();
     }
 
     private bool ValidateManifest(Manifest manifest, out string error)
@@ -594,7 +748,7 @@ public partial class MapView : Control
             if (string.IsNullOrWhiteSpace(route.Id) || !routeIds.Add(route.Id) || string.IsNullOrWhiteSpace(route.FromPlaceId) ||
                 string.IsNullOrWhiteSpace(route.ToPlaceId) || route.FromPlaceId == route.ToPlaceId || !placeIds.Contains(route.FromPlaceId) ||
                 !placeIds.Contains(route.ToPlaceId) || route.Points is not { Count: >= 2 } points || route.ReviewStatus != "accepted" ||
-                route.EvidenceStatus != "accepted" || route.ClaimStatus != "reviewed_inference")
+                route.EvidenceStatus != "accepted" || route.ClaimStatus is not ("reviewed_inference" or "reviewed_fact" or "accepted_fact"))
             {
                 error = "地图路线契约或历史状态无效；已停止显示。";
                 return false;
@@ -617,6 +771,20 @@ public partial class MapView : Control
                 return false;
             }
         }
+
+        if (!assets.TryGetValue("physical_base", out var physicalPath) || !assets.TryGetValue("history_overlay", out var historyPath) ||
+            string.IsNullOrWhiteSpace(physicalPath) || string.IsNullOrWhiteSpace(historyPath) ||
+            !physicalPath.StartsWith("res://", StringComparison.Ordinal) || !historyPath.StartsWith("res://", StringComparison.Ordinal))
+        {
+            error = "地图清单缺少可显示的底图资源；已停止显示。";
+            return false;
+        }
+
+        // 两张运行时必需纹理优先做存在性、必需哈希、实际哈希和文件尺寸校验。
+        // 这样“缺少必需哈希”不会被其他可选资产的遍历掩盖。
+        if (!ValidateRequiredRasterAsset(physicalPath, hashes, manifest.Canvas, "物理底图", out error) ||
+            !ValidateRequiredRasterAsset(historyPath, hashes, manifest.Canvas, "历史叠加层", out error))
+            return false;
 
         foreach (var pair in hashes)
         {
@@ -644,13 +812,63 @@ public partial class MapView : Control
                 return false;
             }
         }
-        if (!assets.TryGetValue("physical_base", out var physicalPath) || !assets.TryGetValue("history_overlay", out var historyPath) ||
-            !physicalPath.StartsWith("res://", StringComparison.Ordinal) || !historyPath.StartsWith("res://", StringComparison.Ordinal))
+        return true;
+    }
+
+    private static bool ValidateRequiredRasterAsset(
+        string assetPath,
+        IReadOnlyDictionary<string, string> hashes,
+        CanvasDefinition canvas,
+        string role,
+        out string error)
+    {
+        error = "地图清单不可用；已停止显示。";
+        var fileName = Path.GetFileName(assetPath);
+        if (string.IsNullOrWhiteSpace(fileName) || !hashes.TryGetValue(fileName, out var expectedHash) ||
+            string.IsNullOrWhiteSpace(expectedHash) || expectedHash.Length != 64 || expectedHash.Any(character => !Uri.IsHexDigit(character)))
         {
-            error = "地图清单缺少可显示的底图资源；已停止显示。";
+            error = $"{role}缺少必需的 SHA-256；已停止显示。";
             return false;
         }
+
+        var absolutePath = ProjectSettings.GlobalizePath(assetPath);
+        if (!File.Exists(absolutePath))
+        {
+            error = $"{role}文件不可用；已停止显示。";
+            return false;
+        }
+
+        var actualHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(absolutePath))).ToLowerInvariant();
+        if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+        {
+            error = $"{role} SHA-256 不匹配；已停止显示。";
+            return false;
+        }
+
+        if (!TryReadPngDimensions(absolutePath, out var width, out var height) || width != canvas.Width || height != canvas.Height)
+        {
+            error = $"{role}文件尺寸与清单画布不一致；已停止显示。";
+            return false;
+        }
+
         return true;
+    }
+
+    private static bool TryReadPngDimensions(string path, out int width, out int height)
+    {
+        width = 0;
+        height = 0;
+        Span<byte> header = stackalloc byte[24];
+        using var stream = File.OpenRead(path);
+        if (stream.Read(header) != header.Length) return false;
+        if (header[0] != 0x89 || header[1] != 0x50 || header[2] != 0x4E || header[3] != 0x47 ||
+            header[4] != 0x0D || header[5] != 0x0A || header[6] != 0x1A || header[7] != 0x0A ||
+            header[12] != 0x49 || header[13] != 0x48 || header[14] != 0x44 || header[15] != 0x52)
+            return false;
+
+        width = BinaryPrimitives.ReadInt32BigEndian(header[16..20]);
+        height = BinaryPrimitives.ReadInt32BigEndian(header[20..24]);
+        return width > 0 && height > 0;
     }
 
     private void DrawTextureTransform(Texture2D texture, Transform2D transform, Color modulate)

@@ -1,5 +1,47 @@
 # Ming UI V2 资产方向与消费契约
 
+## 资产账本与确定性工具
+
+`asset-ledger.json` 是本 PR 实际交付的 55 张 PNG 的机器可读快照。本机未跟踪的旧批次图不属于交付清单，也不会被工具覆盖。账本保存文件字节 SHA-256、解码像素 SHA-256、尺寸、模式、角色、工具/日期/生成 ID、来源、切片矩形与许可裁决。`OPEN` 只表示仓库中没有足够证据，**不是**许可授权或来源证明。
+
+```powershell
+# 当前目录、字节哈希、像素哈希、元数据和可证明切片一次性核验
+python tools/ui/ming_ui_assets.py verify
+
+# 在两个临时目录重建并比较字节哈希；不会写入仓库
+python tools/ui/ming_ui_assets.py repeatability
+
+# 仅在资产有意变更后刷新规范账本；该命令只能写 canonical ledger
+python tools/ui/ming_ui_assets.py snapshot-ledger
+
+# 如需查看重建结果，输出目录必须位于仓库外
+python tools/ui/ming_ui_assets.py build --output "$env:TEMP\mingsim-ui-rebuild"
+```
+
+当前覆盖：8 张交付源图、29 张“精确切图 + 一像素 Alpha 收边 + 透明像素 RGB 清零”的确定性派生图、2 张坐标不变的确定性地图派生图、15 张来源/编辑过程尚不能从仓库重建的 external 成品，以及 1 张有明确 ImageGen 编辑记录的成品。目录内当前没有 preview 角色 PNG；`assets/ui/previews/` 不属于本账本根目录。31 张可重建派生图连续两次构建的文件 SHA 必须一致。
+
+透明切片的收边已进入规范构建：只收缩外沿一个像素、把极低 Alpha 置零并清空对应 RGB，避免缩放采样把旧红/黄/绿底色带回画面；主体纸色、墨色和朱砂不参与颜色替换。`--clean-green-fringe` 仅保留为仓库外额外试验开关，规范账本不依赖它。
+
+### 正式地图到 UI 派生图
+
+`derive-map` 校验正式 `physical-base.png` 的 2400×1600 尺寸、manifest SHA-256 与 `canvas.content_rect`，在不改变画布坐标的前提下应用固定的 `parchment-muted-v1` 纸色处理。它硬性拒绝写入 `assets/maps/generated/**`，也拒绝覆盖已有输出。
+
+```powershell
+# 只在内存中派生并报告输出哈希，不创建 PNG
+python tools/ui/ming_ui_assets.py derive-map `
+  --physical-base assets/maps/generated/ming_1629/physical-base.png `
+  --manifest assets/maps/generated/ming_1629/map-manifest.json `
+  --dry-run
+
+# 真正输出时由调用者明确指定新路径；正式地图与 manifest 不会被修改
+python tools/ui/ming_ui_assets.py derive-map `
+  --physical-base assets/maps/generated/ming_1629/physical-base.png `
+  --manifest assets/maps/generated/ming_1629/map-manifest.json `
+  --output "$env:TEMP\ming-1629-ui-map.png"
+```
+
+`backgrounds/ming-imperial-study-desk-map.png` 当前记录为 2026-08-14 的 built-in ImageGen `precise-object-edit`，生成 ID 为 `exec-46924c8c-6d4a-46cf-94ed-b17ed57ffa25`；它移除了伪字形细节与机械/金属器物。被覆盖的上一版没有保存在本目录，因此该项可以验证当前哈希和生成记录，但不能仅凭此目录重演编辑。
+
 本目录服务于 Godot 中的晚明策略游戏界面。最新目标不是在地图四周叠一套“游戏边框”，而是让玩家先置身于御书房、坐在御案前，再从案上的实体进入政务与舆图：空间本身就是总界面，UI 组件应像御案上的纸本文书、木竹器物和朱批印记，而不是悬浮在画面上的现代卡片。
 
 ## 总体体验
@@ -43,7 +85,7 @@
 |---|---|---|---|
 | 1. 御书房与御案空间 | `backgrounds/ming-imperial-study-desk-map.png` | 作为总界面空间基底；中央空白卷轴由实时地图纹理按桌面透视覆盖，近案面由待办队列摆放奏疏，不在其上覆盖四角金属 HUD | 生成底图不含固定奏疏，避免画面数量与业务队列失配；若后续拆层，应保持书房、案面和窗景的空间连续性 |
 | 2. 桌面奏疏实体 | `memorials/memorial-*.png` | 按待处理奏疏队列实例化；数量、紧急度和选中状态来自真实队列，点击后展开对应奏疏 | 五状态已从 `source/memorial-paper-states-source.png` 精确切分，无固定装饰数量 |
-| 3. 桌面舆图卷轴与全屏入口 | 后续无金属卷轴 / 铺图资产；地图纹理位于地图资产目录 | 桌面卷轴接受滚轮与点击；连续放大进入全屏舆图，缩回阈值返回御案 | 不使用金属地图框或固定装饰环作为主入口；旧图只供构图参考 |
+| 3. 桌面舆图卷轴与全屏入口 | `maps/ming_1629-physical.png`、`maps/ming_1629_liaoxi-physical.png` | 两图由正式地图与 manifest 确定性派生，坐标/尺寸不变；桌面卷轴接受滚轮与点击，连续放大进入全屏舆图 | 正式 `assets/maps/generated/**` 不再手改；UI 纸色处理只写独立派生路径 |
 | 4. 册页、宣纸与内容承载 | `cards/ming-booklet-paper-ninepatch.png`、无金属纸张新版 | 奏疏正文、批示、确认和方案内容落在纸张 / 册页上，由 `StyleBoxTexture` 或独立纸页节点消费 | `cards/paper-card-ninepatch.png` 如有金属边线则降级为旧版，不作为默认 |
 | 5. 朱批、印玺与确认动作 | `buttons/seal-*.png` | 确认 / 批红表现为纸签上的朱砂落印，状态映射 `normal/hover/pressed/disabled` | 已替换为无金属四状态；`source/seal-paper-states-source.png` 保留生成溯源 |
 | 6. 通用操作按钮 | `buttons/primary-*.png` 的无金属新版 | 使用纸签、木签、竹简或墨线文字区域表达主次动作；交互状态靠明暗、墨色与朱砂克制区分 | 现有乌木 / 金属框按钮不得继续作为运行时默认 |

@@ -1,23 +1,19 @@
 using Godot;
 using System;
 using System.Collections.Generic;
+using Ming.Godot.ReadModels;
 
 namespace Ming.Godot;
 
 /// <summary>
 /// 御书房页面壳：玩家面对御案，桌面物件才是入口；中央舆图滚轮放大后进入策略地图。
-/// 这里仍只改展示状态，不推进 GameTime，也不写 WorldState。
+/// 这里仍只改展示状态，不推进 GameTime，也不写任何游戏权威状态。
 /// </summary>
 public partial class MainUi : Control
 {
-    private sealed record MemorialEntry(string Id, string Title, string Meta, string Summary, string Status);
-
-    private readonly List<MemorialEntry> _pendingMemorials =
-    [
-        new("liaoxi", "辽西急报", "宁远 · 卯初送达", "前线粮秣告急，须核漕运与陆路转输。", "OPEN"),
-        new("revenue", "户部请旨", "京师 · 昨日申刻", "漕运拨款待决定，容量与承办人尚待核验。", "DESIGN"),
-        new("censor", "御史弹章", "京师 · 昨日辰刻", "证据不足，暂列待复核。", "OPEN")
-    ];
+    private const float TransitionDurationSeconds = 0.42f;
+    private static readonly Rect2 DeskMapRect = new(new Vector2(337, 458), new Vector2(1021, 254));
+    private static readonly Rect2 StrategicMapRect = new(new Vector2(0, 72), new Vector2(1600, 888));
 
     private readonly Dictionary<string, string> _placeDescriptions = new()
     {
@@ -31,22 +27,41 @@ public partial class MainUi : Control
 
     private MapView _map = null!;
     private Control _deskLayer = null!;
+    private Control _memorialLayer = null!;
     private Control _mapLayer = null!;
+    private Control _transitionInputBlocker = null!;
     private Panel _memorialSheet = null!;
     private Panel _decreeSheet = null!;
     private Label _sheetTitle = null!;
     private Label _sheetMeta = null!;
     private Label _sheetBody = null!;
     private Label _notice = null!;
+    private Label _readModelNotice = null!;
     private Label _mapNotice = null!;
     private Label _selectedPlace = null!;
+    private TextureRect _selectedPlaceBadge = null!;
     private Font _titleFont = null!;
     private Font _bodyFont = null!;
+    private MemorialDeskReadModel _readModel = MemorialDeskReadModel.CreateDefaultDesignPreview();
+    private Tween? _transitionTween;
     private bool _strategicView;
+    private bool _transitioning;
+    private bool _transitionTargetStrategic;
+    private float _transitionProgress = 1.0f;
+    private float _transitionStartAmount;
+    private float _transitionEndAmount;
+    private float _strategicVisualAmount;
 
-    public int PendingMemorialCount => _pendingMemorials.Count;
+    public int PendingMemorialCount => _readModel.PendingMemorials.Count;
+    public int RenderedMemorialCount => IsInstanceValid(_memorialLayer) ? _memorialLayer.GetChildCount() : 0;
+    public string ReadModelClassification => _readModel.Classification;
+    public string ReadModelSourceNotice => _readModel.SourceNotice;
     public bool StrategicView => _strategicView;
-    public bool MemorialOpen => _memorialSheet.Visible;
+    public bool MemorialOpen => IsInstanceValid(_memorialSheet) && _memorialSheet.Visible;
+    public bool Transitioning => _transitioning;
+    public bool InputLocked => IsInstanceValid(_transitionInputBlocker) && _transitionInputBlocker.Visible;
+    public float TransitionProgress => _transitionProgress;
+    public Rect2 TransitionMapRect => IsInstanceValid(_map) ? new Rect2(_map.Position, _map.Size) : default;
 
     public override void _Ready()
     {
@@ -68,11 +83,14 @@ public partial class MainUi : Control
         _map.ExitRequested += () => SetStrategicView(false);
         BuildDesk();
         BuildStrategicMap();
-        SetStrategicView(false);
+        OnPlaceSelected(_map.SelectedPlaceId);
+        ApplyStrategicStateImmediately(false);
+        UpdateDeskNotice();
     }
 
     public override void _GuiInput(InputEvent @event)
     {
+        if (_transitioning) return;
         if (@event is not InputEventMouseButton { Pressed: true } wheel) return;
         if (!_strategicView && wheel.ButtonIndex == MouseButton.WheelUp)
         {
@@ -88,17 +106,60 @@ public partial class MainUi : Control
 
     public void SetStrategicView(bool enabled)
     {
+        if (_transitioning && _transitionTargetStrategic == enabled) return;
+        if (!_transitioning && _strategicView == enabled) return;
+
         _strategicView = enabled;
-        _deskLayer.Visible = !enabled;
-        _mapLayer.Visible = enabled;
-        _map.Visible = enabled;
-        _map.MouseFilter = enabled ? MouseFilterEnum.Stop : MouseFilterEnum.Ignore;
+        _transitionTargetStrategic = enabled;
         if (enabled) _map.EnterStrategicView();
         else _map.ExitStrategicView();
-        _notice.Text = enabled
-            ? "舆图已铺展 · 滚轮缩放，拖动移图；缩到最远再向下滚轮返回御案。"
-            : $"御案上有 {_pendingMemorials.Count} 封待阅奏疏 · 点击翻阅；在中央舆图上向上滚轮进入策略地图。";
+
+        _transitionTween?.Kill();
+        _transitioning = true;
+        _transitionProgress = 0.0f;
+        _transitionStartAmount = _strategicVisualAmount;
+        _transitionEndAmount = enabled ? 1.0f : 0.0f;
+
+        _deskLayer.Visible = true;
+        _mapLayer.Visible = true;
+        _map.Visible = true;
+        _map.MouseFilter = MouseFilterEnum.Ignore;
+        _transitionInputBlocker.Visible = true;
+        _transitionInputBlocker.MoveToFront();
+
+        var distance = Mathf.Abs(_transitionEndAmount - _transitionStartAmount);
+        var duration = Mathf.Max(0.12f, TransitionDurationSeconds * distance);
+        _transitionTween = CreateTween();
+        _transitionTween.SetProcessMode(Tween.TweenProcessMode.Idle);
+        _transitionTween.TweenMethod(
+                Callable.From<float>(ApplyTransitionProgress),
+                0.0f,
+                1.0f,
+                duration)
+            .SetTrans(Tween.TransitionType.Cubic)
+            .SetEase(Tween.EaseType.InOut);
+        _transitionTween.Finished += CompleteTransition;
+        UpdateDeskNotice();
     }
+
+    /// <summary>
+    /// 注入一个已经冻结为只读快照的奏疏列表。界面只重建桌面实体，不发命令、不推进时间。
+    /// </summary>
+    public void SetReadModel(MemorialDeskReadModel readModel)
+    {
+        _readModel = readModel ?? throw new ArgumentNullException(nameof(readModel));
+        if (IsInstanceValid(_memorialLayer))
+        {
+            RenderMemorials();
+            UpdateDeskNotice();
+        }
+    }
+
+    /// <summary>
+    /// 给 headless 验收使用的公开注入缝：可稳定构造 0、1、多条只读演示数据。
+    /// </summary>
+    public void InjectAcceptanceReadModel(int pendingCount) =>
+        SetReadModel(MemorialDeskReadModel.CreateAcceptanceSample(pendingCount));
 
     private void BuildDesk()
     {
@@ -106,12 +167,18 @@ public partial class MainUi : Control
         AddBackground();
         _deskLayer = AddFullRectLayer("DeskLayer");
 
-        AddLabel(_deskLayer, "大明御书房", new Vector2(54, 34), 30, "#E8D8B9", true);
-        AddLabel(_deskLayer, "崇祯二年 · 春分前后", new Vector2(58, 76), 14, "#BBA98D");
-        AddLabel(_deskLayer, "1629-03-18 06:00", new Vector2(1280, 44), 18, "#D7BC7B");
-        AddLabel(_deskLayer, "演示预览 · 未接 Simulation", new Vector2(1282, 74), 12, "#8AA79D");
+        var titleWash = AddInkWash(_deskLayer, "DeskTitleWash", new Rect2(34, 24, 392, 78));
+        AddLabel(titleWash, "大明御书房", new Vector2(20, 10), 30, "#F0E2C8", true);
+        AddLabel(titleWash, "崇祯二年 · 春分前后", new Vector2(24, 48), 14, "#D3C19F");
+        var provenanceWash = AddInkWash(_deskLayer, "BackgroundProvenanceWash", new Rect2(34, 112, 244, 42));
+        var backgroundProvenance = AddLabel(provenanceWash, "DESIGN · 艺术合成背景", new Vector2(16, 10), 13, "#D3C19F");
+        backgroundProvenance.Name = "BackgroundProvenance";
+        var timeWash = AddInkWash(_deskLayer, "DeskTimeWash", new Rect2(1194, 24, 370, 78));
+        AddLabel(timeWash, "1629-03-18 06:00", new Vector2(86, 12), 18, "#E4CB91");
+        _readModelNotice = AddLabel(timeWash, "", new Vector2(16, 48), 12, "#B4C9BF");
+        _readModelNotice.Name = "ReadModelNotice";
 
-        var deskMapTexture = GD.Load<Texture2D>("res://assets/maps/generated/ming_1629/physical-base.png");
+        var deskMapTexture = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/maps/ming_1629-physical.png");
         var deskMapPreview = new Polygon2D
         {
             Name = "DeskMapPreview",
@@ -150,8 +217,10 @@ public partial class MainUi : Control
         AddLabel(deskMap, "东亚舆图", new Vector2(150, 14), 22, "#493C2A", true);
         AddLabel(deskMap, "案上铺图 · 点击或滚轮进入战略视域", new Vector2(152, 48), 12, "#665945");
 
-        for (var index = 0; index < _pendingMemorials.Count; index++)
-            AddDeskMemorial(_pendingMemorials[index], index);
+        _memorialLayer = new Control { Name = "DeskMemorialLayer", MouseFilter = MouseFilterEnum.Ignore };
+        _memorialLayer.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
+        _deskLayer.AddChild(_memorialLayer);
+        RenderMemorials();
 
         _notice = AddLabel(_deskLayer, "", new Vector2(525, 728), 12, "#CBB994");
         _notice.Name = "SimulationNotice";
@@ -161,16 +230,34 @@ public partial class MainUi : Control
         _decreeSheet = BuildDecreeSheet();
     }
 
-    private void AddDeskMemorial(MemorialEntry entry, int index)
+    private void RenderMemorials()
     {
+        foreach (var child in _memorialLayer.GetChildren())
+        {
+            _memorialLayer.RemoveChild(child);
+            child.QueueFree();
+        }
+
+        for (var index = 0; index < _readModel.PendingMemorials.Count; index++)
+            AddDeskMemorial(_readModel.PendingMemorials[index], index);
+
+        if (IsInstanceValid(_memorialSheet)) _memorialSheet.Visible = false;
+        if (IsInstanceValid(_readModelNotice))
+            _readModelNotice.Text = $"{_readModel.Classification} 演示数据 · {_readModel.SourceNotice}";
+    }
+
+    private void AddDeskMemorial(MemorialItemDto entry, int index)
+    {
+        var column = index % 4;
+        var row = index / 4;
         var button = new TextureButton
         {
             Name = $"DeskMemorial-{index + 1}",
             // 背景图的真实桌面从约 y=700 开始；三封奏疏沿桌面纵深错落摆放，
             // 不再悬在窗格、灯笼或砚台前方。
-            Position = new Vector2(430 + index * 285, 794 + (index % 2) * 18),
+            Position = new Vector2(430 + column * 260, 794 - row * 118 + (column % 2) * 18),
             Size = new Vector2(232, 104),
-            Rotation = Mathf.DegToRad(index switch { 0 => -2.2f, 1 => 1.1f, _ => -0.8f }),
+            Rotation = Mathf.DegToRad(column switch { 0 => -2.2f, 1 => 1.1f, 2 => -0.8f, _ => 1.8f }),
             PivotOffset = new Vector2(116, 52),
             TextureNormal = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/memorials/memorial-normal.png"),
             TextureHover = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/memorials/memorial-hover.png"),
@@ -180,7 +267,8 @@ public partial class MainUi : Control
             TooltipText = entry.Title
         };
         button.Pressed += () => OpenMemorial(entry);
-        _deskLayer.AddChild(button);
+        _memorialLayer.AddChild(button);
+        AddStatusBadge(button, entry.Status, new Rect2(192, 4, 28, 62));
         AddLabel(button, entry.Title, new Vector2(18, 23), 16, "#4A3022", true);
         AddLabel(button, entry.Status == "OPEN" ? "待阅" : "待拟", new Vector2(180, 70), 10,
             entry.Status == "OPEN" ? "#6B302A" : "#8A5B24", true);
@@ -259,7 +347,7 @@ public partial class MainUi : Control
         AcceptEvent();
     }
 
-    private void OpenMemorial(MemorialEntry entry)
+    private void OpenMemorial(MemorialItemDto entry)
     {
         _sheetTitle.Text = entry.Title;
         _sheetMeta.Text = $"{entry.Meta} · {entry.Status}";
@@ -280,17 +368,30 @@ public partial class MainUi : Control
         _mapLayer.AddChild(topWash);
         AddLabel(topWash, "东亚舆图", new Vector2(32, 18), 26, "#E5D4B2", true);
         _selectedPlace = AddLabel(topWash, "所选：京师", new Vector2(220, 25), 15, "#D1B875");
+        _selectedPlace.Size = new Vector2(720, 32);
+        _selectedPlace.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+        _selectedPlaceBadge = AddStatusBadge(topWash, "OPEN", new Rect2(188, 7, 24, 58));
+        _selectedPlaceBadge.Name = "SelectedPlaceStatusBadge";
         _mapNotice = AddLabel(topWash, "滚轮放大后逐级显示地名 · 拖动边界受限", new Vector2(980, 25), 13, "#9EB2A5");
         var returnButton = AddPaperButton(topWash, "收卷归案", new Rect2(1430, 14, 134, 42));
         returnButton.Name = "ReturnToDesk";
         returnButton.Pressed += () => SetStrategicView(false);
         _mapLayer.MoveToFront();
+
+        _transitionInputBlocker = AddFullRectLayer("TransitionInputBlocker");
+        _transitionInputBlocker.MouseFilter = MouseFilterEnum.Stop;
+        _transitionInputBlocker.Visible = false;
+        _transitionInputBlocker.MoveToFront();
     }
 
     private void OnPlaceSelected(string placeId)
     {
         var body = _placeDescriptions.TryGetValue(placeId, out var description) ? description : "节点信息不可用。";
-        _selectedPlace.Text = "所选：" + body;
+        var summary = _map.SelectedPlaceSummary;
+        var status = summary.Contains("OPEN", StringComparison.Ordinal) ? "OPEN" : "FACT";
+        _selectedPlace.Text = $"所选：{body} · {status} · modern_anchor · approximate_point";
+        _selectedPlace.TooltipText = summary;
+        _selectedPlaceBadge.Texture = LoadStatusBadgeTexture(status);
     }
 
     private void AddBackground()
@@ -298,6 +399,7 @@ public partial class MainUi : Control
         var texture = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/backgrounds/ming-imperial-study-desk-map.png");
         var background = new TextureRect
         {
+            Name = "StudyBackground",
             Texture = texture,
             ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
             StretchMode = TextureRect.StretchModeEnum.KeepAspectCovered,
@@ -316,6 +418,48 @@ public partial class MainUi : Control
         return layer;
     }
 
+    private static ColorRect AddInkWash(Control parent, string name, Rect2 rect)
+    {
+        var wash = new ColorRect
+        {
+            Name = name,
+            Position = rect.Position,
+            Size = rect.Size,
+            Color = new Color(0.035f, 0.045f, 0.035f, 0.78f),
+            MouseFilter = MouseFilterEnum.Ignore
+        };
+        parent.AddChild(wash);
+        return wash;
+    }
+
+    private static TextureRect AddStatusBadge(Control parent, string status, Rect2 rect)
+    {
+        var badge = new TextureRect
+        {
+            Name = $"StatusBadge-{status}",
+            Position = rect.Position,
+            Size = rect.Size,
+            Texture = LoadStatusBadgeTexture(status),
+            ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+            StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+            MouseFilter = MouseFilterEnum.Ignore,
+            TooltipText = $"证据语义：{status}"
+        };
+        parent.AddChild(badge);
+        return badge;
+    }
+
+    private static Texture2D LoadStatusBadgeTexture(string status)
+    {
+        var fileName = status switch
+        {
+            "FACT" => "badge-fact.png",
+            "DESIGN" => "badge-design.png",
+            _ => "badge-open.png"
+        };
+        return GD.Load<Texture2D>($"res://assets/ui/generated/ming_ui_v2/badges/{fileName}");
+    }
+
     private Label AddLabel(Control parent, string text, Vector2 position, int size, string color, bool title = false)
     {
         var label = new Label { Text = text, Position = position, MouseFilter = MouseFilterEnum.Ignore };
@@ -326,22 +470,6 @@ public partial class MainUi : Control
         label.AddThemeConstantOverride("outline_size", title ? 3 : 1);
         parent.AddChild(label);
         return label;
-    }
-
-    private TextureRect AddImage(Control parent, string path, Rect2 rect)
-    {
-        var image = new TextureRect
-        {
-            Texture = GD.Load<Texture2D>(path),
-            Position = rect.Position,
-            Size = rect.Size,
-            ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
-            StretchMode = TextureRect.StretchModeEnum.KeepAspectCovered,
-            ClipContents = true,
-            MouseFilter = MouseFilterEnum.Ignore
-        };
-        parent.AddChild(image);
-        return image;
     }
 
     private Button AddPaperButton(Control parent, string text, Rect2 rect)
@@ -381,7 +509,12 @@ public partial class MainUi : Control
             AxisStretchVertical = StyleBoxTexture.AxisStretchMode.Stretch,
             DrawCenter = true
         };
-        style.SetTextureMarginAll(38);
+        // 源图的左侧题签、右上折角和四周纸边都位于固定区；中央空白纸面才允许拉伸。
+        // 两个真实消费者分别为 696x610 与 652x570，以下边距之和均小于目标尺寸。
+        style.SetTextureMargin(Side.Left, 220);
+        style.SetTextureMargin(Side.Top, 210);
+        style.SetTextureMargin(Side.Right, 330);
+        style.SetTextureMargin(Side.Bottom, 90);
         style.SetContentMarginAll(32);
         return style;
     }
@@ -398,5 +531,61 @@ public partial class MainUi : Control
         style.SetTextureMarginAll(margin);
         style.SetContentMarginAll(contentMargin);
         return style;
+    }
+
+    private void ApplyTransitionProgress(float progress)
+    {
+        _transitionProgress = Mathf.Clamp(progress, 0.0f, 1.0f);
+        var amount = Mathf.Lerp(_transitionStartAmount, _transitionEndAmount, _transitionProgress);
+        ApplyStrategicVisualAmount(amount);
+    }
+
+    private void ApplyStrategicVisualAmount(float amount)
+    {
+        _strategicVisualAmount = Mathf.Clamp(amount, 0.0f, 1.0f);
+        _map.Position = DeskMapRect.Position.Lerp(StrategicMapRect.Position, _strategicVisualAmount);
+        _map.Size = DeskMapRect.Size.Lerp(StrategicMapRect.Size, _strategicVisualAmount);
+        _deskLayer.Modulate = new Color(1, 1, 1, 1.0f - _strategicVisualAmount);
+        _mapLayer.Modulate = new Color(1, 1, 1, _strategicVisualAmount);
+        _map.Modulate = new Color(1, 1, 1, Mathf.Lerp(0.18f, 1.0f, _strategicVisualAmount));
+    }
+
+    private void CompleteTransition()
+    {
+        _transitionProgress = 1.0f;
+        ApplyStrategicVisualAmount(_transitionTargetStrategic ? 1.0f : 0.0f);
+        _transitioning = false;
+        _transitionInputBlocker.Visible = false;
+
+        _deskLayer.Visible = !_transitionTargetStrategic;
+        _mapLayer.Visible = _transitionTargetStrategic;
+        _map.Visible = _transitionTargetStrategic;
+        _map.MouseFilter = _transitionTargetStrategic ? MouseFilterEnum.Stop : MouseFilterEnum.Ignore;
+        UpdateDeskNotice();
+    }
+
+    private void ApplyStrategicStateImmediately(bool enabled)
+    {
+        _transitionTween?.Kill();
+        _strategicView = enabled;
+        _transitionTargetStrategic = enabled;
+        _transitioning = false;
+        _transitionProgress = 1.0f;
+        _transitionInputBlocker.Visible = false;
+        if (enabled) _map.EnterStrategicView();
+        else _map.ExitStrategicView();
+        ApplyStrategicVisualAmount(enabled ? 1.0f : 0.0f);
+        _deskLayer.Visible = !enabled;
+        _mapLayer.Visible = enabled;
+        _map.Visible = enabled;
+        _map.MouseFilter = enabled ? MouseFilterEnum.Stop : MouseFilterEnum.Ignore;
+    }
+
+    private void UpdateDeskNotice()
+    {
+        if (!IsInstanceValid(_notice)) return;
+        _notice.Text = _strategicView
+            ? "舆图正在铺展或已铺展 · 仅作显示动画，不控制 GameTime。"
+            : $"御案上有 {PendingMemorialCount} 封待阅奏疏 · {_readModel.Classification} · {_readModel.SourceNotice}。";
     }
 }

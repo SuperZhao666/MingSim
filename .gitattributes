@@ -1,0 +1,4 @@
+# Deterministic map builders emit LF.  Keep only their text artifacts pinned so
+# a Windows checkout remains byte-clean after a fresh rebuild.
+assets/maps/generated/**/*.json text eol=lf
+assets/maps/generated/**/*.geojson text eol=lf

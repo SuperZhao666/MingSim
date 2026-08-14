@@ -135,6 +135,18 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_text_source(path: Path) -> str:
+    """Hash text inputs using the repository's canonical LF line endings.
+
+    Git may check text files out as CRLF on Windows.  Treating that platform
+    detail as source content made build-report.json differ after a clean local
+    rebuild even though the Git blob was unchanged.  The map compiler consumes
+    these files as text, so their provenance hash is normalized in the same
+    deterministic way on every platform.
+    """
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def write_json(path: Path, value: Any) -> None:
     text = json.dumps(
         value,
@@ -1383,10 +1395,15 @@ def build(config_path: Path) -> dict[str, Any]:
     history = render_history_overlay(evidence_features, projection, style)
     debug = render_debug_map(physical, history, places, routes, style, projection)
 
+    binary_source_suffixes = {".shp", ".shx", ".dbf"}
     source_hashes = {
-        relative_path(repo_root, config_path): sha256_file(config_path),
+        relative_path(repo_root, config_path): sha256_text_source(config_path),
         **{
-            relative_path(repo_root, path): sha256_file(path)
+            relative_path(repo_root, path): (
+                sha256_file(path)
+                if path.suffix.lower() in binary_source_suffixes
+                else sha256_text_source(path)
+            )
             for path in source_paths.values()
         },
     }

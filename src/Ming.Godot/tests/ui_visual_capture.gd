@@ -1,6 +1,7 @@
 extends SceneTree
 
 const SCENE_PATH := "res://src/Ming.Godot/scenes/ui_preview.tscn"
+const EXPECTED_MAIN_UI_SCRIPT := "res://src/Ming.Godot/scripts/MainUi.cs"
 const OVERVIEW_MANIFEST := "res://assets/maps/generated/ming_1629/map-manifest.json"
 const LIAOXI_MANIFEST := "res://assets/maps/generated/ming_1629_liaoxi/map-manifest.json"
 const SUPPORTED_STATES := [
@@ -41,9 +42,11 @@ var output_path := ""
 var capture_state := "desk-overview"
 var capture_size := Vector2i(1600, 960)
 var failure_message := ""
+var finished := false
 
 
 func _init() -> void:
+	create_timer(20.0).timeout.connect(_on_timeout)
 	call_deferred("_capture")
 
 
@@ -71,6 +74,25 @@ func _capture() -> void:
 	get_root().add_child(root)
 	await process_frame
 	await process_frame
+	var attached_script: Script = root.get_script()
+	if attached_script == null \
+		or attached_script.resource_path != EXPECTED_MAIN_UI_SCRIPT \
+		or attached_script.get_class() != "CSharpScript" \
+		or not root.has_method("SetStrategicView"):
+		_record_failure("UI_VISUAL_CAPTURE_CSHARP_UI_MISSING: MainUi C# script or methods are unavailable")
+		_finish_failure(1)
+		return
+	var map := root.get_node_or_null("MapView")
+	if map == null or not map.has_method("LoadManifest") or not bool(map.get("LoadedFromManifest")):
+		_record_failure("UI_VISUAL_CAPTURE_MAP_TYPE_ERROR: real C# MapView did not load its manifest")
+		_finish_failure(1)
+		return
+	var background := root.find_child("StudyBackground", true, false) as TextureRect
+	var desk := root.find_child("DeskLayer", true, false) as Control
+	if background == null or background.texture == null or desk == null or desk.get_child_count() < 8:
+		_record_failure("UI_VISUAL_CAPTURE_EMPTY_SHELL: required non-empty C# UI children/textures are missing")
+		_finish_failure(1)
+		return
 
 	if focus_liaoxi and not _load_liaoxi_focus(root):
 		_finish_failure(3)
@@ -92,6 +114,7 @@ func _capture() -> void:
 		capture_size.y,
 		"liaoxi" if focus_liaoxi else "overview",
 	])
+	finished = true
 	quit(0)
 
 
@@ -138,11 +161,11 @@ func _apply_capture_state(root: Control) -> bool:
 		"memorial-open":
 			return await _prepare_memorial_open(root)
 		"map-strategic":
-			return _prepare_map_strategic(root)
+			return await _prepare_map_strategic(root)
 		"map-near-labels":
-			return _prepare_map_near_labels(root)
+			return await _prepare_map_near_labels(root)
 		"map-west-clamp":
-			return _prepare_map_west_clamp(root)
+			return await _prepare_map_west_clamp(root)
 		"disabled":
 			return _prepare_seal_state(root, true, false)
 		"seal-pressed":
@@ -202,7 +225,7 @@ func _prepare_map_strategic(root: Control) -> bool:
 	var map := _require_map(root)
 	if map == null:
 		return false
-	if not _enter_strategic_map(root, map):
+	if not await _enter_strategic_map(root, map):
 		return false
 	if not _call_required(map, "LoadManifest", "strategic overview manifest", [OVERVIEW_MANIFEST]):
 		return false
@@ -217,7 +240,7 @@ func _prepare_map_near_labels(root: Control) -> bool:
 	var map := _require_map(root)
 	if map == null:
 		return false
-	if not _enter_strategic_map(root, map):
+	if not await _enter_strategic_map(root, map):
 		return false
 	if not _call_required(map, "ResetView", "near-label map reset"):
 		return false
@@ -233,7 +256,7 @@ func _prepare_map_west_clamp(root: Control) -> bool:
 	var map := _require_map(root)
 	if map == null:
 		return false
-	if not _enter_strategic_map(root, map):
+	if not await _enter_strategic_map(root, map):
 		return false
 	if not _call_required(map, "ResetView", "west-clamp map reset"):
 		return false
@@ -335,6 +358,13 @@ func _enter_strategic_map(root: Control, map: Control) -> bool:
 		return _missing_node("strategic map layer", STRATEGIC_LAYER_NAMES)
 	if root.has_method("SetStrategicView"):
 		root.call("SetStrategicView", true)
+		var elapsed := 0.0
+		while bool(root.get("Transitioning")) and elapsed < 2.0:
+			await create_timer(0.02).timeout
+			elapsed += 0.02
+		if bool(root.get("Transitioning")):
+			_record_failure("UI_VISUAL_CAPTURE_TRANSITION_TIMEOUT: strategic map did not settle")
+			return false
 	else:
 		_set_visible_if_canvas_item(layer, true)
 		_set_visible_if_canvas_item(map, true)
@@ -460,5 +490,15 @@ func _record_failure(message: String) -> void:
 
 
 func _finish_failure(exit_code: int) -> void:
+	if finished:
+		return
+	finished = true
 	print("UI_VISUAL_CAPTURE_FAILED: " + (failure_message if failure_message != "" else "unknown error"))
 	quit(exit_code)
+
+
+func _on_timeout() -> void:
+	if finished:
+		return
+	_record_failure("UI_VISUAL_CAPTURE_TIMEOUT")
+	_finish_failure(5)

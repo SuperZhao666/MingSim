@@ -2,7 +2,13 @@ extends SceneTree
 
 var failures: Array[String] = []
 
+const EXPECTED_MAIN_UI_SCRIPT := "res://src/Ming.Godot/scripts/MainUi.cs"
+const TEST_TIMEOUT_SECONDS := 15.0
+
+var finished := false
+
 func _init() -> void:
+	create_timer(TEST_TIMEOUT_SECONDS).timeout.connect(_on_timeout)
 	var scene := load("res://src/Ming.Godot/scenes/ui_preview.tscn") as PackedScene
 	_assert(scene != null, "主场景可加载")
 	if scene == null:
@@ -15,6 +21,14 @@ func _init() -> void:
 	get_root().add_child(root)
 	await process_frame
 	await process_frame
+	var attached_script: Script = root.get_script()
+	_assert(attached_script != null \
+		and attached_script.resource_path == EXPECTED_MAIN_UI_SCRIPT \
+		and attached_script.get_class() == "CSharpScript" \
+		and root.has_method("SetStrategicView"), "主场景实例化真实 C# MainUi，而不是无脚本背景壳")
+	if attached_script == null or not root.has_method("SetStrategicView"):
+		_quit()
+		return
 
 	var map := root.get_node_or_null("MapView")
 	_assert(map != null, "MapView 节点存在")
@@ -59,7 +73,7 @@ func _init() -> void:
 		for step in range(20):
 			_send_wheel(map, MOUSE_BUTTON_WHEEL_UP, Vector2(map.size.x * 0.5, map.size.y * 0.5))
 		_assert(is_equal_approx(map.Zoom, 4.0), "战略态近层级缩放上限为 4")
-		_assert(map.VisibleLabelCount == map.PlaceCount, "近层级才显示完整城镇名称")
+		_assert(map.VisibleLabelCount > 0 and map.VisibleLabelCount <= map.VisiblePlaceCount, "近层级标签数是视口裁剪和碰撞过滤后的实际绘制数")
 		var pan_before: Vector2 = map.Pan
 		_send_drag(map, Vector2(map.size.x * 0.5, map.size.y * 0.5), Vector2(10000, 10000))
 		_assert(map.Pan != pan_before, "拖动沿 _GuiInput 路径生效")
@@ -103,10 +117,10 @@ func _init() -> void:
 	_assert(desk_map != null, "桌面舆图入口存在")
 	if desk_map != null:
 		desk_map.emit_signal("pressed")
-		await process_frame
+		_assert(await _wait_for_transition(root), "御案到舆图的显示转场在时限内完成")
 		_assert(root.StrategicView and map.IsStrategicView, "点击桌面舆图进入全屏战略地图")
 		root.call("SetStrategicView", false)
-		await process_frame
+		_assert(await _wait_for_transition(root), "舆图收卷回御案的显示转场在时限内完成")
 		_assert(not root.StrategicView and not map.IsStrategicView, "收卷后返回御案并重置地图呈现态")
 	_assert(root.find_child("StrategicMapLayer", true, false) != null, "全屏策略地图层存在")
 	_assert(root.find_child("ReturnToDesk", true, false) != null, "全屏地图保留收卷归案入口")
@@ -184,4 +198,20 @@ func _assert(condition: bool, message: String) -> void:
 		failures.append(message)
 
 func _quit() -> void:
+	if finished:
+		return
+	finished = true
 	quit(0 if failures.is_empty() else 1)
+
+func _wait_for_transition(root: Control, timeout_seconds := 2.0) -> bool:
+	var elapsed := 0.0
+	while bool(root.get("Transitioning")) and elapsed < timeout_seconds:
+		await create_timer(0.02).timeout
+		elapsed += 0.02
+	return not bool(root.get("Transitioning"))
+
+func _on_timeout() -> void:
+	if finished:
+		return
+	failures.append("UI headless acceptance 超时")
+	_quit()
