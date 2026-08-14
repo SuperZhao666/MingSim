@@ -19,6 +19,8 @@ public partial class MainUi : Control
     private const float TransitionDurationSeconds = 0.42f;
     private const string GrainDispatcherActor = "duliaoxiang-slot";
     private const long GrainDispatcherQuantity = 5_000;
+    // 无可执行调粮路线时的提示：以字段承载，避免被每帧 RefreshRealtimeLabels 覆盖（P1 修复）。
+    private string? _grainRouteHint;
     private static readonly Rect2 DeskMapRect = new(new Vector2(337, 458), new Vector2(1021, 254));
     private static readonly Rect2 StrategicMapRect = new(new Vector2(0, 72), new Vector2(1600, 888));
 
@@ -728,10 +730,12 @@ public partial class MainUi : Control
         var routeId = _facade.ResolveRouteForGrainShipment(actor, GrainDispatcherQuantity);
         if (routeId is null)
         {
-            _realtimeOutcome.Text = "当前局势下无可执行的调粮路线，请先检查路线与库存。";
+            _grainRouteHint = "当前局势下无可执行的调粮路线，请先检查路线与库存。";
+            RefreshRealtimeLabels();
             return;
         }
 
+        _grainRouteHint = null;
         _facade.EnqueueCreateShipment(
             $"ui-grain-{model.WorldVersion}-{GrainDispatcherQuantity}",
             actor,
@@ -755,6 +759,12 @@ public partial class MainUi : Control
             .OrderBy(item => item.Id.Value, StringComparer.Ordinal)
             .Select(item => $"{item.Id.Value.Replace("sp-", "", StringComparison.Ordinal)}:{item.GrainQuantity}石"));
         _realtimeStockpiles.Text = $"已知库存（DESIGN 数值） {stocks} · 在途 {model.Shipments.Count(item => item.Status != ShipmentStatus.Arrived)} 批";
+        if (_grainRouteHint is not null)
+        {
+            _realtimeOutcome.Text = _grainRouteHint;
+            return;
+        }
+
         var latest = model.CommandOutcomes.LastOrDefault();
         _realtimeOutcome.Text = latest is null
             ? "尚无命令结果。"

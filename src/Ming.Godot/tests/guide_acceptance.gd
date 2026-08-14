@@ -133,9 +133,11 @@ func _test_dispatch_action_must_succeed_in_real_ningyuan_scenario(root: Control)
 	for _i in range(30):
 		await process_frame
 	var outcome_text := str(outcome.text)
+	var stockpiles_text := str(stockpiles.text)
 	_assert(outcome_text.contains("受理"), "调粮命令必须被内核受理：%s" % outcome_text)
 	_assert(not outcome_text.contains("拒绝"), "调粮命令不得被拒绝：%s" % outcome_text)
-	_assert(str(stockpiles.text).contains("在途 1 批"), "受理后必须产生在途粮队：%s" % stockpiles.text)
+	_assert(stockpiles_text.contains("在途 1 批"), "受理后必须产生在途粮队：%s" % stockpiles_text)
+	_assert(stockpiles_text.contains("beijing:5000石"), "调粮必须真实扣除北京来源仓 5000 石：%s" % stockpiles_text)
 
 
 func _find_by_name(root: Node, node_name: String, node_class: String) -> Node:
