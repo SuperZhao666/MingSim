@@ -175,11 +175,13 @@ internal static class SnapshotReflection
 
     /// <summary>
     /// 用重新计算的 StateHash/PayloadChecksum 重建同一内容的快照（迁移 re-seal）。
-    /// 快照内容（世界、调度、收件箱、outbox、序列等）原样保留，只替换两个校验字段。
+    /// 快照内容（世界、调度、收件箱、outbox、序列等）原样保留，只替换两个校验字段；
+    /// 快照 schemaVersion 归一化为当前 <see cref="RealtimeSnapshotSchema.Version"/>——迁移重建的
+    /// 对象就是当前布局（旧档携带的旧 schema 编号不再适用，否则 Runtime.Restore 的版本门禁会拒绝）。
     /// </summary>
     public static RealtimeSnapshot Reseal(RealtimeSnapshot snapshot, string stateHash, string payloadChecksum) =>
         CreateSnapshot(
-            snapshot.SchemaVersion,
+            RealtimeSnapshotSchema.Version,
             GetState(snapshot),
             GetScheduledEvents(snapshot),
             GetPendingCommands(snapshot),

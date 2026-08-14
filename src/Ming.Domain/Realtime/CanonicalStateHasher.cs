@@ -24,7 +24,13 @@ public static class CanonicalStateHasher
     // 旧存档不再可恢复（fail-closed），需要迁移或重建。
     public const int SchemaVersion = 6;
 
-    /// <summary>#28 之前（v1 载荷时代）的哈希 schema：无 AppointmentState 段。</summary>
+    /// <summary>任命段（AppointmentState）自 schema5 起进入哈希。</summary>
+    public const int AppointmentsSchemaVersion = 5;
+
+    /// <summary>减耗令标志（ScenarioState.RationReductionActive）自 schema6 起进入哈希。</summary>
+    public const int RationReductionSchemaVersion = 6;
+
+    /// <summary>#28 之前（v1 载荷时代）的哈希 schema：无 AppointmentState 段、无减耗令标志。</summary>
     public const int LegacySchemaVersionV1 = 4;
 
     public static string Compute(
@@ -79,7 +85,7 @@ public static class CanonicalStateHasher
         WriteInstitutions(writer, state);
         WriteCapabilities(writer, state);
         // 任命段自 schema5 起存在；v1 时代（schema4）无此段——按记录版本验证旧档时跳过。
-        if (hashSchemaVersion >= SchemaVersion)
+        if (hashSchemaVersion >= AppointmentsSchemaVersion)
         {
             WriteAppointments(writer, state);
         }
@@ -89,7 +95,7 @@ public static class CanonicalStateHasher
         WriteMilitary(writer, state);
         WriteLogistics(writer, state);
         WriteMovements(writer, state);
-        WriteScenario(writer, state);
+        WriteScenario(writer, state, hashSchemaVersion);
         WriteReadiness(writer, state);
         WriteDecrees(writer, state);
 
@@ -348,12 +354,17 @@ public static class CanonicalStateHasher
         }
     }
 
-    private static void WriteScenario(BinaryWriter writer, WorldState state)
+    private static void WriteScenario(BinaryWriter writer, WorldState state, int hashSchemaVersion)
     {
         WriteInt32(writer, state.Scenario.LocalBurden);
         WriteInt32(writer, state.Scenario.MinisterTrust);
         WriteInt32(writer, state.Scenario.DailyGrainDemand);
-        writer.Write(state.Scenario.RationReductionActive);
+        // 减耗令标志自 schema6 起进入哈希；按记录版本验证旧档（schema4/5）时跳过。
+        if (hashSchemaVersion >= RationReductionSchemaVersion)
+        {
+            writer.Write(state.Scenario.RationReductionActive);
+        }
+
         WriteNullableString(writer, state.Scenario.FrontStockpileId?.Value);
         WriteInt32(writer, state.Scenario.SecondHalfFromDay);
         WriteInt32(writer, state.Scenario.BurdenCooperationThreshold);
