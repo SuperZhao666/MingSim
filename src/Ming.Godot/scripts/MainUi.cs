@@ -1,7 +1,12 @@
 using Godot;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Ming.Godot.ReadModels;
+using MingSim.Application.Commands;
+using MingSim.Domain.Common;
+using MingSim.Domain.Economy;
+using MingSim.Simulation.Realtime;
 
 namespace Ming.Godot;
 
@@ -43,6 +48,12 @@ public partial class MainUi : Control
     private Font _titleFont = null!;
     private Font _bodyFont = null!;
     private MemorialDeskReadModel _readModel = MemorialDeskReadModel.CreateDefaultDesignPreview();
+    private RealtimeSimulationRuntime? _runtime;
+    private CommandFacade? _facade;
+    private Label _realtimeClock = null!;
+    private Label _realtimeStockpiles = null!;
+    private Label _realtimeOutcome = null!;
+    private bool _uiPauseRequested;
     private Tween? _transitionTween;
     private bool _strategicView;
     private bool _transitioning;
@@ -83,9 +94,19 @@ public partial class MainUi : Control
         _map.ExitRequested += () => SetStrategicView(false);
         BuildDesk();
         BuildStrategicMap();
+        BuildRealtimeBar();
         OnPlaceSelected(_map.SelectedPlaceId);
         ApplyStrategicStateImmediately(false);
         UpdateDeskNotice();
+    }
+
+    public override void _Process(double delta)
+    {
+        // 渲染帧只请求推进，Simulation 自己决定完整、稳定的游戏时间边界（doc 08 §3）。
+        // 未接入内核（无 runtime）时什么都不做，保持演示 DTO 模式可运行。
+        if (_runtime is null) return;
+        _runtime.Advance(TimeSpan.FromSeconds(delta));
+        RefreshRealtimeLabels();
     }
 
     public override void _GuiInput(InputEvent @event)
@@ -583,6 +604,103 @@ public partial class MainUi : Control
         _mapLayer.Visible = enabled;
         _map.Visible = enabled;
         _map.MouseFilter = enabled ? MouseFilterEnum.Stop : MouseFilterEnum.Ignore;
+    }
+
+    /// <summary>
+    /// 实时内核快捷栏：顶栏显示权威 GameTime/WorldVersion/库存概要，提供暂停、倍速与
+    /// 调粮按钮。所有写入都经 CommandFacade 进入唯一内核管线，UI 不触碰 WorldState。
+    /// </summary>
+    private void BuildRealtimeBar()
+    {
+        try
+        {
+            var (runtime, facade) = RealtimeWorldBridge.Create();
+            _runtime = runtime;
+            _facade = facade;
+        }
+        catch (Exception exception)
+        {
+            // 剧本装配失败必须可见（fail-closed），不能静默退回演示数据。
+            _runtime = null;
+            _facade = null;
+            GD.PushError($"宁远 1629 剧本装配失败：{exception.Message}");
+        }
+
+        var bar = new Control { Name = "RealtimeBar", Position = new Vector2(0, 812), Size = new Vector2(1600, 88) };
+        var wash = new ColorRect { Position = Vector2.Zero, Size = bar.Size, Color = new Color(0.05f, 0.075f, 0.065f, 0.92f), MouseFilter = MouseFilterEnum.Ignore };
+        bar.AddChild(wash);
+        AddChild(bar);
+
+        _realtimeClock = AddLabel(bar, "内核未接入", new Vector2(16, 8), 15, "#E4CB91");
+        _realtimeClock.Name = "RealtimeClock";
+        _realtimeStockpiles = AddLabel(bar, "", new Vector2(16, 36), 12, "#B4C9BF");
+        _realtimeStockpiles.Name = "RealtimeStockpiles";
+        _realtimeStockpiles.Size = new Vector2(1020, 40);
+        _realtimeOutcome = AddLabel(bar, "", new Vector2(16, 64), 12, "#D9A05B");
+        _realtimeOutcome.Name = "RealtimeOutcome";
+        _realtimeOutcome.Size = new Vector2(1200, 20);
+        _realtimeOutcome.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+
+        var pause = AddPaperButton(bar, "暂停", new Rect2(1060, 10, 80, 34));
+        pause.Name = "RealtimePause";
+        pause.Pressed += () => SubmitPause(true);
+        var resume = AddPaperButton(bar, "继续", new Rect2(1148, 10, 80, 34));
+        resume.Name = "RealtimeResume";
+        resume.Pressed += () => SubmitPause(false);
+        (string Text, double Value)[] speeds = [("1x", 1.0), ("2x", 2.0), ("3x", 3.0), ("5x", 5.0)];
+        for (var index = 0; index < speeds.Length; index++)
+        {
+            var speed = speeds[index];
+            var button = AddPaperButton(bar, speed.Text, new Rect2(1236 + index * 64, 10, 56, 34));
+            button.Name = $"RealtimeSpeed{speed.Text}";
+            button.Pressed += () => SubmitSpeed(speed.Value);
+        }
+        var dispatch = AddPaperButton(bar, "调粮五千石", new Rect2(1060, 48, 252, 34));
+        dispatch.Name = "RealtimeDispatchGrain";
+        dispatch.Pressed += SubmitGrainShipment;
+
+        RefreshRealtimeLabels();
+    }
+
+    private void SubmitPause(bool paused)
+    {
+        _uiPauseRequested = paused;
+        _facade?.EnqueuePause(
+            paused, new CharacterId("zhu-youjian"), _runtime?.ReadModel.GameTime.Value ?? default, _runtime?.ReadModel.WorldVersion ?? 0);
+    }
+
+    private void SubmitSpeed(double speed) => _facade?.EnqueueSetSpeed(
+        speed, new CharacterId("zhu-youjian"), _runtime?.ReadModel.GameTime.Value ?? default, _runtime?.ReadModel.WorldVersion ?? 0);
+
+    private void SubmitGrainShipment()
+    {
+        if (_runtime is null || _facade is null) return;
+        var model = _runtime.ReadModel;
+        _facade.EnqueueCreateShipment(
+            $"ui-grain-{model.WorldVersion}-5000",
+            new CharacterId("duliaoxiang-slot"),
+            new ShipmentId($"shipment-ui-grain-{model.WorldVersion}"),
+            new RouteId("route-shanhaiguan-ningyuan"),
+            5000,
+            escort: false,
+            model.GameTime.Value,
+            model.WorldVersion);
+        RefreshRealtimeLabels();
+    }
+
+    private void RefreshRealtimeLabels()
+    {
+        if (_runtime is null) return;
+        var model = _runtime.ReadModel;
+        _realtimeClock.Text =
+            $"崇祯二年 · {model.GameTime.Value:yyyy-MM-dd HH:mm} · WorldVersion {model.WorldVersion} · " +
+            $"{(_uiPauseRequested ? "已暂停" : "运行中")} · 战备 {model.Readiness.Value} · 负担 {model.Scenario.LocalBurden} · 信任 {model.Scenario.MinisterTrust}";
+        var stocks = string.Join(" · ", model.Stockpiles
+            .OrderBy(item => item.Id.Value, StringComparer.Ordinal)
+            .Select(item => $"{item.Id.Value.Replace("sp-", "", StringComparison.Ordinal)}:{item.GrainQuantity}石"));
+        _realtimeStockpiles.Text = $"已知库存（DESIGN 数值） {stocks} · 在途 {model.Shipments.Count(item => item.Status != ShipmentStatus.Arrived)} 批";
+        var latest = model.CommandOutcomes.LastOrDefault();
+        _realtimeOutcome.Text = latest is null ? "尚无命令结果。" : $"最近命令 {latest.CommandId}：{(latest.Accepted ? "受理" : "拒绝")} · {string.Join("、", latest.ErrorCodes)}";
     }
 
     private void UpdateDeskNotice()

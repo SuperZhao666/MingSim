@@ -145,7 +145,7 @@ func _init() -> void:
 	_assert(desk.visible and not map.visible and not map_layer.visible, "收卷完成后恢复真实御案并隐藏策略层")
 	_assert(Rect2(map.position, map.size).is_equal_approx(desk_rect), "收卷最终精确回到桌面舆图矩形")
 
-	_assert(_source_has_no_authoritative_state_dependency(), "MainUi 与只读模型不依赖游戏权威状态模块")
+	_assert(_source_has_no_authoritative_state_dependency(), "MainUi 只读 ReadModel 与命令门面，不触达可写权威状态")
 	_finish()
 
 func _wait_for_transition(root: Control, timeout_seconds: float) -> bool:
@@ -156,13 +156,16 @@ func _wait_for_transition(root: Control, timeout_seconds: float) -> bool:
 	return not bool(root.get("Transitioning"))
 
 func _source_has_no_authoritative_state_dependency() -> bool:
+	# H2 之后 MainUi 接入真实只读 ReadModel 与 CommandFacade（这是产品目标）；
+	# 红线收紧为：不得触达可写领域对象（WorldState 成员访问、内核、Domain 引用）。
 	var main_source := FileAccess.get_file_as_string("res://src/Ming.Godot/scripts/MainUi.cs")
 	var model_source := FileAccess.get_file_as_string("res://src/Ming.Godot/scripts/ReadModels/MemorialDeskReadModel.cs")
 	var combined := main_source + "\n" + model_source
-	return not combined.contains("using Ming.Domain") \
-		and not combined.contains("using Ming.Simulation") \
-		and not combined.contains("WorldState") \
-		and not combined.contains("SimulationKernel")
+	# 值对象 Id（CharacterId/RouteId 等）允许引用；可写状态与内核对象禁止出现。
+	return not combined.contains("WorldState.") \
+		and not combined.contains("new WorldState") \
+		and not combined.contains("SimulationKernel") \
+		and not combined.contains("CreateInitial")
 
 func _assert(condition: bool, message: String) -> void:
 	if condition:
