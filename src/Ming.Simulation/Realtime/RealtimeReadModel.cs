@@ -12,6 +12,7 @@ public sealed record RealtimeReadModel(
     WorldId WorldId,
     int TurnNumber,
     GameTime GameTime,
+    bool IsPaused,
     long WorldVersion,
     string CommitId,
     IReadOnlyList<ArmyReadModel> Armies,
@@ -31,11 +32,13 @@ public sealed record RealtimeReadModel(
         IEnumerable<ScheduledSimulationEvent> scheduled,
         IEnumerable<CommandOutcome> outcomes,
         int outboxEventCount,
+        bool isPaused,
         string hash) =>
         new(
             state.Id,
             state.TurnNumber,
             state.GameTime,
+            isPaused,
             state.WorldVersion,
             state.CommitId,
             new ReadOnlyCollection<ArmyReadModel>(state.Military.Armies.Values

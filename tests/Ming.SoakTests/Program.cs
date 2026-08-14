@@ -7,7 +7,9 @@ namespace MingSim.SoakTests;
 /// M7 纵切稳定第一批长跑测试（docs/设计蓝图/08 §20"MVP 长跑"、11 §10"性能预算"）。
 /// 不依赖第三方测试框架，与 Ming.SmokeTests 相同的 Exe 验收形态，全部测试通过才返回 0：
 /// - 90 日宁远急饷场景 × 20 固定种子确定性重放（同种子同 StateHash/事件流/终局）；
-/// - 一年（365 日）合成世界长跑（无异常，输出每次推进 CPU 时间分布与内存量级摘要）。
+/// - 一年（365 日）合成世界长跑（无异常，输出每次推进 CPU 时间分布与内存量级摘要）；
+/// - M5 硬失败自动暂停（ScenarioHardFailure 报告后一次性暂停、快照/哈希一致、不抢手动暂停）；
+/// - M5 三策略 90 日探索（陆运/海运/陆海并行 × 6 种子，输出终局分档分布表，doc 11 质量门运行证据）。
 /// </summary>
 internal static class Program
 {
@@ -18,6 +20,8 @@ internal static class Program
         {
             NingyuanSeedReplay.RunAll();
             SyntheticYearLongRun.RunAll();
+            AutoPauseAcceptance.RunAll();
+            StrategyExplorer.RunAll();
             Console.WriteLine("MingSim 长跑测试全部通过。");
             Console.WriteLine($"总耗时：{stopwatch.Elapsed.TotalSeconds:F1} 秒");
             return 0;
