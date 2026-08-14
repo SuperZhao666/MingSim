@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using MingSim.Domain.Common;
 
 namespace MingSim.Domain.Map;
@@ -51,7 +52,8 @@ public sealed class MapDefinition
     public string Id { get; }
 
     /// <summary>只读省份索引。调用方不能通过这个属性直接增删省份。</summary>
-    public IReadOnlyDictionary<ProvinceId, ProvinceDefinition> Provinces => _provinces;
+    public IReadOnlyDictionary<ProvinceId, ProvinceDefinition> Provinces =>
+        new ReadOnlyDictionary<ProvinceId, ProvinceDefinition>(_provinces);
 
     /// <summary>判断地图是否包含指定省份。</summary>
     public bool Contains(ProvinceId provinceId) => _provinces.ContainsKey(provinceId);
@@ -118,7 +120,7 @@ public sealed record ProvinceDefinition
 
         Id = id;
         Name = name.Trim();
-        AdjacentProvinces = (adjacentProvinces ?? []).ToArray();
+        AdjacentProvinces = Array.AsReadOnly((adjacentProvinces ?? []).ToArray());
     }
 
     /// <summary>省份的稳定编号。</summary>

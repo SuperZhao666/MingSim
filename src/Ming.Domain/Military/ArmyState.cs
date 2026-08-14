@@ -32,7 +32,7 @@ public sealed class ArmyState
 
     public int TrainingDays { get; private set; }
 
-    public bool TryConvertAuxiliariesToLineInfantry(long count)
+    internal bool TryConvertAuxiliariesToLineInfantry(long count)
     {
         if (count <= 0 || Auxiliaries < count)
         {
@@ -44,7 +44,7 @@ public sealed class ArmyState
         return true;
     }
 
-    public void AddTrainingDays(int days)
+    internal void AddTrainingDays(int days)
     {
         if (days < 0)
         {
@@ -75,9 +75,10 @@ public sealed class MilitaryState
 {
     private readonly Dictionary<ArmyId, ArmyState> _armies = [];
 
-    public IReadOnlyDictionary<ArmyId, ArmyState> Armies => _armies;
+    public IReadOnlyDictionary<ArmyId, ArmyState> Armies =>
+        new System.Collections.ObjectModel.ReadOnlyDictionary<ArmyId, ArmyState>(_armies);
 
-    public void Add(ArmyState army)
+    internal void Add(ArmyState army)
     {
         if (!_armies.TryAdd(army.Id, army))
         {
@@ -85,7 +86,7 @@ public sealed class MilitaryState
         }
     }
 
-    public MilitaryState Clone()
+    internal MilitaryState Clone()
     {
         var clone = new MilitaryState();
         foreach (var (id, army) in _armies)
