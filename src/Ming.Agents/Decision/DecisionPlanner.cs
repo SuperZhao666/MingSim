@@ -88,102 +88,126 @@ public sealed class DecisionPlanner
         var modelRequest = BuildModelRequest(request, context);
         var estimatedRequestTokens = EstimateRequestTokens(modelRequest);
 
-        // 预算闸门：预算耗尽时停止新模型请求（0 次调用），直接回退 Utility（doc 07 §13.3）。
-        if (_budget is not null && !_budget.CanAfford(estimatedRequestTokens))
+        // P1-AGENT-04：预算原子预留。TryReserve 在锁内一次性完成“检查+提交”，
+        // 不足即拒绝（0 次调用，直接回退 Utility，doc 07 §13.3）；两个并发调用
+        // 不可能同时通过同一额度的闸门。锁内只有整数累加，网络 await 绝不在锁内。
+        var budget = _budget;
+        var hasReservation = false;
+        var reservation = new ModelBudgetReservation(0);
+        if (budget is not null)
         {
-            AppendAudit(new ModelAuditEntry(
-                request.DecisionId,
-                _providerName,
-                ModelCallOutcome.BudgetExceeded,
-                estimatedRequestTokens,
-                0,
-                _budget.CostFor(estimatedRequestTokens),
-                TimeSpan.Zero,
-                DateTimeOffset.UtcNow));
-            return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.BudgetExceeded);
+            if (!budget.TryReserve(estimatedRequestTokens, out reservation))
+            {
+                AppendAudit(new ModelAuditEntry(
+                    request.DecisionId,
+                    _providerName,
+                    ModelCallOutcome.BudgetExceeded,
+                    estimatedRequestTokens,
+                    0,
+                    budget.CostFor(estimatedRequestTokens),
+                    TimeSpan.Zero,
+                    DateTimeOffset.UtcNow));
+                return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.BudgetExceeded);
+            }
+
+            hasReservation = true;
         }
 
+        // 预留成功后到结算前，模型调用（网络 await）、解析等任何耗时操作都不持有预算锁；
+        // 所有出口统一由 finally 结算预留：成功按 请求+响应 补记、失败按请求额消耗、
+        // 取消全额返还——不允许任何路径把未结算的预留留在预算里。
         var stopwatch = Stopwatch.StartNew();
-        ModelResponse response;
+        long actualTokens = 0;
         try
         {
-            response = await _provider.GenerateAsync(modelRequest, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // 调用方取消必须原样传播，不能伪装成模型失败，也不记审计。
-            throw;
-        }
-        catch (Exception)
-        {
+            ModelResponse response;
+            try
+            {
+                response = await _provider.GenerateAsync(modelRequest, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // 调用方取消必须原样传播，不能伪装成模型失败，也不记审计；预留全额返还。
+                throw;
+            }
+            catch (Exception)
+            {
+                stopwatch.Stop();
+                // 未预期异常（含断网、认证失败）只回退规则；异常文本可能携带认证细节，绝不外泄。
+                actualTokens = estimatedRequestTokens;
+                AppendAudit(FailureEntry(request.DecisionId, estimatedRequestTokens, 0, stopwatch.Elapsed));
+                return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.ProviderFailed);
+            }
+
             stopwatch.Stop();
-            // 未预期异常（含断网、认证失败）只回退规则；异常文本可能携带认证细节，绝不外泄。
-            RecordUsage(estimatedRequestTokens, 0);
-            AppendAudit(FailureEntry(request.DecisionId, estimatedRequestTokens, 0, stopwatch.Elapsed));
-            return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.ProviderFailed);
-        }
+            if (!response.Succeeded)
+            {
+                // Provider 失败/超时：审计统一用固定类别，不依赖 Provider 的文案。
+                actualTokens = estimatedRequestTokens;
+                AppendAudit(FailureEntry(request.DecisionId, estimatedRequestTokens, 0, stopwatch.Elapsed));
+                return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.ProviderFailed);
+            }
 
-        stopwatch.Stop();
-        if (!response.Succeeded)
-        {
-            // Provider 失败/超时：审计统一用固定类别，不依赖 Provider 的文案。
-            RecordUsage(estimatedRequestTokens, 0);
-            AppendAudit(FailureEntry(request.DecisionId, estimatedRequestTokens, 0, stopwatch.Elapsed));
-            return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.ProviderFailed);
-        }
+            var responseTokens = TokenEstimation.FromText(response.Content);
+            actualTokens = estimatedRequestTokens + responseTokens;
 
-        var responseTokens = TokenEstimation.FromText(response.Content);
-        RecordUsage(estimatedRequestTokens, responseTokens);
+            // 解析步骤整体纳入 try 回退（P2-1）：解析器是"模型输出不可信"的最后一道硬防线，
+            // 任何未预期异常（未来 schema 版本、解析器缺陷等）都必须回退规则路径并记 ParseFailed 审计，
+            // 绝不能把模型输出引发的异常抛给调用方阻塞世界（doc 07 §13.4）。
+            ModelParseResult parsed;
+            try
+            {
+                parsed = _parser.Parse(request, context, response.Content, acceptedGameTime);
+            }
+            catch (Exception)
+            {
+                AppendAudit(new ModelAuditEntry(
+                    request.DecisionId,
+                    _providerName,
+                    ModelCallOutcome.ParseFailed,
+                    estimatedRequestTokens,
+                    responseTokens,
+                    CostFor(estimatedRequestTokens + responseTokens),
+                    stopwatch.Elapsed,
+                    DateTimeOffset.UtcNow));
+                return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.ParseFailed);
+            }
 
-        // 解析步骤整体纳入 try 回退（P2-1）：解析器是"模型输出不可信"的最后一道硬防线，
-        // 任何未预期异常（未来 schema 版本、解析器缺陷等）都必须回退规则路径并记 ParseFailed 审计，
-        // 绝不能把模型输出引发的异常抛给调用方阻塞世界（doc 07 §13.4）。
-        ModelParseResult parsed;
-        try
-        {
-            parsed = _parser.Parse(request, context, response.Content, acceptedGameTime);
-        }
-        catch (Exception)
-        {
+            if (parsed.Succeeded && !request.IsExpired(acceptedGameTime))
+            {
+                AppendAudit(new ModelAuditEntry(
+                    request.DecisionId,
+                    _providerName,
+                    ModelCallOutcome.Accepted,
+                    estimatedRequestTokens,
+                    responseTokens,
+                    CostFor(estimatedRequestTokens + responseTokens),
+                    stopwatch.Elapsed,
+                    DateTimeOffset.UtcNow));
+                return new DecisionResult(request.DecisionId, DecisionSource.Model, parsed.Intents, acceptedGameTime);
+            }
+
+            // 模型结果解析失败或已过期：丢弃并回退规则路径，审计记录真实原因，不制造静默成功。
+            var outcome = parsed.Succeeded ? ModelCallOutcome.Expired : ModelCallOutcome.ParseFailed;
+            var reason = parsed.Succeeded ? ModelFallbackReason.Expired : ModelFallbackReason.ParseFailed;
             AppendAudit(new ModelAuditEntry(
                 request.DecisionId,
                 _providerName,
-                ModelCallOutcome.ParseFailed,
+                outcome,
                 estimatedRequestTokens,
                 responseTokens,
                 CostFor(estimatedRequestTokens + responseTokens),
                 stopwatch.Elapsed,
                 DateTimeOffset.UtcNow));
-            return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.ParseFailed);
+            return RulesResult(request, context, acceptedGameTime, reason);
         }
-
-        if (parsed.Succeeded && !request.IsExpired(acceptedGameTime))
+        finally
         {
-            AppendAudit(new ModelAuditEntry(
-                request.DecisionId,
-                _providerName,
-                ModelCallOutcome.Accepted,
-                estimatedRequestTokens,
-                responseTokens,
-                CostFor(estimatedRequestTokens + responseTokens),
-                stopwatch.Elapsed,
-                DateTimeOffset.UtcNow));
-            return new DecisionResult(request.DecisionId, DecisionSource.Model, parsed.Intents, acceptedGameTime);
+            if (hasReservation)
+            {
+                budget!.Settle(reservation, actualTokens);
+            }
         }
-
-        // 模型结果解析失败或已过期：丢弃并回退规则路径，审计记录真实原因，不制造静默成功。
-        var outcome = parsed.Succeeded ? ModelCallOutcome.Expired : ModelCallOutcome.ParseFailed;
-        var reason = parsed.Succeeded ? ModelFallbackReason.Expired : ModelFallbackReason.ParseFailed;
-        AppendAudit(new ModelAuditEntry(
-            request.DecisionId,
-            _providerName,
-            outcome,
-            estimatedRequestTokens,
-            responseTokens,
-            CostFor(estimatedRequestTokens + responseTokens),
-            stopwatch.Elapsed,
-            DateTimeOffset.UtcNow));
-        return RulesResult(request, context, acceptedGameTime, reason);
     }
 
     private DecisionResult RulesResult(
@@ -192,9 +216,6 @@ public sealed class DecisionPlanner
         GameTime acceptedGameTime,
         ModelFallbackReason reason) =>
         new(request.DecisionId, DecisionSource.Rules, _ruleSource.Decide(context), acceptedGameTime, reason);
-
-    private void RecordUsage(long requestTokens, long responseTokens) =>
-        _budget?.RecordUsage(requestTokens + responseTokens);
 
     private long CostFor(long tokens) => _budget?.CostFor(tokens) ?? 0;
 

@@ -66,6 +66,10 @@ internal static partial class Program
             ShouldRejectModelRouteIdOutsideCandidateSetWithParseFailedFallback();
             ShouldRejectModelArmyOrDestinationOutsideCandidateSetWithParseFailedFallback();
             ShouldExposeRouteCandidatesAndArmyAdjacentDestinationsInAgentContext();
+            ShouldAllowOnlyOneConcurrentReservationAtTheCap();
+            ShouldSettleReservationWithRefundOfUnusedQuota();
+            ShouldSubmitTwoHostedAgentsWithoutVersionConflict();
+            ShouldNotCallModelOrBlockWorldWhenReservationFails();
 
             Console.WriteLine("Ming.Agents OpenAI-compatible contract tests passed.");
             return 0;

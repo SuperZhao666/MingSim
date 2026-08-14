@@ -42,14 +42,21 @@ public sealed record HostedDecisionBatch(
 /// - 每个角色的 DecisionId 由 actor + 观察世界版本 + 接受时刻派生，同一决策重试保持
 ///   稳定；模型输出第 N 个意图的 CommandId 稳定派生为 DecisionId-N（doc 07 §12），
 ///   不会因重试绕过内核幂等；
-/// - 调用方必须提供与内核一致的世界快照（当前由宿主进程在安全点持有）；模型结果
-///   即使基于过期快照，内核仍以 STATE_VERSION_CONFLICT 拒绝，绝不“适配一下”执行。
+/// - P1-AGENT-05（Wave 5A 审计）：多角色不能共享同一快照版本——首位提交生效后，
+///   后续角色的意图必须携带内核实际推进后的权威版本，否则被 STATE_VERSION_CONFLICT
+///   拒绝。本类每角色规划前都从 <see cref="RealtimeSimulationRuntime"/> 的权威状态
+///   重取当前版本（绝不是 base+index 猜未来版本），并在本角色提交成功后把收件箱
+///   在当前安全点真实推进，让下一角色看到权威推进后的世界；
+/// - 版本权威性由 Simulation 持有：本类只读 ReadModel 的权威版本，不猜测、不预测；
+///   调用方提供的内容快照用于编译最小上下文与入口预检，内核仍在安全点按最新状态
+///   复核权限、版本与前置条件（doc 08 §8：绝不按旧快照透支资源）。
 /// </remarks>
 public sealed class AgentDecisionHost
 {
     /// <summary>决策窗口：模型结果必须在接受时刻之前一个游戏小时内返回（半开区间，doc 07 §12）。</summary>
     private static readonly TimeSpan DecisionWindow = TimeSpan.FromHours(1);
 
+    private readonly RealtimeSimulationRuntime _runtime;
     private readonly AgentRealtimeEntry _entry;
     private readonly AgentContextCompiler _contextCompiler = new();
     private readonly IReadOnlyList<HostedAgent> _agents;
@@ -63,6 +70,7 @@ public sealed class AgentDecisionHost
             throw new ArgumentException("至少需要注册一位托管角色。", nameof(agents));
         }
 
+        _runtime = runtime;
         _agents = agents.ToArray();
         var duplicate = _agents.GroupBy(agent => agent.ActorId.Value, StringComparer.Ordinal)
             .FirstOrDefault(group => group.Count() > 1);
@@ -75,9 +83,11 @@ public sealed class AgentDecisionHost
     }
 
     /// <summary>
-    /// 让所有托管角色在当前世界快照上完成一次决策并提交意图。
+    /// 让所有托管角色完成一次决策并提交意图；每角色提交成功后从权威状态重取版本
+    /// 再规划下一角色（P1-AGENT-05）。
     /// </summary>
-    /// <param name="world">调用方提供的权威世界快照（读上下文/权限预检用；内核仍在安全点复核）。</param>
+    /// <param name="world">调用方提供的世界内容快照（编译最小上下文/入口权限预检用；
+    /// 版本以运行时权威状态为准，内核仍在安全点复核）。</param>
     /// <param name="acceptedGameTime">结果被世界接受时的权威游戏时刻；缺省为世界当前时刻。</param>
     public async Task<HostedDecisionBatch> DecideAndSubmitAsync(
         WorldState world,
@@ -87,10 +97,22 @@ public sealed class AgentDecisionHost
         ArgumentNullException.ThrowIfNull(world);
         var acceptedAt = acceptedGameTime ?? world.GameTime;
         var decisions = new List<HostedAgentDecision>(_agents.Count);
-        foreach (var agent in _agents.OrderBy(item => item.ActorId.Value, StringComparer.Ordinal))
+        var ordered = _agents.OrderBy(item => item.ActorId.Value, StringComparer.Ordinal).ToArray();
+        for (var index = 0; index < ordered.Length; index++)
         {
+            var agent = ordered[index];
             cancellationToken.ThrowIfCancellationRequested();
+
+            // P1-AGENT-05：规划前从权威状态重取当前版本。前序角色已提交的命令已经过
+            // 安全点真实生效（见下方 AdvanceTo），因此这里读到的必然是内核实际推进后的
+            // 版本——用 base+index 猜未来版本被明确禁止。
+            var authoritativeVersion = _runtime.ReadModel.WorldVersion;
             var context = _contextCompiler.Compile(world, agent.ActorId);
+            if (context.WorldVersion != authoritativeVersion)
+            {
+                context = context with { WorldVersion = authoritativeVersion };
+            }
+
             var decisionId = BuildDecisionId(agent.ActorId, context.WorldVersion, acceptedAt);
             var request = new DecisionRequest(
                 decisionId,
@@ -102,6 +124,14 @@ public sealed class AgentDecisionHost
             var submissions = _entry.Submit(world, result.Intents);
             decisions.Add(new HostedAgentDecision(
                 agent.ActorId, decisionId, result.Source, result.FallbackReason, result.Intents, submissions));
+
+            // 本角色提交成功后（有意图进入收件箱）在当前安全点真实推进，权威版本随之
+            // 前进；下一角色据此重取。末位角色无需内部推进：调用方在自己的安全点统一
+            // 受理即可，保持“调用方一次 AdvanceTo 看到批次结果”的既有契约。
+            if (index < ordered.Length - 1 && submissions.Any(submission => submission.Accepted))
+            {
+                _runtime.AdvanceTo(_runtime.ReadModel.GameTime);
+            }
         }
 
         return new HostedDecisionBatch(acceptedAt, decisions);
