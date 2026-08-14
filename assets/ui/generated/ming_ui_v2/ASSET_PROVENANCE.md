@@ -74,4 +74,3 @@
 上一轮遗留的一批 ImageGen 源图集与预览（如 `source/functional-icons-source.png`、
 `backgrounds/ming-imperial-study-dawn.png`、`frames/*` 等）没有可复核的生成 ID 记录，
 无法补证，已从工作树删除，不进入交付清单。运行时默认只消费本文件覆盖的 55 张资产。
-
