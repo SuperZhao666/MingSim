@@ -65,6 +65,7 @@ public static class RealtimeSnapshotHash
                 WriteFingerprintString(writer, decree.RequiredCapability.ToString());
                 WriteFingerprintString(writer, decree.RequiredResourceId ?? string.Empty);
                 WriteFingerprintString(writer, decree.LinkedShipmentId ?? string.Empty);
+                WriteFingerprintString(writer, decree.Kind.ToString());
                 writer.Write(decree.SubmittedAt.UtcTicks);
                 writer.Write(decree.ExpectedWorldVersion);
                 break;

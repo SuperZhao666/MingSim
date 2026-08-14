@@ -62,6 +62,10 @@ internal static partial class Program
             ShouldEnforceMaxCostMillisAndSaturatingBoundaries();
             ShouldFallBackToRulesWhenParserThrows();
             ShouldDeriveFreshIdempotencyKeyPerWorldVersion();
+            ShouldUseRealRouteFromWorldJsonWhenRulesFallbackIn1629Scenario();
+            ShouldRejectModelRouteIdOutsideCandidateSetWithParseFailedFallback();
+            ShouldRejectModelArmyOrDestinationOutsideCandidateSetWithParseFailedFallback();
+            ShouldExposeRouteCandidatesAndArmyAdjacentDestinationsInAgentContext();
 
             Console.WriteLine("Ming.Agents OpenAI-compatible contract tests passed.");
             return 0;

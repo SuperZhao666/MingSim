@@ -31,6 +31,10 @@ public sealed class CommandFacade
             $"ui-speed-{expectedWorldVersion}-{BitConverter.DoubleToInt64Bits(speed)}",
             actorId, speed, submittedAt, expectedWorldVersion));
 
+    /// <summary>为一次调粮从权威路线中选择当前可执行路线（P1-UI-01 修复，只读投影）。</summary>
+    public RouteId? ResolveRouteForGrainShipment(CharacterId actorId, long grainQuantity) =>
+        _runtime.ResolveRouteForGrainShipment(actorId, grainQuantity);
+
     public RealtimeCommandReceipt EnqueueCreateShipment(
         string commandId,
         CharacterId actorId,
