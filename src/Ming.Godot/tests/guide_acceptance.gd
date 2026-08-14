@@ -33,6 +33,10 @@ func _init() -> void:
 	_assert(guide_entry != null, "新手引导入口按钮存在")
 	var guide_panel := root.find_child("GuidePanel", true, false) as Control
 	_assert(guide_panel != null, "引导面板节点存在")
+	var decree_entry := root.find_child("OpenDecreePanel", true, false) as BaseButton
+	_assert(decree_entry != null, "政令入口按钮存在")
+	var endgame_entry := root.find_child("OpenEndgameReport", true, false) as BaseButton
+	_assert(endgame_entry != null, "终局复盘入口按钮存在")
 	if guide_entry == null or guide_panel == null:
 		_finish()
 		return
@@ -66,6 +70,21 @@ func _init() -> void:
 		skip_button.emit_signal("pressed")
 		await process_frame
 		_assert(not bool(guide_panel.visible), "跳过按钮可关闭引导面板")
+
+	if decree_entry != null:
+		guide_entry.emit_signal("pressed")
+		await process_frame
+		_assert(bool(guide_panel.visible), "再次打开引导后可再次进入")
+		decree_entry.emit_signal("pressed")
+		await process_frame
+		_assert(not bool(guide_panel.visible), "打开政令后应关闭引导面板")
+	if endgame_entry != null:
+		guide_entry.emit_signal("pressed")
+		await process_frame
+		_assert(bool(guide_panel.visible), "再次打开引导后可再次进入")
+		endgame_entry.emit_signal("pressed")
+		await process_frame
+		_assert(not bool(guide_panel.visible), "打开终局复盘后应关闭引导面板")
 
 	# 验收脚本源代码层面不允许出现可写核心状态入口与推进函数。
 	var guide_source := FileAccess.get_file_as_string("res://src/Ming.Godot/scripts/GuidePanel.cs")
