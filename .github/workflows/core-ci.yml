@@ -38,3 +38,6 @@ jobs:
 
       - name: Run core smoke tests
         run: dotnet run --project tests/Ming.SmokeTests/Ming.SmokeTests.csproj -c Release --no-build
+
+      - name: Run Agents contract tests
+        run: dotnet run --project tests/Ming.Agents.ContractTests/Ming.Agents.ContractTests.csproj -c Release --no-build
