@@ -93,10 +93,10 @@ public sealed class UtilityMinisterAgent : IAgentDecisionSource
 
     private static WorldIntent BuildFacilityIntent(AgentContext context) =>
         new BuildFacilityIntent(
-            "agent-build-first-flintlock-workshop",  // 意图ID（本回合动作唯一标识）
+            $"agent-build-first-flintlock-workshop-{context.WorldVersion}",  // 意图ID：随世界版本变化，不同决策周期可再次提交
             context.ActorId,
             context.TurnNumber,
-            "turn-1-build-first-flintlock-workshop", // 幂等键，避免重复提交同一动作
+            $"build-first-flintlock-workshop-{context.WorldVersion}", // 幂等键：同版本重复提交被内核去重，版本推进后产生新动作
             new FacilityId("factory-capital-flintlock-01"),
             new ProvinceId("capital"),
             FacilityType.FlintlockWorkshop,
@@ -109,20 +109,20 @@ public sealed class UtilityMinisterAgent : IAgentDecisionSource
         // Decide 只在 CanConvertArmy 成立时调用本方法，因此一定存在可转化军队。
         var army = context.Armies.First(candidate => candidate.Auxiliaries >= 1_000);
         return new ConvertArmyIntent(
-            "agent-convert-frontier-1000",
+            $"agent-convert-frontier-1000-{context.WorldVersion}",
             context.ActorId,
             context.TurnNumber,
-            "turn-1-convert-frontier-1000",
+            $"convert-frontier-1000-{context.WorldVersion}",
             army.ArmyId,
             Count: 1_000);
     }
 
     private static WorldIntent BuildPlanLogisticsIntent(AgentContext context) =>
         new PlanLogisticsIntent(
-            "agent-logistics-ningyuan-300",
+            $"agent-logistics-ningyuan-300-{context.WorldVersion}",
             context.ActorId,
             context.TurnNumber,
-            "turn-1-logistics-ningyuan-300",
+            $"logistics-ningyuan-300-{context.WorldVersion}",
             context.WorldVersion,
             new RouteId("capital-ningyuan-grain"),
             300,
