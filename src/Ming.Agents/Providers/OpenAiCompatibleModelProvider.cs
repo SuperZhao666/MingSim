@@ -20,9 +20,11 @@ public sealed class OpenAiCompatibleModelProvider : IModelProvider
 {
     private const int DefaultMaxResponseBytes = 1_048_576;
     private const int DefaultMaxTokens = 512;
+    private static readonly TimeSpan DefaultTotalTimeout = TimeSpan.FromSeconds(30);
     // 结构化决策草案不需要接近模型上下文上限；硬上限防止调用方用极大整数关闭响应保护。
     private const int MaximumMaxResponseBytes = 4 * 1024 * 1024;
     private const int MaximumMaxTokens = 8_192;
+    private static readonly TimeSpan MaximumTotalTimeout = TimeSpan.FromMinutes(5);
     private const string JsonOnlyInstruction =
         "Return exactly one JSON object (for example, {}) and no markdown, prose, or code fences.";
 
@@ -33,25 +35,29 @@ public sealed class OpenAiCompatibleModelProvider : IModelProvider
     private readonly string _modelName;
     private readonly int _maxResponseBytes;
     private readonly int _maxTokens;
+    private readonly TimeSpan _totalTimeout;
 
     public OpenAiCompatibleModelProvider(
         HttpClient httpClient,
         string modelName,
         int maxResponseBytes = DefaultMaxResponseBytes,
-        int maxTokens = DefaultMaxTokens)
+        int maxTokens = DefaultMaxTokens,
+        TimeSpan? totalTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
         ArgumentException.ThrowIfNullOrWhiteSpace(modelName);
+        var resolvedTotalTimeout = totalTimeout ?? DefaultTotalTimeout;
 
         if (httpClient.BaseAddress is not { } baseAddress ||
             !baseAddress.IsAbsoluteUri ||
             (baseAddress.Scheme != Uri.UriSchemeHttp && baseAddress.Scheme != Uri.UriSchemeHttps) ||
+            !string.IsNullOrEmpty(baseAddress.UserInfo) ||
             !string.IsNullOrEmpty(baseAddress.Query) ||
             !string.IsNullOrEmpty(baseAddress.Fragment) ||
             !baseAddress.AbsolutePath.EndsWith("/", StringComparison.Ordinal))
         {
             throw new ArgumentException(
-                "The configured HttpClient BaseAddress must be an absolute HTTP or HTTPS URI with no query or fragment and a trailing slash.",
+                "The configured HttpClient BaseAddress must be an absolute HTTP or HTTPS URI with no user info, query, or fragment and a trailing slash.",
                 nameof(httpClient));
         }
 
@@ -69,10 +75,18 @@ public sealed class OpenAiCompatibleModelProvider : IModelProvider
                 $"The max_tokens value must be between 1 and {MaximumMaxTokens}.");
         }
 
+        if (resolvedTotalTimeout <= TimeSpan.Zero || resolvedTotalTimeout > MaximumTotalTimeout)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(totalTimeout),
+                $"The total timeout must be greater than zero and no more than {MaximumTotalTimeout}.");
+        }
+
         _httpClient = httpClient;
         _modelName = modelName;
         _maxResponseBytes = maxResponseBytes;
         _maxTokens = maxTokens;
+        _totalTimeout = resolvedTotalTimeout;
     }
 
     public async Task<ModelResponse> GenerateAsync(
@@ -84,6 +98,12 @@ public sealed class OpenAiCompatibleModelProvider : IModelProvider
         ArgumentException.ThrowIfNullOrWhiteSpace(request.UserInput);
         ArgumentException.ThrowIfNullOrWhiteSpace(request.ExpectedOutputSchema);
         cancellationToken.ThrowIfCancellationRequested();
+
+        using var totalTimeoutCancellation = new CancellationTokenSource(_totalTimeout);
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            totalTimeoutCancellation.Token);
+        var operationCancellationToken = linkedCancellation.Token;
 
         var payload = new
         {
@@ -117,7 +137,7 @@ public sealed class OpenAiCompatibleModelProvider : IModelProvider
                 Content = content,
             };
             using var response = await _httpClient
-                .SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                .SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, operationCancellationToken)
                 .ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
@@ -131,7 +151,7 @@ public sealed class OpenAiCompatibleModelProvider : IModelProvider
                 return Failure("Provider response exceeded the response size limit.");
             }
 
-            var responseBytes = await ReadResponseBytesAsync(response.Content, _maxResponseBytes, cancellationToken)
+            var responseBytes = await ReadResponseBytesAsync(response.Content, _maxResponseBytes, operationCancellationToken)
                 .ConfigureAwait(false);
 
             try
@@ -151,6 +171,10 @@ public sealed class OpenAiCompatibleModelProvider : IModelProvider
         {
             // 调用方取消必须保留为取消信号，不能伪装成普通模型失败。
             throw;
+        }
+        catch (OperationCanceledException) when (totalTimeoutCancellation.IsCancellationRequested)
+        {
+            return Failure("Provider request timed out.");
         }
         catch (Exception)
         {

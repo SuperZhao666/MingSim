@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
@@ -24,6 +25,7 @@ internal static class Program
             ShouldRejectNonCompleteFinishReasons();
             ShouldRejectMissingOrBlankContent();
             ShouldEnforceResponseSizeLimit();
+            ShouldTimeoutWhenResponseBodyStalls();
             ShouldValidateBaseAddressAndLimits();
             ShouldPropagateCancellation();
             ShouldRedactTimeoutAndDisposeFailures();
@@ -228,6 +230,28 @@ internal static class Program
         }
     }
 
+    private static void ShouldTimeoutWhenResponseBodyStalls()
+    {
+        using var client = CreateClient(new FakeHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                // 头部立即返回，正文使用未知长度的真实 Stream 永久等待。
+                Content = new StallingContent(),
+            })));
+        var provider = new OpenAiCompatibleModelProvider(
+            client,
+            "test-model",
+            totalTimeout: TimeSpan.FromMilliseconds(100));
+        var stopwatch = Stopwatch.StartNew();
+
+        var response = provider.GenerateAsync(Request).GetAwaiter().GetResult();
+
+        stopwatch.Stop();
+        Require(!response.Succeeded, "a stalled response body should fail");
+        Require(response.ErrorMessage == "Provider request timed out.", "body timeout should have a stable error");
+        Require(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"body timeout should finish promptly (took {stopwatch.Elapsed})");
+    }
+
     private static void ShouldValidateBaseAddressAndLimits()
     {
         using (var client = CreateClient(new FakeHttpMessageHandler((_, _) => Task.FromResult(JsonResponse("{}")))))
@@ -257,6 +281,27 @@ internal static class Program
             }
         }
 
+        var userInfoHandlerCalls = 0;
+        using (var client = CreateClient(new FakeHttpMessageHandler((_, _) =>
+                   {
+                       Interlocked.Increment(ref userInfoHandlerCalls);
+                       return Task.FromResult(JsonResponse("{}"));
+                   }), "https://user@provider.test/v1/"))
+        {
+            try
+            {
+                _ = new OpenAiCompatibleModelProvider(client, "test-model");
+                throw new InvalidOperationException("BaseAddress user info should be rejected");
+            }
+            catch (ArgumentException exception)
+            {
+                Require(exception.Message.Contains("no user info", StringComparison.Ordinal), "BaseAddress error should explain the user-info restriction");
+                Require(!exception.Message.Contains("user@", StringComparison.Ordinal), "BaseAddress error should not echo user info");
+            }
+        }
+
+        Require(userInfoHandlerCalls == 0, "a BaseAddress with user info must be rejected before any request is sent");
+
         using (var client = CreateClient(new FakeHttpMessageHandler((_, _) => Task.FromResult(JsonResponse("{}")))))
         {
             RequireThrows<ArgumentOutOfRangeException>(
@@ -277,6 +322,15 @@ internal static class Program
             RequireThrows<ArgumentOutOfRangeException>(
                 () => _ = new OpenAiCompatibleModelProvider(client, "test-model", 1, 8_193),
                 "max_tokens above the hard maximum should be rejected");
+            RequireThrows<ArgumentOutOfRangeException>(
+                () => _ = new OpenAiCompatibleModelProvider(client, "test-model", 1, 1, TimeSpan.Zero),
+                "zero total timeout should be rejected");
+            RequireThrows<ArgumentOutOfRangeException>(
+                () => _ = new OpenAiCompatibleModelProvider(client, "test-model", 1, 1, Timeout.InfiniteTimeSpan),
+                "infinite total timeout should be rejected");
+            RequireThrows<ArgumentOutOfRangeException>(
+                () => _ = new OpenAiCompatibleModelProvider(client, "test-model", 1, 1, TimeSpan.FromMinutes(5).Add(TimeSpan.FromMilliseconds(1))),
+                "total timeout above the hard maximum should be rejected");
         }
     }
 
@@ -418,6 +472,71 @@ internal static class Program
         {
             length = 0;
             return false;
+        }
+    }
+
+    private sealed class StallingContent : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            throw new InvalidOperationException("serialization should not be used by the provider");
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override Task<Stream> CreateContentReadStreamAsync() =>
+            Task.FromResult<Stream>(new StallingStream());
+    }
+
+    private sealed class StallingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() => throw new NotSupportedException();
+
+        public override Task FlushAsync(CancellationToken cancellationToken) =>
+            Task.FromException(new NotSupportedException());
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        public override int Read(Span<byte> buffer) => throw new NotSupportedException();
+
+        public override Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken = default) =>
+            WaitForCancellationAsync(cancellationToken).AsTask();
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            WaitForCancellationAsync(cancellationToken);
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override void Write(ReadOnlySpan<byte> buffer) => throw new NotSupportedException();
+
+        private static async ValueTask<int> WaitForCancellationAsync(CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
         }
     }
 
