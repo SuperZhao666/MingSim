@@ -60,7 +60,8 @@ public partial class MainUi : Control
     private Label _realtimeClock = null!;
     private Label _realtimeStockpiles = null!;
     private Label _realtimeOutcome = null!;
-    private bool _uiPauseRequested;
+    private IReadOnlyList<StaticRoute>? _fleetRoutes;
+    private long _fleetWorldVersion = long.MinValue;
     private Tween? _transitionTween;
     private bool _strategicView;
     private bool _transitioning;
@@ -120,6 +121,7 @@ public partial class MainUi : Control
         if (_runtime is null) return;
         _runtime.Advance(TimeSpan.FromSeconds(delta));
         RefreshRealtimeLabels();
+        RefreshFleetReadModel();
     }
 
     public override void _GuiInput(InputEvent @event)
@@ -684,6 +686,26 @@ public partial class MainUi : Control
         guideButton.Pressed += OpenGuidePanel;
 
         RefreshRealtimeLabels();
+        RefreshFleetReadModel(force: true);
+    }
+
+    private void RefreshFleetReadModel(bool force = false)
+    {
+        if (_runtime is null || !IsInstanceValid(_map)) return;
+        var model = _runtime.ReadModel;
+        if (!force && model.WorldVersion == _fleetWorldVersion) return;
+
+        try
+        {
+            _fleetRoutes ??= MapFleetReadModel.LoadStaticRoutes(RealtimeWorldBridge.ResolveWorldJsonPath());
+            _map.SetFleetReadModel(MapFleetReadModel.Create(model, _fleetRoutes));
+            _fleetWorldVersion = model.WorldVersion;
+        }
+        catch (Exception exception)
+        {
+            GD.PushError($"粮运地图只读投影失败：{exception.Message}");
+            _map.SetFleetReadModel(null);
+        }
     }
 
     private void OpenGuidePanel()
@@ -713,7 +735,6 @@ public partial class MainUi : Control
 
     private void SubmitPause(bool paused)
     {
-        _uiPauseRequested = paused;
         _facade?.EnqueuePause(
             paused, new CharacterId("zhu-youjian"), _runtime?.ReadModel.GameTime.Value ?? default, _runtime?.ReadModel.WorldVersion ?? 0);
     }
@@ -754,7 +775,7 @@ public partial class MainUi : Control
         var model = _runtime.ReadModel;
         _realtimeClock.Text =
             $"崇祯二年 · {model.GameTime.Value:yyyy-MM-dd HH:mm} · WorldVersion {model.WorldVersion} · " +
-            $"{(_uiPauseRequested ? "已暂停" : "运行中")} · 战备 {model.Readiness.Value} · 负担 {model.Scenario.LocalBurden} · 信任 {model.Scenario.MinisterTrust}";
+            $"{(model.IsPaused ? "已暂停" : "运行中")} · 战备 {model.Readiness.Value} · 负担 {model.Scenario.LocalBurden} · 信任 {model.Scenario.MinisterTrust}";
         var stocks = string.Join(" · ", model.Stockpiles
             .OrderBy(item => item.Id.Value, StringComparer.Ordinal)
             .Select(item => $"{item.Id.Value.Replace("sp-", "", StringComparison.Ordinal)}:{item.GrainQuantity}石"));

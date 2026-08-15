@@ -192,6 +192,7 @@ public sealed class RealtimeSimulationRuntime
 
     private readonly CapabilityAuthorizer _authorizer = new();
     private readonly ICommitStore? _commitStore;
+    private readonly bool _isReadOnlyRecovery;
     private readonly ConcurrentQueue<RealtimeCommand> _inbox = new();
     private readonly object _writerGate = new();
     private WorldState _state;
@@ -214,6 +215,7 @@ public sealed class RealtimeSimulationRuntime
     {
         ArgumentNullException.ThrowIfNull(initialState);
         _commitStore = commitStore;
+        _isReadOnlyRecovery = false;
         _state = initialState.Clone();
         _initialGameTime = _state.GameTime;
         _initialWorldVersion = _state.WorldVersion;
@@ -221,13 +223,18 @@ public sealed class RealtimeSimulationRuntime
         _commandOutcomes = new(StringComparer.Ordinal);
         _outboxEvents = [];
         _speed = 1.0;
-        var initialWork = new WorkingCopy(_state, _scheduledEvents, _commandOutcomes, _outboxEvents, _nextCreationSequence, _nextIngressSequence, 0, _isPaused, _speed, _nextEventSequence);
+        var initialWork = new WorkingCopy(_state, _scheduledEvents, _commandOutcomes, _outboxEvents, _nextCreationSequence, _nextIngressSequence, 0, _isPaused, _speed, _nextEventSequence, 0m);
         ScheduleDailyHeartbeat(_state, _scheduledEvents, initialWork);
         _nextCreationSequence = initialWork.NextCreationSequence;
     }
 
-    private RealtimeSimulationRuntime(RealtimeSnapshot snapshot)
+    private RealtimeSimulationRuntime(
+        RealtimeSnapshot snapshot,
+        ICommitStore? commitStore = null,
+        bool isReadOnlyRecovery = false)
     {
+        _commitStore = commitStore;
+        _isReadOnlyRecovery = isReadOnlyRecovery;
         if (snapshot.SchemaVersion != RealtimeSnapshotSchema.Version)
         {
             throw new InvalidDataException($"不支持实时快照版本 {snapshot.SchemaVersion}。");
@@ -290,6 +297,12 @@ public sealed class RealtimeSimulationRuntime
         }
     }
 
+    /// <summary>
+    /// 是否由损坏存档回退到较早 READY 快照。该模式只允许查看/导出，
+    /// 所有新命令与时间推进均 fail-closed，直到上层执行显式存档修复。
+    /// </summary>
+    public bool IsReadOnlyRecovery => _isReadOnlyRecovery;
+
     public double Speed
     {
         get
@@ -320,6 +333,18 @@ public sealed class RealtimeSimulationRuntime
             {
                 return new ReadOnlyCollection<DomainEvent>(_outboxEvents.ToArray());
             }
+        }
+    }
+
+    /// <summary>
+    /// 为 Application/Agent 决策编译提供一份与 live authority 完全脱离的深拷贝。
+    /// 调用方即使修改返回对象也不会修改运行时；真正写入仍只能提交 RealtimeCommand。
+    /// </summary>
+    public WorldState CaptureDetachedWorldSnapshot()
+    {
+        lock (_writerGate)
+        {
+            return _state.Clone();
         }
     }
 
@@ -505,7 +530,7 @@ public sealed class RealtimeSimulationRuntime
     public static RealtimeSimulationRuntime Restore(RealtimeSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        return new RealtimeSimulationRuntime(snapshot);
+        return new RealtimeSimulationRuntime(snapshot, commitStore: null);
     }
 
     /// <summary>从提交商店恢复最后一个完整提交（doc 04 §5）；没有提交时抛异常而不是静默开新世界。</summary>
@@ -514,7 +539,7 @@ public sealed class RealtimeSimulationRuntime
         ArgumentNullException.ThrowIfNull(store);
         var loaded = store.LoadCommittedWorld()
             ?? throw new InvalidDataException("提交商店中没有可恢复的完整提交。");
-        return Restore(loaded.Snapshot);
+        return new RealtimeSimulationRuntime(loaded.Snapshot, store, loaded.IsReadOnlySalvage);
     }
 
     /// <summary>确定性地推进到目标游戏时刻；过去时刻只返回结构化错误。</summary>
@@ -530,6 +555,14 @@ public sealed class RealtimeSimulationRuntime
     {
         var errors = new List<SimulationError>();
         var startTime = _state.GameTime;
+
+        if (_isReadOnlyRecovery)
+        {
+            errors.Add(new SimulationError(
+                "RECOVERY_READ_ONLY",
+                "当前世界来自损坏存档的回退快照，仅允许查看/导出；继续写入前必须显式修复存档。"));
+            return Report(false, [], [], errors, startTime, 0);
+        }
 
         if (targetGameTime < _state.GameTime)
         {
@@ -621,14 +654,30 @@ public sealed class RealtimeSimulationRuntime
             var gameTicks = ((decimal)realElapsed.Ticks / TimeSpan.TicksPerSecond) *
                 (decimal)GameHoursPerRealSecondAtSpeedOne * (decimal)_speed * TimeSpan.TicksPerHour;
 
-            _realGameTickRemainder += gameTicks;
             var startTime = _state.GameTime;
+            var remainderBeforeFrame = _realGameTickRemainder;
+            _realGameTickRemainder += gameTicks;
             var requestedTicks = decimal.Truncate(_realGameTickRemainder);
             var target = new GameTime(startTime.Value.AddTicks(checked((long)requestedTicks)));
-            var result = AdvanceToCore(target, fixedHourlyCommits: true);
-            var committedTicks = (decimal)(result.ReadModel.GameTime.Value - startTime.Value).Ticks;
-            _realGameTickRemainder -= committedTicks;
-            return MergeReports(ingress, result, startTime);
+            try
+            {
+                // 时间/事件提交会在候选 WorkingCopy 中按实际推进量消费 realtime remainder，
+                // 并与该提交同一 durable snapshot 落盘。不能在返回后再统一扣除，否则
+                // 崩溃恢复可能把“已推进的时间”再次作为 remainder 重放。
+                var result = AdvanceToCore(target, fixedHourlyCommits: true);
+                return MergeReports(ingress, result, startTime);
+            }
+            catch
+            {
+                // 第一次时间提交前失败时，本帧新增余数尚未持久化，恢复进入本帧前的值。
+                // 若已有提交成功，CommitWorkingCopy 已发布消费后的余数，此时 GameTime 已改变，
+                // 不得回滚到旧 remainder。
+                if (_state.GameTime == startTime)
+                {
+                    _realGameTickRemainder = remainderBeforeFrame;
+                }
+                throw;
+            }
         }
     }
 
@@ -644,6 +693,18 @@ public sealed class RealtimeSimulationRuntime
         ArgumentNullException.ThrowIfNull(command);
         lock (_writerGate)
         {
+            if (_isReadOnlyRecovery)
+            {
+                var error = new SimulationError(
+                    "RECOVERY_READ_ONLY",
+                    "当前世界来自损坏存档的回退快照，仅允许查看/导出；继续写入前必须显式修复存档。");
+                return new RealtimeCommandReceipt(
+                    command.CommandId,
+                    false,
+                    error.Message,
+                    new ReadOnlyCollection<SimulationError>([error]));
+            }
+
             if (!IsValidId(command.CommandId))
             {
                 return new RealtimeCommandReceipt(
@@ -692,7 +753,10 @@ public sealed class RealtimeSimulationRuntime
                 duplicateEvents.Add(CreateEvent(candidate, command.CommandId, duplicate ? "CommandDeduplicated" : "CommandRejected",
                     candidate.State.GameTime, ("ingress_sequence", ingressSequence.ToString()), ("command_id", command.CommandId)));
                 candidate.Outbox.Add(duplicateEvents[^1]);
-                CommitWorkingCopy(candidate);
+                var duplicatePendingAfterCommit = _inbox.ToArray().Skip(1).ToArray();
+                // CommandId 已有终态时，side-table 也必须保留原始终态；不同指纹的冲突只是
+                // 本次重试的诊断事件，不能用 INSERT OR REPLACE 把原来的 accepted/rejected 事实覆盖掉。
+                CommitWorkingCopy(candidate, duplicatePendingAfterCommit, inputOutcome: null);
                 _inbox.TryDequeue(out _);
                 events.AddRange(duplicateEvents);
                 results.Add(duplicateResult);
@@ -700,7 +764,9 @@ public sealed class RealtimeSimulationRuntime
             }
 
             var result = ValidateAndApplyCommand(candidate, command, ingressSequence, fingerprint, events);
-            CommitWorkingCopy(candidate);
+            var pendingAfterCommit = _inbox.ToArray().Skip(1).ToArray();
+            var inputOutcome = result.Accepted ? null : ToInputOutcome(result);
+            CommitWorkingCopy(candidate, pendingAfterCommit, inputOutcome);
             _inbox.TryDequeue(out _);
             results.Add(result);
         }
@@ -950,11 +1016,18 @@ public sealed class RealtimeSimulationRuntime
             return RejectDecree(candidate, command, "RESPONSIBLE_ACTOR_NOT_FOUND", "政令承办人不存在。", ingressSequence, acceptedAt, events);
         }
 
-        // P1-AUTH-02：签发人必须是世界内真实角色。旧实现只校验承办人存在，
-        // 签发人（ActorId）可被任意伪造；现在先做签发人真实性校验，防伪冒 issuer。
+        // P1-AUTH-02：签发人不仅必须真实存在，还必须持有独立的 IssueDecree 权限。
+        // “角色存在”绝不等价于“有权代表皇权签发政令”；签发、承办、批准三种职责分别授权。
         if (!candidate.State.Characters.ContainsKey(command.ActorId))
         {
             return RejectDecree(candidate, command, "DECREE_ISSUER_UNAUTHORIZED", "政令签发人不存在。", ingressSequence, acceptedAt, events);
+        }
+
+        var issuerAuthorization = _authorizer.Check(candidate.State, command.ActorId, GameCapability.IssueDecree, resourceId: null);
+        if (!issuerAuthorization.Allowed)
+        {
+            return RejectDecree(candidate, command, "DECREE_ISSUER_UNAUTHORIZED",
+                $"政令签发人没有 IssueDecree 授权：{issuerAuthorization.Reason}", ingressSequence, acceptedAt, events);
         }
 
         var policy = ResolveDecreePolicy(command.Kind);
@@ -989,7 +1062,12 @@ public sealed class RealtimeSimulationRuntime
         // 只原子记录 CommandId 终态 Outcome，绝不能在"世界和时间不变"的拒绝路径上偷偷扣预算或改信任。
         if (policy.ResponsibleCapability is not null)
         {
-            var authorization = _authorizer.Check(candidate.State, command.ResponsibleActorId, policy.ResponsibleCapability.Value, resourceId: null);
+            var authorization = _authorizer.Check(
+                candidate.State,
+                command.ResponsibleActorId,
+                policy.ResponsibleCapability.Value,
+                resourceId: null,
+                amount: policy.ResponsibleCapability == GameCapability.AllocateFinance ? command.Budget : null);
             if (!authorization.Allowed)
             {
                 return RejectDecree(candidate, command, "DECREE_RESPONSIBLE_UNAUTHORIZED", authorization.Reason, ingressSequence, acceptedAt, events);
@@ -1091,16 +1169,18 @@ public sealed class RealtimeSimulationRuntime
             return Reject(command.CommandId, "命令中的对象编号不合法。", "INVALID_OBJECT_ID", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
-        // P1-A（审查修复）：批准人必须持有 AllocateFinance（角色不存在时 CapabilityAuthorizer 同样拒绝）。
-        var approverAuthorization = _authorizer.Check(candidate.State, command.ActorId, GameCapability.AllocateFinance, resourceId: null);
-        if (!approverAuthorization.Allowed)
-        {
-            return Reject(command.CommandId, $"批准人没有财权（AllocateFinance）授权：{approverAuthorization.Reason}", "DECREE_APPROVER_UNAUTHORIZED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
-        }
-
         if (!candidate.State.Decrees.TryGetValue(command.DecreeId, out var decree))
         {
             return Reject(command.CommandId, "政令不存在。", "DECREE_NOT_FOUND", ingressSequence, acceptedAt, candidate.State.WorldVersion);
+        }
+
+        // P1-A（审查修复）：批准人必须持有 AllocateFinance（角色不存在时 CapabilityAuthorizer 同样拒绝）。
+        // 若授权来自 Appointment.Limit，则本次请饷预算也必须落在额度内。
+        var approverAuthorization = _authorizer.Check(
+            candidate.State, command.ActorId, GameCapability.AllocateFinance, resourceId: null, amount: decree.Budget);
+        if (!approverAuthorization.Allowed)
+        {
+            return Reject(command.CommandId, $"批准人没有足够财权（AllocateFinance）授权：{approverAuthorization.Reason}", "DECREE_APPROVER_UNAUTHORIZED", ingressSequence, acceptedAt, candidate.State.WorldVersion);
         }
 
         // Kind==RequestSupply 校验：只有请愿文书进入 Submitted（创建时不变量），该检查同时覆盖
@@ -1178,6 +1258,7 @@ public sealed class RealtimeSimulationRuntime
         var candidateEvents = new List<DomainEvent>();
         try
         {
+            var previousTime = candidate.State.GameTime;
             candidate.State.AdvanceTo(scheduled.DueGameTime);
             candidate.PendingWorldVersion = candidate.State.WorldVersion + 1;
             candidate.PendingCommitId = $"event-{scheduled.CreationSequence}";
@@ -1191,6 +1272,7 @@ public sealed class RealtimeSimulationRuntime
 
             candidate.ProcessedScheduledEventCount++;
             candidate.State.CommitRealtime(candidate.State.WorldVersion + 1, $"event-{scheduled.CreationSequence}");
+            ConsumeRealtimeRemainder(candidate, candidate.State.GameTime.Value - previousTime.Value);
             CommitWorkingCopy(candidate);
             events.AddRange(candidateEvents);
             error = null;
@@ -1531,6 +1613,7 @@ public sealed class RealtimeSimulationRuntime
         // 纯时间提交同样原子更新 GameTime、WorldVersion、CommitId 和 Scheduler；
         // 帧切分只影响余数累计，不影响这次明确目标提交的结果。
         candidate.State.CommitRealtime(candidate.State.WorldVersion + 1, $"time-{target.Value.UtcTicks}");
+        ConsumeRealtimeRemainder(candidate, target.Value - previous.Value);
         CommitWorkingCopy(candidate);
     }
 
@@ -1544,12 +1627,32 @@ public sealed class RealtimeSimulationRuntime
         _processedScheduledEventCount,
         _isPaused,
         _speed,
-        _nextEventSequence);
+        _nextEventSequence,
+        _realGameTickRemainder);
 
-    private void CommitWorkingCopy(WorkingCopy candidate)
+    private void CommitWorkingCopy(
+        WorkingCopy candidate,
+        IReadOnlyList<RealtimeCommand>? pendingCommandsAfterCommit = null,
+        InputOutcome? inputOutcome = null)
     {
         // 本次提交新产生的事件日志增量：候选 outbox 里超过既有 outbox 数量的部分。
         var newEvents = candidate.Outbox.Skip(_outboxEvents.Count).ToArray();
+        var durablePending = pendingCommandsAfterCommit ?? _inbox.ToArray();
+
+        // P1-PERSIST：先把候选状态构造成完整 durable snapshot，并先提交存储；
+        // 只有 durable commit 成功后才发布 live references。这样 store 失败时内存、队列、DB
+        // 都仍停在上一个完整提交，不会形成 Memory=new / DB=old 的 split-brain。
+        if (_commitStore is not null)
+        {
+            var snapshot = CaptureCandidateSnapshot(candidate, durablePending);
+            var outcomes = inputOutcome is null ? Array.Empty<InputOutcome>() : [inputOutcome];
+            var receipt = _commitStore.CommitWorld(new CommitPackage(snapshot, newEvents, outcomes));
+            if (!receipt.Success)
+            {
+                throw new InvalidOperationException($"提交商店写入失败，中止推进：{receipt.Error}");
+            }
+        }
+
         _state = candidate.State;
         _scheduledEvents = candidate.Scheduled;
         _commandOutcomes = candidate.Outcomes;
@@ -1560,17 +1663,57 @@ public sealed class RealtimeSimulationRuntime
         _isPaused = candidate.IsPaused;
         _speed = candidate.Speed;
         _nextEventSequence = candidate.NextEventSequence;
+        _realGameTickRemainder = candidate.RealGameTickRemainder;
+    }
 
-        // 权威提交落盘：内存发布之后立刻调用持久化端口；端口失败必须中止本次推进，
-        // 让上层把整个会话视为致命错误（数据库始终保持上一个完整提交，绝不写半状态）。
-        if (_commitStore is not null)
+    private RealtimeSnapshot CaptureCandidateSnapshot(
+        WorkingCopy candidate,
+        IReadOnlyList<RealtimeCommand> pendingCommands)
+    {
+        var outboxEvents = candidate.Outbox.ToArray();
+        var outcomes = candidate.Outcomes.Values.OrderBy(item => item.IngressSequence).ToArray();
+        var (stateHash, payloadChecksum) = RealtimeSnapshotHash.ComputeHashes(
+            candidate.State, candidate.Scheduled, pendingCommands, candidate.NextCreationSequence, candidate.NextIngressSequence,
+            outcomes, _randomState, outboxEvents, candidate.RealGameTickRemainder,
+            _initialGameTime, _initialWorldVersion, candidate.ProcessedScheduledEventCount, candidate.IsPaused, candidate.Speed, candidate.NextEventSequence);
+        return new RealtimeSnapshot(
+            RealtimeSnapshotSchema.Version,
+            candidate.State.Clone(),
+            candidate.Scheduled.ToArray(),
+            pendingCommands.ToArray(),
+            candidate.NextCreationSequence,
+            candidate.NextIngressSequence,
+            outcomes,
+            _randomState,
+            outboxEvents,
+            candidate.RealGameTickRemainder,
+            stateHash,
+            payloadChecksum,
+            _initialGameTime,
+            _initialWorldVersion,
+            candidate.ProcessedScheduledEventCount,
+            candidate.IsPaused,
+            candidate.Speed,
+            candidate.NextEventSequence);
+    }
+
+    private static InputOutcome ToInputOutcome(RealtimeCommandResult result) =>
+        new(
+            result.CommandId,
+            result.Errors.FirstOrDefault()?.Code ?? "REJECTED",
+            result.Message,
+            result.ResultingWorldVersion);
+
+    private static void ConsumeRealtimeRemainder(WorkingCopy candidate, TimeSpan advanced)
+    {
+        if (advanced <= TimeSpan.Zero || candidate.RealGameTickRemainder <= 0)
         {
-            var receipt = _commitStore.CommitWorld(new CommitPackage(CaptureSnapshot(), newEvents));
-            if (!receipt.Success)
-            {
-                throw new InvalidOperationException($"提交商店写入失败，中止推进：{receipt.Error}");
-            }
+            return;
         }
+
+        candidate.RealGameTickRemainder = Math.Max(
+            0m,
+            candidate.RealGameTickRemainder - (decimal)advanced.Ticks);
     }
 
     private RealtimeAdvanceResult Report(bool succeeded, List<DomainEvent> events, List<RealtimeCommandResult> commandResults,
@@ -1638,12 +1781,8 @@ public sealed class RealtimeSimulationRuntime
     private static RealtimeCommandResult Accepted(string commandId, string message, long ingress, GameTime acceptedAt, long version) =>
         new(true, commandId, message, NoErrors, ingress, acceptedAt, version);
 
-    private RealtimeCommandResult Reject(string commandId, string message, string code, long ingress, GameTime acceptedAt, long version)
-    {
-        // 未改变世界的拒绝也要持久化（doc 08 §5）：重试同一命令必须得到同一结论。
-        _commitStore?.RecordOutcome(new InputOutcome(commandId, code, message, version));
-        return new(false, commandId, message, new ReadOnlyCollection<SimulationError>([new SimulationError(code, message)]), ingress, acceptedAt, version);
-    }
+    private static RealtimeCommandResult Reject(string commandId, string message, string code, long ingress, GameTime acceptedAt, long version) =>
+        new(false, commandId, message, new ReadOnlyCollection<SimulationError>([new SimulationError(code, message)]), ingress, acceptedAt, version);
 
     // 命令指纹由 RealtimeSnapshotHash.Fingerprint 提供（#35 共享哈希纯函数，捕获/校验/幂等三方共用）。
 
@@ -1661,7 +1800,8 @@ public sealed class RealtimeSimulationRuntime
         long processedScheduledEventCount,
         bool isPaused,
         double speed,
-        long nextEventSequence)
+        long nextEventSequence,
+        decimal realGameTickRemainder)
     {
         public WorldState State { get; } = state;
         public List<ScheduledSimulationEvent> Scheduled { get; } = scheduled;
@@ -1673,6 +1813,7 @@ public sealed class RealtimeSimulationRuntime
         public bool IsPaused { get; set; } = isPaused;
         public double Speed { get; set; } = speed;
         public long NextEventSequence { get; set; } = nextEventSequence;
+        public decimal RealGameTickRemainder { get; set; } = realGameTickRemainder;
         public long PendingWorldVersion { get; set; } = state.WorldVersion;
         public string PendingCommitId { get; set; } = state.CommitId;
     }

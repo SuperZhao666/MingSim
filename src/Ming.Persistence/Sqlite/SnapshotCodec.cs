@@ -5,12 +5,14 @@ using MingSim.Domain;
 using MingSim.Domain.Authorization;
 using MingSim.Domain.Characters;
 using MingSim.Domain.Common;
+using MingSim.Domain.Decrees;
 using MingSim.Domain.Economy;
 using MingSim.Domain.Events;
 using MingSim.Domain.Institutions;
 using MingSim.Domain.Map;
 using MingSim.Domain.Military;
 using MingSim.Domain.Realtime;
+using MingSim.Domain.Scenario;
 using MingSim.Simulation.Realtime;
 
 namespace MingSim.Persistence.Sqlite;
@@ -31,9 +33,10 @@ namespace MingSim.Persistence.Sqlite;
 /// </remarks>
 public static class SnapshotCodec
 {
-    // 格式版本 1→2：WorldState 编码新增 AppointmentState 段（任命必须随快照持久化）。
-    // v1 旧档先尝试迁移到 v2（任命为空）再读取，未知更高版本仍显式拒绝（fail-closed）。
-    private const byte FormatVersion = 2;
+    // 格式版本 3：补齐 Scenario/Readiness/Decrees、Shipment Escort/RaidLoss 与全部实时命令变体。
+    // v2 只有 Appointment 段，v1 连 Appointment 也没有；两者都只在能证明无信息丢失时迁移。
+    private const byte FormatVersion = 3;
+    private const byte FormatVersionV2 = 2;
     private const byte FormatVersionV1 = 1;
 
     private static readonly byte[] Magic = "MSNAP"u8.ToArray();
@@ -92,9 +95,9 @@ public static class SnapshotCodec
         }
 
         var schemaVersion = ReadInt32(reader);
-        var state = ReadWorldState(reader, readAppointments: true);
+        var state = ReadWorldState(reader, readAppointments: true, readAuthoritativeExtension: true);
         var scheduledEvents = ReadScheduledEvents(reader);
-        var pendingCommands = ReadPendingCommands(reader);
+        var pendingCommands = ReadPendingCommands(reader, currentCommandShape: true);
         var nextCreationSequence = ReadInt64(reader);
         var nextIngressSequence = ReadInt64(reader);
         var commandOutcomes = ReadCommandOutcomes(reader);
@@ -167,36 +170,55 @@ public static class SnapshotCodec
             return payload;
         }
 
-        if (formatVersion != FormatVersionV1)
+        if (formatVersion == FormatVersionV1)
         {
-            throw new InvalidDataException($"不支持快照载荷格式版本 {formatVersion}（当前支持 {FormatVersion}）。");
+            var migrated = ReadLegacySnapshot(reader, readAppointments: false, currentCommandShape: false, "v1");
+            var (v1StateHash, v1Checksum) = RealtimeSnapshotHash.ComputeV1Hashes(migrated);
+            if (!StringComparer.Ordinal.Equals(migrated.StateHash, v1StateHash) ||
+                !StringComparer.Ordinal.Equals(migrated.PayloadChecksum, v1Checksum))
+            {
+                throw new InvalidDataException(
+                    "v1 存档内容校验失败：内容哈希与载荷自带校验字段不一致（可能被篡改或损坏）。");
+            }
+
+            var (stateHash, payloadChecksum) = RealtimeSnapshotHash.ComputeHashes(migrated);
+            return Serialize(SnapshotReflection.Reseal(migrated, stateHash, payloadChecksum));
         }
 
-        // 读 v1 段（ReadString 使用严格 UTF-8 解码，非法字节即抛）。
-        var migrated = ReadV1Snapshot(reader);
-
-        // P1-1：先按 v1 记录版本（schema4）重算校验字段并与载荷自带值比对，不一致即拒绝。
-        var (v1StateHash, v1Checksum) = RealtimeSnapshotHash.ComputeV1Hashes(migrated);
-        if (!StringComparer.Ordinal.Equals(migrated.StateHash, v1StateHash) ||
-            !StringComparer.Ordinal.Equals(migrated.PayloadChecksum, v1Checksum))
+        if (formatVersion == FormatVersionV2)
         {
-            throw new InvalidDataException(
-                "v1 存档内容校验失败：内容哈希与载荷自带校验字段不一致（可能被篡改或损坏）。");
+            // v2 没有 Scenario/Readiness/Decrees/Escort/RaidLoss 扩展。只有当用默认值重建后
+            // 仍能复现载荷自带的当前 hash/checksum 时，才证明该旧档没有丢失这些权威信息；否则 fail-closed。
+            var migrated = ReadLegacySnapshot(reader, readAppointments: true, currentCommandShape: false, "v2");
+            if (migrated.SchemaVersion != RealtimeSnapshotSchema.Version)
+            {
+                throw new InvalidDataException(
+                    $"v2 存档运行时 schema={migrated.SchemaVersion}，当前={RealtimeSnapshotSchema.Version}；无法证明无损迁移。");
+            }
+            var (stateHash, payloadChecksum) = RealtimeSnapshotHash.ComputeHashes(migrated);
+            if (!StringComparer.Ordinal.Equals(migrated.StateHash, stateHash) ||
+                !StringComparer.Ordinal.Equals(migrated.PayloadChecksum, payloadChecksum))
+            {
+                throw new InvalidDataException(
+                    "v2 存档缺少当前权威状态扩展且哈希无法复现，拒绝有损迁移。");
+            }
+            return Serialize(SnapshotReflection.Reseal(migrated, stateHash, payloadChecksum));
         }
 
-        // re-seal：校验通过后，用当前规则重算 StateHash/PayloadChecksum 并写 v2 段（fail-closed）。
-        var (stateHash, payloadChecksum) = RealtimeSnapshotHash.ComputeHashes(migrated);
-        return Serialize(SnapshotReflection.Reseal(migrated, stateHash, payloadChecksum));
+        throw new InvalidDataException($"不支持快照载荷格式版本 {formatVersion}（当前支持 {FormatVersion}）。");
     }
 
     /// <summary>按 v1 布局读取 v1 快照载荷的剩余段（WorldState 无任命段，任命为空）。</summary>
-    private static RealtimeSnapshot ReadV1Snapshot(BinaryReader reader)
+    private static RealtimeSnapshot ReadLegacySnapshot(
+        BinaryReader reader,
+        bool readAppointments,
+        bool currentCommandShape,
+        string label)
     {
-        // 写入顺序与 Deserialize 完全一致，仅 WorldState 段按 v1 布局读取（无任命段）。
         var schemaVersion = ReadInt32(reader);
-        var state = ReadWorldState(reader, readAppointments: false);
+        var state = ReadWorldState(reader, readAppointments, readAuthoritativeExtension: false);
         var scheduledEvents = ReadScheduledEvents(reader);
-        var pendingCommands = ReadPendingCommands(reader);
+        var pendingCommands = ReadPendingCommands(reader, currentCommandShape);
         var nextCreationSequence = ReadInt64(reader);
         var nextIngressSequence = ReadInt64(reader);
         var commandOutcomes = ReadCommandOutcomes(reader);
@@ -213,28 +235,13 @@ public static class SnapshotCodec
         var nextEventSequence = ReadInt64(reader);
         if (reader.BaseStream.Position != reader.BaseStream.Length)
         {
-            throw new InvalidDataException("v1 快照载荷末尾存在多余字节，迁移失败（fail-closed）。");
+            throw new InvalidDataException($"{label} 快照载荷末尾存在多余字节，迁移失败（fail-closed）。");
         }
 
         return SnapshotReflection.CreateSnapshot(
-            schemaVersion,
-            state,
-            scheduledEvents,
-            pendingCommands,
-            nextCreationSequence,
-            nextIngressSequence,
-            commandOutcomes,
-            randomState,
-            outboxEvents,
-            realGameTickRemainder,
-            stateHash,
-            payloadChecksum,
-            initialGameTime,
-            initialWorldVersion,
-            processedScheduledEventCount,
-            isPaused,
-            speed,
-            nextEventSequence);
+            schemaVersion, state, scheduledEvents, pendingCommands, nextCreationSequence, nextIngressSequence,
+            commandOutcomes, randomState, outboxEvents, realGameTickRemainder, stateHash, payloadChecksum,
+            initialGameTime, initialWorldVersion, processedScheduledEventCount, isPaused, speed, nextEventSequence);
     }
 
     /// <summary>只编码 WorldState（world_state 表使用）；与快照内嵌的状态编码完全一致。</summary>
@@ -265,15 +272,18 @@ public static class SnapshotCodec
         var formatVersion = reader.ReadByte();
         if (formatVersion == FormatVersionV1)
         {
-            return ReadWorldState(reader, readAppointments: false);
+            return ReadWorldState(reader, readAppointments: false, readAuthoritativeExtension: false);
         }
-
+        if (formatVersion == FormatVersionV2)
+        {
+            return ReadWorldState(reader, readAppointments: true, readAuthoritativeExtension: false);
+        }
         if (formatVersion != FormatVersion)
         {
             throw new InvalidDataException($"状态载荷格式版本 {formatVersion} 不支持。");
         }
 
-        return ReadWorldState(reader, readAppointments: true);
+        return ReadWorldState(reader, readAppointments: true, readAuthoritativeExtension: true);
     }
 
     /// <summary>只编码一条 DomainEvent（event_journal 行使用）；与快照内嵌的事件编码一致。</summary>
@@ -303,7 +313,7 @@ public static class SnapshotCodec
         }
 
         var formatVersion = reader.ReadByte();
-        if (formatVersion is not (FormatVersionV1 or FormatVersion))
+        if (formatVersion is not (FormatVersionV1 or FormatVersionV2 or FormatVersion))
         {
             throw new InvalidDataException($"事件载荷格式版本 {formatVersion} 不支持。");
         }
@@ -492,6 +502,8 @@ public static class SnapshotCodec
             WriteNullableInt64(writer, shipment.ArrivedAt?.Value.UtcTicks);
             WriteInt64(writer, shipment.DeliveredGrain);
             WriteInt64(writer, shipment.LossGrain);
+            writer.Write(shipment.Escort);
+            WriteInt64(writer, shipment.RaidLossGrain);
         }
 
         var movements = state.Movements.Values.OrderBy(item => item.ArmyId.Value, StringComparer.Ordinal).ToArray();
@@ -524,9 +536,49 @@ public static class SnapshotCodec
             WriteInt64(writer, appointment.EffectiveFrom.Value.UtcTicks);
             WriteNullableInt64(writer, appointment.EffectiveTo?.Value.UtcTicks);
         }
+
+        // v3 authoritative extension：所有已进入 CanonicalStateHasher、但旧 codec 曾遗漏的可变状态。
+        var scenario = state.Scenario;
+        WriteInt32(writer, scenario.LocalBurden);
+        WriteInt32(writer, scenario.MinisterTrust);
+        WriteInt32(writer, scenario.DailyGrainDemand);
+        WriteNullableString(writer, scenario.FrontStockpileId?.Value);
+        WriteInt32(writer, scenario.SecondHalfFromDay);
+        WriteInt32(writer, scenario.BurdenCooperationThreshold);
+        WriteInt64(writer, scenario.ScenarioSilverBudget);
+        WriteInt64(writer, scenario.SpentSilver);
+        WriteInt64(writer, scenario.ScenarioStartGameTime.Value.UtcTicks);
+        writer.Write(scenario.HardFailureReported);
+        writer.Write(scenario.RationReductionActive);
+
+        WriteInt32(writer, state.Readiness.ValueBasisPoints);
+        WriteInt64(writer, state.Readiness.ArrearsGrain);
+        WriteInt32(writer, state.Readiness.ConsecutiveZeroGrainDays);
+
+        var decrees = state.Decrees.Values.OrderBy(item => item.Id.Value, StringComparer.Ordinal).ToArray();
+        WriteInt32(writer, decrees.Length);
+        foreach (var decree in decrees)
+        {
+            WriteString(writer, decree.Id.Value);
+            WriteString(writer, decree.IssuerId.Value);
+            WriteString(writer, decree.Goal);
+            WriteString(writer, decree.RegionScope.Value);
+            WriteInt64(writer, decree.Budget);
+            WriteString(writer, decree.ResponsibleActorId.Value);
+            WriteInt64(writer, decree.Deadline.Value.UtcTicks);
+            WriteString(writer, decree.Restrictions);
+            WriteString(writer, decree.Remarks);
+            WriteString(writer, decree.RequiredCapability.ToString());
+            WriteNullableString(writer, decree.RequiredResourceId);
+            WriteNullableString(writer, decree.LinkedShipmentId);
+            WriteString(writer, decree.Status.ToString());
+        }
     }
 
-    private static WorldState ReadWorldState(BinaryReader reader, bool readAppointments)
+    private static WorldState ReadWorldState(
+        BinaryReader reader,
+        bool readAppointments,
+        bool readAuthoritativeExtension)
     {
         var worldId = new WorldId(ReadString(reader));
         var turnNumber = ReadInt32(reader);
@@ -666,7 +718,7 @@ public static class SnapshotCodec
         }
 
         var shipmentCount = ReadInt32(reader);
-        var shipments = new List<(ShipmentState Shipment, ShipmentStatus Status, GameTime? DepartedAt, GameTime? ArrivedAt, long Delivered, long Loss)>(shipmentCount);
+        var shipments = new List<(ShipmentState Shipment, ShipmentStatus Status, GameTime? DepartedAt, GameTime? ArrivedAt, long Delivered, long Loss, bool Escort, long RaidLoss)>(shipmentCount);
         for (var index = 0; index < shipmentCount; index++)
         {
             // 写入顺序：id、routeId、grain、status、plannedTicks、departed、arrived、delivered、loss
@@ -679,8 +731,10 @@ public static class SnapshotCodec
             var arrivedAt = ReadNullableTicks(reader);
             var delivered = ReadInt64(reader);
             var loss = ReadInt64(reader);
-            var shipment = new ShipmentState(shipmentId, shipmentRoute, grainQuantity, plannedAt);
-            shipments.Add((shipment, status, departedAt, arrivedAt, delivered, loss));
+            var escort = readAuthoritativeExtension && reader.ReadBoolean();
+            var raidLoss = readAuthoritativeExtension ? ReadInt64(reader) : 0L;
+            var shipment = new ShipmentState(shipmentId, shipmentRoute, grainQuantity, plannedAt, escort);
+            shipments.Add((shipment, status, departedAt, arrivedAt, delivered, loss, escort, raidLoss));
         }
 
         var movementCount = ReadInt32(reader);
@@ -700,6 +754,61 @@ public static class SnapshotCodec
         // v1 布局（readAppointments=false）没有该段，任命为空——与 v1 时代的世界语义一致。
         var appointments = readAppointments ? ReadAppointments(reader) : [];
 
+        ScenarioState scenario;
+        long spentSilver = 0;
+        GameTime scenarioStart = new(new DateTimeOffset(gameTimeTicks, TimeSpan.Zero));
+        bool hardFailureReported = false;
+        bool rationReductionActive = false;
+        ReadinessState readiness = new();
+        long arrearsGrain = 0;
+        int consecutiveZeroDays = 0;
+        var decrees = new List<DecreeState>();
+
+        if (readAuthoritativeExtension)
+        {
+            var localBurden = ReadInt32(reader);
+            var ministerTrust = ReadInt32(reader);
+            var dailyGrainDemand = ReadInt32(reader);
+            var frontStockpile = ReadNullableString(reader);
+            var secondHalfFromDay = ReadInt32(reader);
+            var burdenThreshold = ReadInt32(reader);
+            var scenarioSilverBudget = ReadInt64(reader);
+            spentSilver = ReadInt64(reader);
+            scenarioStart = new GameTime(new DateTimeOffset(ReadInt64(reader), TimeSpan.Zero));
+            hardFailureReported = reader.ReadBoolean();
+            rationReductionActive = reader.ReadBoolean();
+            scenario = new ScenarioState(
+                localBurden, ministerTrust, dailyGrainDemand,
+                frontStockpile is null ? null : new StockpileId(frontStockpile),
+                secondHalfFromDay, burdenThreshold, scenarioSilverBudget);
+
+            readiness = new ReadinessState(ReadInt32(reader));
+            arrearsGrain = ReadInt64(reader);
+            consecutiveZeroDays = ReadInt32(reader);
+
+            var decreeCount = ReadInt32(reader);
+            for (var index = 0; index < decreeCount; index++)
+            {
+                decrees.Add(new DecreeState(
+                    new DecreeId(ReadString(reader)),
+                    new CharacterId(ReadString(reader)),
+                    ReadString(reader),
+                    new ProvinceId(ReadString(reader)),
+                    ReadInt64(reader),
+                    new CharacterId(ReadString(reader)),
+                    new GameTime(new DateTimeOffset(ReadInt64(reader), TimeSpan.Zero)),
+                    ReadString(reader),
+                    ReadString(reader),
+                    ParseEnum<GameCapability>(ReadString(reader)),
+                    ReadNullableString(reader),
+                    ReadNullableString(reader),
+                    ParseEnum<DecreeStatus>(ReadString(reader))));
+            }
+        }
+        else
+        {
+            scenario = new ScenarioState();
+        }
 
         var world = WorldState.CreateInitial(
             worldId,
@@ -714,7 +823,16 @@ public static class SnapshotCodec
             armies,
             stockpiles,
             routes,
-            appointments);
+            appointments,
+            scenario);
+
+        SnapshotReflection.RestoreInventoryReservations(world.Economy.Inventory, reservedByType);
+        SnapshotReflection.SetScenarioDetails(scenario, spentSilver, scenarioStart, hardFailureReported, rationReductionActive);
+        SnapshotReflection.SetReadiness(world, readiness, arrearsGrain, consecutiveZeroDays);
+        foreach (var decree in decrees)
+        {
+            SnapshotReflection.AddDecree(world, decree);
+        }
 
         for (var index = 0; index < characters.Count; index++)
         {
@@ -732,9 +850,9 @@ public static class SnapshotCodec
             SnapshotReflection.AddFacility(world.Industry, facility, status, produced);
         }
 
-        foreach (var (shipment, status, departedAt, arrivedAt, delivered, loss) in shipments)
+        foreach (var (shipment, status, departedAt, arrivedAt, delivered, loss, escort, raidLoss) in shipments)
         {
-            SnapshotReflection.SetShipmentCompletion(shipment, status, departedAt, arrivedAt, delivered, loss);
+            SnapshotReflection.SetShipmentCompletion(shipment, status, departedAt, arrivedAt, delivered, loss, escort, raidLoss);
             SnapshotReflection.AddShipment(world.Logistics, shipment);
         }
 
@@ -873,7 +991,7 @@ public static class SnapshotCodec
         return events;
     }
 
-    private static IReadOnlyList<RealtimeCommand> ReadPendingCommands(BinaryReader reader)
+    private static IReadOnlyList<RealtimeCommand> ReadPendingCommands(BinaryReader reader, bool currentCommandShape)
     {
         var count = ReadInt32(reader);
         var commands = new List<RealtimeCommand>(count);
@@ -884,18 +1002,59 @@ public static class SnapshotCodec
             var actorId = new CharacterId(ReadString(reader));
             var submittedTicks = ReadInt64(reader);
             var expectedVersion = ReadInt64(reader);
-            commands.Add(typeTag switch
+            switch (typeTag)
             {
-                "move" => new MoveArmyCommand(commandId, actorId, new ArmyId(ReadString(reader)),
-                    new ProvinceId(ReadString(reader)), new DateTimeOffset(submittedTicks, TimeSpan.Zero), expectedVersion, ReadInt32(reader)),
-                "shipment" => new CreateShipmentCommand(commandId, actorId, new ShipmentId(ReadString(reader)),
-                    new RouteId(ReadString(reader)), ReadInt64(reader), new DateTimeOffset(submittedTicks, TimeSpan.Zero), expectedVersion),
-                "pause" => new SetPausedCommand(commandId, actorId, reader.ReadBoolean(),
-                    new DateTimeOffset(submittedTicks, TimeSpan.Zero), expectedVersion),
-                "speed" => new SetSimulationSpeedCommand(commandId, actorId, BitConverter.Int64BitsToDouble(ReadInt64(reader)),
-                    new DateTimeOffset(submittedTicks, TimeSpan.Zero), expectedVersion),
-                _ => throw new InvalidDataException($"未知待处理命令类型 {typeTag}。"),
-            });
+                case "move":
+                    commands.Add(new MoveArmyCommand(
+                        commandId, actorId, new ArmyId(ReadString(reader)), new ProvinceId(ReadString(reader)),
+                        new DateTimeOffset(submittedTicks, TimeSpan.Zero), expectedVersion, ReadInt32(reader)));
+                    break;
+                case "shipment":
+                {
+                    var shipmentId = new ShipmentId(ReadString(reader));
+                    var routeId = new RouteId(ReadString(reader));
+                    var quantity = ReadInt64(reader);
+                    var escort = currentCommandShape && reader.ReadBoolean();
+                    commands.Add(new CreateShipmentCommand(
+                        commandId, actorId, shipmentId, routeId, quantity,
+                        new DateTimeOffset(submittedTicks, TimeSpan.Zero), expectedVersion, escort));
+                    break;
+                }
+                case "decree" when currentCommandShape:
+                    commands.Add(new CreateDecreeCommand(
+                        commandId,
+                        actorId,
+                        new DecreeId(ReadString(reader)),
+                        ReadString(reader),
+                        new ProvinceId(ReadString(reader)),
+                        ReadInt64(reader),
+                        new CharacterId(ReadString(reader)),
+                        new GameTime(new DateTimeOffset(ReadInt64(reader), TimeSpan.Zero)),
+                        ReadString(reader),
+                        ReadString(reader),
+                        ReadNullableString(reader),
+                        new DateTimeOffset(submittedTicks, TimeSpan.Zero),
+                        expectedVersion,
+                        (DecreeKind)ReadInt32(reader)));
+                    break;
+                case "approve-decree" when currentCommandShape:
+                    commands.Add(new ApproveDecreeCommand(
+                        commandId, actorId, new DecreeId(ReadString(reader)),
+                        new DateTimeOffset(submittedTicks, TimeSpan.Zero), expectedVersion));
+                    break;
+                case "pause":
+                    commands.Add(new SetPausedCommand(
+                        commandId, actorId, reader.ReadBoolean(),
+                        new DateTimeOffset(submittedTicks, TimeSpan.Zero), expectedVersion));
+                    break;
+                case "speed":
+                    commands.Add(new SetSimulationSpeedCommand(
+                        commandId, actorId, BitConverter.Int64BitsToDouble(ReadInt64(reader)),
+                        new DateTimeOffset(submittedTicks, TimeSpan.Zero), expectedVersion));
+                    break;
+                default:
+                    throw new InvalidDataException($"未知待处理命令类型 {typeTag}。");
+            }
         }
 
         return commands;
@@ -927,6 +1086,32 @@ public static class SnapshotCodec
                     WriteString(writer, shipment.ShipmentId.Value);
                     WriteString(writer, shipment.RouteId.Value);
                     WriteInt64(writer, shipment.GrainQuantity);
+                    writer.Write(shipment.Escort);
+                    break;
+                case CreateDecreeCommand decree:
+                    WriteString(writer, "decree");
+                    WriteString(writer, decree.CommandId);
+                    WriteString(writer, decree.ActorId.Value);
+                    WriteInt64(writer, decree.SubmittedAt.UtcTicks);
+                    WriteInt64(writer, decree.ExpectedWorldVersion);
+                    WriteString(writer, decree.DecreeId.Value);
+                    WriteString(writer, decree.Goal);
+                    WriteString(writer, decree.RegionScope.Value);
+                    WriteInt64(writer, decree.Budget);
+                    WriteString(writer, decree.ResponsibleActorId.Value);
+                    WriteInt64(writer, decree.Deadline.Value.UtcTicks);
+                    WriteString(writer, decree.Restrictions);
+                    WriteString(writer, decree.Remarks);
+                    WriteNullableString(writer, decree.LinkedShipmentId);
+                    WriteInt32(writer, (int)decree.Kind);
+                    break;
+                case ApproveDecreeCommand approve:
+                    WriteString(writer, "approve-decree");
+                    WriteString(writer, approve.CommandId);
+                    WriteString(writer, approve.ActorId.Value);
+                    WriteInt64(writer, approve.SubmittedAt.UtcTicks);
+                    WriteInt64(writer, approve.ExpectedWorldVersion);
+                    WriteString(writer, approve.DecreeId.Value);
                     break;
                 case SetPausedCommand pause:
                     WriteString(writer, "pause");

@@ -219,6 +219,7 @@ internal static class NingyuanSeedReplay
             armies: baseWorld.Military.Armies.Values,
             stockpiles: baseWorld.Logistics.Stockpiles.Values,
             routes: baseWorld.Logistics.Routes.Values,
+            appointments: baseWorld.Appointments,
             scenario: baseWorld.Scenario);
     }
 

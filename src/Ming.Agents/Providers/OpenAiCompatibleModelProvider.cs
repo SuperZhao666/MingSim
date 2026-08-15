@@ -94,6 +94,8 @@ public sealed class OpenAiCompatibleModelProvider : IModelProvider
         _chatCompletionsEndpoint = new Uri(baseAddress, ChatCompletionsPath);
     }
 
+    public int MaxResponseTokens => _maxTokens;
+
     public async Task<ModelResponse> GenerateAsync(
         ModelRequest request,
         CancellationToken cancellationToken = default)

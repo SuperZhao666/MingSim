@@ -17,6 +17,7 @@ internal static class SqliteStoreAcceptance
 {
     public static void RunAll()
     {
+        SqliteRuntimeCommitStoreSupportsConsecutiveCommitsAndRestoreKeepsStore();
         SqliteCommitPersistsStateJournalAndSnapshotAtomically();
         SqliteRestoreContinuesDeterministically();
         SqliteUncommittedBatchHasNoEffect();
@@ -28,6 +29,59 @@ internal static class SqliteStoreAcceptance
         SqliteV1SingleByteContentCorruptionFailsClosed();
         SqliteCorruptedNewSnapshotFallsBackToPreviousReady();
         SqliteMigrationFailureFailsClosed();
+    }
+
+    /// <summary>
+    /// 生产路径回归：禁止使用 StageAndCommit helper，直接把 SqliteCommitStore 注入 Runtime，
+    /// 连续经历命令提交、调度事件提交、时间提交，再从 store 恢复后继续提交。
+    /// 这会钉住 CommitPackage.JournalEvents=本次增量、store-first 发布和 RestoreFromStore 保留 store。
+    /// </summary>
+    private static void SqliteRuntimeCommitStoreSupportsConsecutiveCommitsAndRestoreKeepsStore()
+    {
+        var worldId = new WorldId("ningyuan-1629");
+        var dbPath = CreateDbPath();
+        try
+        {
+            using var store = new SqliteCommitStore(dbPath, worldId);
+            var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld(), store);
+            Program.Require(runtime.EnqueueCreateShipment(
+                    Program.CreateShipment(runtime, "sqlite-production-path", 5_000)).Queued,
+                "生产路径首条命令应该进入收件箱");
+
+            var accepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+            Program.Require(accepted.Succeeded && accepted.CommandResults.All(item => item.Accepted),
+                "Runtime→ICommitStore 生产路径的命令/出发连续提交必须成功");
+            var afterDepartureVersion = runtime.ReadModel.WorldVersion;
+            Program.Require(store.Read(worldId).Count == runtime.OutboxEvents.Count,
+                "生产 CommitWorld(delta) 连续提交后 SQLite journal 必须等于 Runtime 完整 outbox");
+
+            var oneHour = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddHours(1)));
+            Program.Require(oneHour.Succeeded && runtime.ReadModel.WorldVersion > afterDepartureVersion,
+                "第三次生产提交（时间提交）必须成功并推进版本");
+
+            var restored = RealtimeSimulationRuntime.RestoreFromStore(store);
+            Program.Require(!restored.IsReadOnlyRecovery &&
+                            restored.StateHash == runtime.StateHash &&
+                            restored.ReadModel.WorldVersion == runtime.ReadModel.WorldVersion,
+                "正常 RestoreFromStore 必须恢复最新提交且保持可写 store");
+
+            restored.SetPaused(true);
+            var pauseCommit = restored.AdvanceTo(restored.ReadModel.GameTime);
+            Program.Require(pauseCommit.Succeeded &&
+                            pauseCommit.CommandResults.Single().Accepted &&
+                            restored.IsPaused,
+                "RestoreFromStore 后必须仍能通过同一 store 持久化后续命令");
+
+            var restoredAgain = RealtimeSimulationRuntime.RestoreFromStore(store);
+            Program.Require(restoredAgain.IsPaused &&
+                            restoredAgain.ReadModel.WorldVersion == restored.ReadModel.WorldVersion &&
+                            restoredAgain.StateHash == restored.StateHash,
+                "第二次重启必须读到恢复实例产生的后续 durable commit");
+        }
+        finally
+        {
+            DeleteDbFiles(dbPath);
+        }
     }
 
     private static void SqliteCommitPersistsStateJournalAndSnapshotAtomically()
@@ -424,7 +478,8 @@ internal static class SqliteStoreAcceptance
             Program.Require(restoredA.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
                 "提交 A 后应处于在途状态");
 
-            // 第二次提交（版本 +1）后，损坏最新快照 B 的载荷（snapshot_blob 不在校验和覆盖列内）。
+            // 第二次提交（版本 +1）后，损坏最新快照 B 的载荷。snapshot_blob 由快照行元数据 +
+            // 内部 state/payload hash 负责身份校验；故意不放入整库 checksum，才能按设计回退旧 READY。
             runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddHours(1)));
             using (var store = new SqliteCommitStore(dbPath, worldId))
             {
@@ -442,6 +497,22 @@ internal static class SqliteStoreAcceptance
                 "回退恢复的世界版本必须是旧 READY 快照 A 的版本");
             Program.Require(fellBack.ReadModel.Shipments.Single().Status == ShipmentStatus.InTransit,
                 "回退恢复后必须处于 A 的可用在途状态");
+
+            // 生产恢复 API 必须显式标记 salvage 为只读；不能把“可查看旧 READY”伪装成可续玩的正常存档。
+            using (var salvageStore = new SqliteCommitStore(dbPath, worldId))
+            {
+                var salvageRuntime = RealtimeSimulationRuntime.RestoreFromStore(salvageStore);
+                Program.Require(salvageRuntime.IsReadOnlyRecovery,
+                    "损坏最新快照后的 RestoreFromStore 必须进入只读恢复模式");
+                var queued = salvageRuntime.EnqueueSetPaused(new SetPausedCommand(
+                    "salvage-write-must-fail", new CharacterId("system"), true,
+                    salvageRuntime.ReadModel.GameTime.Value, salvageRuntime.ReadModel.WorldVersion));
+                Program.Require(!queued.Queued && queued.Errors.Any(error => error.Code == "RECOVERY_READ_ONLY"),
+                    "只读恢复模式必须在入箱前拒绝任何新写命令");
+                var advance = salvageRuntime.AdvanceTo(salvageRuntime.ReadModel.GameTime);
+                Program.Require(!advance.Succeeded && advance.Errors.Any(error => error.Code == "RECOVERY_READ_ONLY"),
+                    "只读恢复模式必须拒绝时间推进");
+            }
         }
         finally
         {
@@ -490,8 +561,8 @@ internal static class SqliteStoreAcceptance
 
     private static void ReplaceSnapshotBlob(string dbPath, WorldId worldId, long snapshotSeq, byte[] blob)
     {
-        // 直接改库中快照行载荷：snapshot_blob 不在 ComputeTotalChecksum 覆盖列内，
-        // 列校验和仍通过；内容损坏由迁移/解码路径按各自语义处理。
+        // 直接改库中快照行载荷：snapshot_blob 故意不放入整库 checksum（否则任何新快照损坏都会
+        // 在进入 fallback 之前被总校验拦截）；内容身份由快照行元数据 + 内部 hash/checksum 校验。
         using var connection = new SqliteConnection($"Data Source={dbPath};Pooling=false");
         connection.Open();
         using var command = connection.CreateCommand();

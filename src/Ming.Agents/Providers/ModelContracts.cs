@@ -21,6 +21,9 @@ public sealed record ModelResponse(
 /// </remarks>
 public interface IModelProvider
 {
+    /// <summary>该 Provider 对单次模型响应承诺的最大 token 数；预算会在调用前连同请求一起原子预留。</summary>
+    int MaxResponseTokens => 512;
+
     Task<ModelResponse> GenerateAsync(
         ModelRequest request,
         CancellationToken cancellationToken = default);

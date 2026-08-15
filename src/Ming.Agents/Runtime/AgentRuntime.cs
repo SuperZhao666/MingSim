@@ -1,4 +1,5 @@
 using MingSim.Domain;
+using MingSim.Domain.Authorization;
 using MingSim.Domain.Common;
 using MingSim.Domain.Economy;
 using MingSim.Domain.Intents;
@@ -28,29 +29,50 @@ public sealed class AgentContextCompiler
 {
     public AgentContext Compile(WorldState world, CharacterId actorId)
     {
+        var authorizer = new CapabilityAuthorizer();
         var armies = world.Military.Armies.Values
-            .Select(army => new ArmyObservation(
-                army.Id,
-                army.Name,
-                army.LocationId,
-                army.Auxiliaries,
-                army.LineInfantry,
-                army.TrainingDays,
-                AdjacentDestinations(world, army.LocationId)))
+            .Select(army =>
+            {
+                var allowed = new HashSet<GameCapability>();
+                if (authorizer.Check(world, actorId, GameCapability.MoveArmy, army.Id.Value).Allowed)
+                    allowed.Add(GameCapability.MoveArmy);
+                if (authorizer.Check(world, actorId, GameCapability.ConvertArmy, army.Id.Value).Allowed)
+                    allowed.Add(GameCapability.ConvertArmy);
+                return new ArmyObservation(
+                    army.Id,
+                    army.Name,
+                    army.LocationId,
+                    army.Auxiliaries,
+                    army.LineInfantry,
+                    army.TrainingDays,
+                    allowed.Contains(GameCapability.MoveArmy) ? AdjacentDestinations(world, army.LocationId) : [],
+                    allowed);
+            })
+            .Where(army => army.AllowedCapabilities.Count > 0)
             .OrderBy(army => army.ArmyId.Value, StringComparer.Ordinal)
             .ToArray();
 
         var routes = world.Logistics.Routes.Values
+            .Where(route => authorizer.Check(world, actorId, GameCapability.PlanLogistics, route.Id.Value).Allowed)
             .Select(route => BuildRouteObservation(world, route))
             .Where(route => route.IsActionable)
             .OrderBy(route => route.RouteId.Value, StringComparer.Ordinal)
             .ToArray();
 
+        // 与 CapabilityAuthorizer 的两条来源保持一致：直接 Grant + 当前有效 Appointment 对应机构能力。
+        // Scope 只在具体候选动作上由 authorizer.Check(resourceId) 收窄；Capabilities 表示“具备该类能力”。
         var capabilities = world.CapabilityGrants
             .Where(grant => grant.ActorId == actorId)
             .Where(grant => grant.ExpiresAtTurn is null || world.TurnNumber <= grant.ExpiresAtTurn)
             .Select(grant => grant.Capability)
             .ToHashSet();
+        foreach (var appointment in world.Appointments)
+        {
+            if (appointment.PersonId != actorId || !appointment.IsActiveAt(world.GameTime)) continue;
+            if (!world.Institutions.TryGetValue(appointment.OfficeId, out var office)) continue;
+            foreach (var capability in office.Capabilities)
+                capabilities.Add(capability);
+        }
 
         return new AgentContext(
             actorId,

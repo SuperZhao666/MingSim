@@ -73,7 +73,7 @@ public sealed class DecreeState
     public string Remarks { get; }
 
     /// <summary>
-    /// 承办人必须具备的能力（审计记录）。内核按 <see cref="DecreeKind"/> 的 trusted 映射
+    /// 承办人必须具备的能力（审计记录）。Simulation 内核按政令种类的 trusted 映射
     /// 在接纳时写入（P1-AUTH-01/02 修复）：调用方不可提供审核策略，此值只作审计，
     /// 不再参与任何权限裁决。请愿类政令（请饷）无承办能力要求，写入默认值占位。
     /// </summary>

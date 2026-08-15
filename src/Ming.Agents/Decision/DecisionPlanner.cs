@@ -87,23 +87,26 @@ public sealed class DecisionPlanner
 
         var modelRequest = BuildModelRequest(request, context);
         var estimatedRequestTokens = EstimateRequestTokens(modelRequest);
+        var maxResponseTokens = Math.Max(1, _provider.MaxResponseTokens);
+        var reservationTokens = AddSaturating(estimatedRequestTokens, maxResponseTokens);
 
-        // P1-AGENT-04：预算原子预留。TryReserve 在锁内一次性完成“检查+提交”，
+        // P1-AGENT-04：预算原子预留必须覆盖 request + Provider 最大响应，而不是只预留 prompt。
+        // 这样一个调用在发起前就拥有完整最坏情况额度，单次大响应和并发请求都不能突破 hard cap。
         // 不足即拒绝（0 次调用，直接回退 Utility，doc 07 §13.3）；两个并发调用
         // 不可能同时通过同一额度的闸门。锁内只有整数累加，网络 await 绝不在锁内。
         var budget = _budget;
         ModelBudgetReservation? reservation = null;
         if (budget is not null)
         {
-            if (!budget.TryReserve(estimatedRequestTokens, out reservation))
+            if (!budget.TryReserve(reservationTokens, out reservation))
             {
                 AppendAudit(new ModelAuditEntry(
                     request.DecisionId,
                     _providerName,
                     ModelCallOutcome.BudgetExceeded,
-                    estimatedRequestTokens,
+                    reservationTokens,
                     0,
-                    budget.CostFor(estimatedRequestTokens),
+                    budget.CostFor(reservationTokens),
                     TimeSpan.Zero,
                     DateTimeOffset.UtcNow));
                 return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.BudgetExceeded);
@@ -146,6 +149,18 @@ public sealed class DecisionPlanner
             }
 
             var responseTokens = TokenEstimation.FromText(response.Content);
+            if (responseTokens > maxResponseTokens)
+            {
+                // Provider 违反自己声明的最大输出契约：不把超额响应送入解析/执行，
+                // 结算只占用事先预留的 hard-cap 额度，预算记账永不突破上限。
+                actualTokens = reservationTokens;
+                AppendAudit(new ModelAuditEntry(
+                    request.DecisionId, _providerName, ModelCallOutcome.ProviderFailed,
+                    estimatedRequestTokens, responseTokens, CostFor(reservationTokens),
+                    stopwatch.Elapsed, DateTimeOffset.UtcNow));
+                return RulesResult(request, context, acceptedGameTime, ModelFallbackReason.ProviderFailed);
+            }
+
             // 请求+响应饱和相加（P2 审查）：两个估算都是 long，极端文本下直接相加可能溢出回绕。
             actualTokens = AddSaturating(estimatedRequestTokens, responseTokens);
 
@@ -236,12 +251,14 @@ public sealed class DecisionPlanner
         long responseTokens,
         TimeSpan duration) =>
         new(decisionId, _providerName, ModelCallOutcome.ProviderFailed,
-            requestTokens, responseTokens, CostFor(requestTokens + responseTokens), duration, DateTimeOffset.UtcNow);
+            requestTokens, responseTokens, CostFor(AddSaturating(requestTokens, responseTokens)), duration, DateTimeOffset.UtcNow);
 
     private static long EstimateRequestTokens(ModelRequest request) =>
-        TokenEstimation.FromText(request.SystemInstruction) +
-        TokenEstimation.FromText(request.UserInput) +
-        TokenEstimation.FromText(request.ExpectedOutputSchema);
+        AddSaturating(
+            AddSaturating(
+                TokenEstimation.FromText(request.SystemInstruction),
+                TokenEstimation.FromText(request.UserInput)),
+            TokenEstimation.FromText(request.ExpectedOutputSchema));
 
     /// <summary>
     /// 编译最小决策上下文（DecisionPacket 的最小子集），不包含密钥或完整世界状态。
@@ -253,7 +270,7 @@ public sealed class DecisionPlanner
             .OrderBy(item => item.ToString(), StringComparer.Ordinal));
         var armies = string.Join("; ", context.Armies
             .OrderBy(item => item.ArmyId.Value, StringComparer.Ordinal)
-            .Select(item => $"{item.ArmyId.Value}(loc={item.LocationId.Value},aux={item.Auxiliaries},line={item.LineInfantry},training={item.TrainingDays},adjacent=[{string.Join(",", item.AdjacentDestinations.OrderBy(province => province.Value, StringComparer.Ordinal).Select(province => province.Value))}])"));
+            .Select(item => $"{item.ArmyId.Value}(loc={item.LocationId.Value},aux={item.Auxiliaries},line={item.LineInfantry},training={item.TrainingDays},allowed=[{string.Join(",", item.AllowedCapabilities.OrderBy(capability => capability.ToString(), StringComparer.Ordinal))}],adjacent=[{string.Join(",", item.AdjacentDestinations.OrderBy(province => province.Value, StringComparer.Ordinal).Select(province => province.Value))}])"));
         var routes = string.Join("; ", context.Routes
             .OrderBy(item => item.RouteId.Value, StringComparer.Ordinal)
             .Select(item => $"{item.RouteId.Value}(from={item.From.Value},to={item.To.Value},sourceGrain={item.SourceGrain},headroom={item.DestinationHeadroom},capacity={item.RouteCapacity},inTransit={item.InTransitGrain},travelHours={item.TravelHours},lossPerThousand={item.LossPerThousand})"));

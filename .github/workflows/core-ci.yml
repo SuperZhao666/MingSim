@@ -20,7 +20,7 @@ jobs:
   mingsim-core:
     name: mingsim-core
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -41,3 +41,52 @@ jobs:
 
       - name: Run Agents contract tests
         run: dotnet run --project tests/Ming.Agents.ContractTests/Ming.Agents.ContractTests.csproj -c Release --no-build
+
+      - name: Run deterministic soak tests
+        run: dotnet run --project tests/Ming.SoakTests/Ming.SoakTests.csproj -c Release --no-build
+
+  godot-headless:
+    name: godot-headless
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.400
+
+      - name: Build Godot C# assembly
+        run: dotnet build src/Ming.Godot/Ming.Godot.csproj -c Debug --nologo
+
+      - name: Download pinned Godot 4.6 Mono
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/godotengine/godot/releases/download/4.6-stable/Godot_v4.6-stable_mono_win64.zip'
+          Invoke-WebRequest -Uri $url -OutFile godot.zip
+          Expand-Archive godot.zip -DestinationPath .godot-bin
+          $exe = Get-ChildItem .godot-bin -Recurse -Filter 'Godot_v4.6-stable_mono_win64_console.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'Godot console executable not found in pinned archive.' }
+          "GODOT_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Import Godot assets
+        shell: pwsh
+        run: '& $env:GODOT_EXE --headless --editor --path . --quit'
+
+      - name: Run Godot headless acceptance suites
+        shell: pwsh
+        run: |
+          $tests = @(
+            'res://src/Ming.Godot/tests/ui_headless_acceptance.gd',
+            'res://src/Ming.Godot/tests/guide_acceptance.gd',
+            'res://src/Ming.Godot/tests/map_fleet_acceptance.gd',
+            'res://src/Ming.Godot/tests/m3_decree_endgame_acceptance.gd',
+            'res://src/Ming.Godot/tests/main_ui_transition_acceptance.gd',
+            'res://src/Ming.Godot/tests/map_input_acceptance.gd'
+          )
+          foreach ($test in $tests) {
+            & $env:GODOT_EXE --headless --path . --rendering-method gl_compatibility --audio-driver Dummy --script $test
+            if ($LASTEXITCODE -ne 0) { throw "Godot acceptance failed: $test" }
+          }

@@ -343,14 +343,7 @@ public sealed partial class MapFleetReadModel : RefCounted
         return eventId.StartsWith(prefix + shipmentId + "-", StringComparison.Ordinal);
     }
 
-    private static string ResolveWorldJsonPath()
-    {
-        const string relative = "content/scenarios/ming_1629/world.json";
-        if (File.Exists(relative)) return relative;
-        var fromRes = ProjectSettings.GlobalizePath("res://../../content/scenarios/ming_1629/world.json");
-        if (File.Exists(fromRes)) return fromRes;
-        throw new FileNotFoundException($"找不到宁远 1629 剧本：已尝试 {relative} 与 {fromRes}。", relative);
-    }
+    private static string ResolveWorldJsonPath() => global::Ming.Godot.RealtimeWorldBridge.ResolveWorldJsonPath();
 
     private static string GetString(JsonElement element, string property) =>
         element.GetProperty(property).GetString()

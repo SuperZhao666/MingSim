@@ -307,6 +307,7 @@ internal static class StrategyExplorer
             armies: baseWorld.Military.Armies.Values,
             stockpiles: baseWorld.Logistics.Stockpiles.Values,
             routes: baseWorld.Logistics.Routes.Values,
+            appointments: baseWorld.Appointments,
             scenario: baseWorld.Scenario);
 
     /// <summary>终局分档分布表：每策略各档种子数与通关率（成功+优秀），作为质量门可核验输出。</summary>

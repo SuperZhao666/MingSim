@@ -16,4 +16,5 @@ public enum GameCapability
     ConvertArmy,
     PlanLogistics,
     MoveArmy,
+    IssueDecree,
 }

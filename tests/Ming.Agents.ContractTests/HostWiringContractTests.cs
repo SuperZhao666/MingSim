@@ -60,15 +60,15 @@ internal static partial class Program
         Require(duliaoxiangSubmit.CommandId == $"{duliaoxiang.DecisionId}-1",
             "入口必须把意图幂等键（DecisionId-1）作为稳定命令编号");
 
-        // 模型伪造越权：hubu-slot（只持财粮能力）与 zhu-youjian（无能力）也被模型"建议"调粮，
-        // 入口必须结构化拒绝且零副作用——权限红线不能被模型文本绕过（doc 07 §10）。
+        // 模型伪造越权：hubu-slot（只持财粮能力）与 zhu-youjian（无能力）也被模型"建议"调粮。
+        // 新契约（候选集按 Actor 实际授权过滤）：无授权角色的上下文不含可行动路线，
+        // 模型输出过不了候选校验而回退规则路径，且规则路径同样无候选 → 零意图、零提交。
+        // 权限红线保持不变（模型文本不能改变状态），只是拦截点前移到候选编译层。
         foreach (var actor in new[] { "hubu-slot", "zhu-youjian" })
         {
             var denied = batch.Decisions.Single(decision => decision.ActorId.Value == actor);
-            Require(denied.Source == DecisionSource.Model, "模型路径对无授权角色仍要走到入口才被权限层拦截");
-            var submission = denied.Submissions.Single();
-            Require(!submission.Accepted && submission.ErrorCode == "TOOL_SCOPE_DENIED" && submission.CommandId is null,
-                $"无调粮授权的 {actor} 必须被入口结构化拒绝且不产生命令编号");
+            Require(denied.Source == DecisionSource.Rules && denied.Intents.Count == 0 && denied.Submissions.Count == 0,
+                $"无调粮授权的 {actor} 不得产生任何意图或提交（候选集按授权过滤，红线前移）");
         }
 
         // P1-AGENT-05 契约变化：宿主在首位角色提交成功后即把收件箱在当前安全点真实推进

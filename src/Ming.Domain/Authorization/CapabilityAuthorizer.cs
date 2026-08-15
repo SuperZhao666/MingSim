@@ -19,8 +19,14 @@ public sealed class CapabilityAuthorizer
         WorldState world,
         CharacterId actorId,
         GameCapability capability,
-        string? resourceId = null)
+        string? resourceId = null,
+        long? amount = null)
     {
+        if (amount is < 0)
+        {
+            return new AuthorizationDecision(false, "授权检查的数量/金额不能为负数。");
+        }
+
         // 角色不存在时无论有没有任命都拒绝：任命是"某人的任职事实"，
         // 不能反过来让一条任命凭空创造一个可以调能力的 Actor（防伪造）。
         if (!world.Characters.ContainsKey(actorId))
@@ -52,6 +58,13 @@ public sealed class CapabilityAuthorizer
             }
 
             if (appointment.Scope is not null && appointment.Scope != resourceId)
+            {
+                continue;
+            }
+
+            // 任命额度只在调用方提供本次动作数量/金额时参与裁决；未提供 amount 表示该能力
+            // 不是数量型动作或上层尚无该维度。额度为半开之外的硬上限：amount == Limit 允许，超过拒绝。
+            if (amount is not null && appointment.Limit is not null && amount.Value > appointment.Limit.Value)
             {
                 continue;
             }
