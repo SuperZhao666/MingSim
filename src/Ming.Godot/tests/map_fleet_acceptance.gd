@@ -36,16 +36,23 @@ func _init() -> void:
 	_assert(map.has_method("SetFleetReadModel"), "MapView 暴露只读模型注入缝 SetFleetReadModel")
 	_assert(map.has_method("InjectFleetAcceptanceSample"), "MapView 暴露验收样本注入缝")
 	_assert(map.LoadedFromManifest, "注入前地图清单仍完整加载（不回归）")
-	_assert(not map.FleetLayerVisible, "默认不显示粮运层")
-	_assert(map.FleetStockpileCount == 0 and map.FleetRouteCount == 0 and map.FleetShipmentCount == 0,
-		"默认无库存/路线/粮队呈现数据")
+	_assert(map.FleetLayerVisible, "正式场景启动后必须自动接入真实粮运只读模型")
+	_assert(map.FleetStockpileCount == 6 and map.FleetRouteCount == 5,
+		"正式 1629 场景必须自动呈现 6 库存/5 路线")
 
 	_test_source_contract()
-	_test_injected_sample(map)
-	await _test_interpolation(map)
-	await _test_delayed_target_does_not_slide_back(map)
-	_test_reinject_keeps_progress(map)
 	_test_existing_map_behavior_unaffected(map)
+
+	# 样本/插值类测试用独立 MapView 实例：正式场景图已接生产逐帧注入（版本推进会
+	# 重注入真实投影），假样本会被真实投影合法替换——把"假样本插值"与"生产接线"
+	# 分开验证，避免两个契约互相干扰。
+	var sample_map := load("res://src/Ming.Godot/scripts/MapView.cs").new() as Control
+	root.add_child(sample_map)
+	await process_frame
+	_test_injected_sample(sample_map)
+	await _test_interpolation(sample_map)
+	await _test_delayed_target_does_not_slide_back(sample_map)
+	_test_reinject_keeps_progress(sample_map)
 
 	root.queue_free()
 	await process_frame

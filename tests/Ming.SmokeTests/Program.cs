@@ -91,12 +91,15 @@ internal static class Program
             ShouldDropEscortWhenSettlementFails();
             ShouldRoundTripThroughInMemoryCommitStore();
             ShouldPersistRejectedOutcomeThroughCommitStore();
+            ShouldKeepLiveStateAndInboxWhenCommitStoreFails();
+            ShouldRoundTripAllAuthoritativeScenarioFieldsThroughCodec();
             ShouldLoadNingyuan1629InitialWorld();
             ShouldAssembleNingyuan1629AppointmentsFromWorldJson();
             ShouldDeriveCapabilityFromActiveAppointment();
             ShouldRevokeCapabilityAfterAppointmentChange();
             ShouldRejectFakeActorEvenWithMatchingAppointment();
             ShouldRejectResourceOutsideAppointmentScope();
+            ShouldEnforceAppointmentLimitForAmountActions();
             ShouldExpireAppointmentAtEffectiveTo();
             ShouldKeepAppointmentsInSnapshotAndCanonicalHash();
             ShouldCompleteNinetyDayNingyuanScenarioWithEndgameReport();
@@ -1083,6 +1086,20 @@ internal static class Program
         Require(runtime.ReadModel.Decrees.Count == 0 && runtime.ReadModel.Scenario.SpentSilver == 0,
             "伪冒签发人拒绝不能创建政令状态或扣预算");
 
+        // 2b) 真实存在但没有 IssueDecree 的角色同样不能签发：存在性不是签发授权。
+        var unauthorizedIssuer = new CreateDecreeCommand(
+            "decree-real-but-unauthorized", new CharacterId("war"), new DecreeId("decree-real-but-unauthorized"),
+            "无权角色签发测试", new ProvinceId("liaodong"), 1_000, new CharacterId("works"),
+            new GameTime(runtime.ReadModel.GameTime.Value.AddDays(10)), "", "测试", LinkedShipmentId: null,
+            runtime.ReadModel.GameTime.Value, runtime.ReadModel.WorldVersion, DecreeKind.General);
+        Require(runtime.EnqueueCreateDecree(unauthorizedIssuer).Queued, "无权真实角色政令应进入收件箱");
+        var unauthorizedIssuerResult = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!unauthorizedIssuerResult.CommandResults.Single().Accepted &&
+                unauthorizedIssuerResult.CommandResults.Single().Errors.Any(error => error.Code == "DECREE_ISSUER_UNAUTHORIZED"),
+            "真实存在但没有 IssueDecree 的角色必须被拒绝 DECREE_ISSUER_UNAUTHORIZED");
+        Require(runtime.ReadModel.Decrees.Count == 0 && runtime.ReadModel.Scenario.SpentSilver == 0,
+            "无权真实签发人拒绝不能创建政令状态或扣预算");
+
         // 3) trusted 映射不可降级：拨饷令（AllocateSupply）要求 AllocateFinance，works 只持
         //    PlanLogistics，必须拒绝 DECREE_RESPONSIBLE_UNAUTHORIZED（调用方无法声明弱能力绕过）。
         var downgraded = new CreateDecreeCommand(
@@ -1841,9 +1858,9 @@ internal static class Program
             .GetValue(snapshot)!;
 
     /// <summary>
-    /// 测试夹具：把当前 v2 载荷（MSNAP 快照 / MSWLD 状态）按 git 历史（#28 之前的
-    /// SnapshotCodec v1 格式）降级为 v1 载荷——v1 与 v2 的唯一差别是 WorldState 末尾没有
-    /// AppointmentState 段且格式版本字节为 1。用与 SnapshotCodec.WriteWorldState 完全一致的
+    /// 测试夹具：把当前 v3 载荷（MSNAP 快照 / MSWLD 状态）按 git 历史（#28 之前的
+    /// SnapshotCodec v1 格式）降级为 v1 载荷——当前 v3 相对 v1 还包含 Shipment 护卫/袭粮字段与
+    /// Scenario/Readiness/Decrees 扩展；本夹具会一起移除并把格式版本字节改为 1。用与 SnapshotCodec.WriteWorldState 完全一致的
     /// 布局规则扫描到任命段起点后截断，避免为测试在生产代码里重复实现 v1 编码器
     /// （契约："只实现 v1→v2 一条迁移路径"）。
     /// 注意：夹具只改字节布局；StateHash/PayloadChecksum 是内容字段（与字节布局无关，
@@ -1932,13 +1949,21 @@ internal static class Program
         var magicBytes = reader.ReadBytes(magic.Length);
         Require(magicBytes.SequenceEqual(magic), "夹具必须来自本适配器写入的载荷（魔数不匹配）");
         var versionPosition = (int)reader.BaseStream.Position;
-        Require(reader.ReadByte() == 2, "夹具必须来自当前 v2 格式载荷");
+        Require(reader.ReadByte() == 3, "夹具必须来自当前 v3 格式载荷");
+
         if (magicBytes.SequenceEqual("MSNAP"u8.ToArray()))
         {
-            SkipInt32(reader); // MSNAP 快照载荷在 WorldState 前有 RealtimeSnapshot.SchemaVersion（内容字段）
+            SkipInt32(reader); // MSNAP 在 WorldState 前有 RealtimeSnapshot.SchemaVersion
         }
-        // MSWLD 世界载荷没有该字段，WorldState 紧随版本字节之后；两者其余布局一致。
-        SkipWorldStateToAppointments(reader); // 停在任命段 count 起点（v2 独有）
+
+        // 当前 v3 相比真实 v1 有三类新增字节：
+        // 1) Shipment 的 Escort + RaidLoss；
+        // 2) AppointmentState 段；
+        // 3) Scenario/Readiness/Decrees authoritative extension。
+        // 这里仅在测试侧做确定性字节降级，不向生产代码引入 legacy writer。
+        var removals = new List<(int Start, int End)>();
+        SkipWorldStateToAppointments(reader, removals);
+
         var appointmentStart = (int)reader.BaseStream.Position;
         var appointmentCount = reader.ReadInt32();
         for (var i = 0; i < appointmentCount; i++)
@@ -1947,20 +1972,29 @@ internal static class Program
             SkipString(reader);
             SkipNullableString(reader);
             SkipNullableInt64(reader);
-            Skip(reader, 8);        // effectiveFrom ticks
-            SkipNullableInt64(reader); // effectiveTo
+            Skip(reader, 8);             // effectiveFrom ticks
+            SkipNullableInt64(reader);   // effectiveTo
         }
 
-        var appointmentEnd = (int)reader.BaseStream.Position;
-        var v1 = new byte[appointmentStart + (payload.Length - appointmentEnd)];
-        Array.Copy(payload, v1, appointmentStart);                       // 任命段之前
-        Array.Copy(payload, appointmentEnd, v1, appointmentStart, payload.Length - appointmentEnd); // 任命段之后
-        v1[versionPosition] = 1; // 格式版本 1
-        return v1;
+        // v1 没有任命，也没有 v3 authoritative extension；两段连续，一次移除。
+        SkipAuthoritativeExtension(reader);
+        var extensionEnd = (int)reader.BaseStream.Position;
+        removals.Add((appointmentStart, extensionEnd));
+
+        var bytes = payload.ToList();
+        foreach (var (removeStart, removeEnd) in removals.OrderByDescending(item => item.Start))
+        {
+            bytes.RemoveRange(removeStart, removeEnd - removeStart);
+        }
+
+        bytes[versionPosition] = 1;
+        return bytes.ToArray();
     }
 
-    /// <summary>跳过 WorldState 段到任命段起点（v2 独有），布局与 SnapshotCodec.WriteWorldState 一致。</summary>
-    private static void SkipWorldStateToAppointments(BinaryReader reader)
+    /// <summary>扫描当前 v3 WorldState 到任命段起点；记录 Shipment v3 独有字节的移除范围。</summary>
+    private static void SkipWorldStateToAppointments(
+        BinaryReader reader,
+        List<(int Start, int End)> removals)
     {
         SkipString(reader);                 // world id
         Skip(reader, 4 + 8 + 8);            // turn + gameTime + worldVersion
@@ -2067,6 +2101,10 @@ internal static class Program
             SkipNullableInt64(reader);      // departed
             SkipNullableInt64(reader);      // arrived
             Skip(reader, 8 + 8);            // delivered + loss
+
+            var v3ShipmentExtensionStart = (int)reader.BaseStream.Position;
+            Skip(reader, 1 + 8);            // Escort(bool) + RaidLossGrain(int64)
+            removals.Add((v3ShipmentExtensionStart, (int)reader.BaseStream.Position));
         }
 
         var movementCount = ReadInt32(reader);
@@ -2079,7 +2117,35 @@ internal static class Program
             Skip(reader, 8);                // due ticks
             SkipString(reader);             // route fingerprint
         }
-        // 此刻正位于任命段 count 起点（v2 独有）；调用方按 v1 布局跳过任命段并移除之。
+        // 此刻位于 AppointmentState count。
+    }
+
+    /// <summary>跳过 v3 WorldState 的 Scenario/Readiness/Decrees 扩展。</summary>
+    private static void SkipAuthoritativeExtension(BinaryReader reader)
+    {
+        Skip(reader, 4 + 4 + 4);            // burden/trust/daily demand
+        SkipNullableString(reader);          // front stockpile
+        Skip(reader, 4 + 4 + 8);            // secondHalf/threshold/scenario budget
+        Skip(reader, 8 + 8 + 1 + 1);        // spent/start/hardFailure/rationReduction
+        Skip(reader, 4 + 8 + 4);            // readiness value/arrears/zero-days
+
+        var decreeCount = ReadInt32(reader);
+        for (var i = 0; i < decreeCount; i++)
+        {
+            SkipString(reader);             // id
+            SkipString(reader);             // issuer
+            SkipString(reader);             // goal
+            SkipString(reader);             // region
+            Skip(reader, 8);                // budget
+            SkipString(reader);             // responsible
+            Skip(reader, 8);                // deadline
+            SkipString(reader);             // restrictions
+            SkipString(reader);             // remarks
+            SkipString(reader);             // required capability
+            SkipNullableString(reader);     // required resource
+            SkipNullableString(reader);     // linked shipment
+            SkipString(reader);             // status
+        }
     }
 
     private static void Skip(BinaryReader reader, int count) => reader.BaseStream.Position += count;
@@ -2307,6 +2373,7 @@ internal static class Program
             ],
             capabilityGrants:
             [
+                new CapabilityGrant(new CharacterId("emperor"), GameCapability.IssueDecree, ResourceId: null),
                 new CapabilityGrant(new CharacterId("works"), GameCapability.PlanLogistics, ResourceId: null),
                 // hubu 持 AllocateFinance：请饷批准必须经财权授权（审查 P1-A），测试世界对齐该契约。
                 new CapabilityGrant(new CharacterId("hubu"), GameCapability.AllocateFinance, ResourceId: null),
@@ -2382,7 +2449,8 @@ internal static class Program
         string? scope = null,
         GameTime? effectiveTo = null,
         DateTimeOffset? currentTime = null,
-        IEnumerable<AppointmentState>? extraAppointments = null)
+        IEnumerable<AppointmentState>? extraAppointments = null,
+        long? limit = null)
     {
         var map = new MapDefinition(
             "appointment-map",
@@ -2395,7 +2463,7 @@ internal static class Program
         {
             appointments.Add(new AppointmentState(
                 new CharacterId("minister"), new InstitutionId("office-hubu"),
-                scope, Limit: null,
+                scope, Limit: limit,
                 new GameTime(currentTime ?? FixedUtc), effectiveTo));
         }
 
@@ -2460,6 +2528,137 @@ internal static class Program
     }
 
     /// <summary>场景装配：world.json 装配出 6 库存/5 路线/5 授权，且前线场景规则启用。</summary>
+
+    /// <summary>
+    /// P1-PERSIST-02/04：durable commit 失败时 live state 不得提前发布，当前命令也不得从 inbox 丢失。
+    /// 修复 store 后重试同一安全点必须能正常接纳同一条命令。
+    /// </summary>
+    private static void ShouldKeepLiveStateAndInboxWhenCommitStoreFails()
+    {
+        var store = new ToggleCommitStore { FailCommits = true };
+        var runtime = new RealtimeSimulationRuntime(CreateNingyuanWorld(), store);
+        var command = CreateShipment(runtime, "store-first-retry", 300);
+        Require(runtime.EnqueueCreateShipment(command).Queued, "故障注入命令必须先进入收件箱");
+        // 基准取在入队之后、推进之前：收件箱本身是权威哈希的一部分（PERSIST-04 语义=命令失败后留在收件箱），
+        // 若取在入队前会与"命令留在收件箱"的断言互相矛盾。
+        var beforeHash = runtime.StateHash;
+        var beforeVersion = runtime.ReadModel.WorldVersion;
+
+        RequireThrows<InvalidOperationException>(() => runtime.AdvanceTo(runtime.ReadModel.GameTime));
+        Require(runtime.StateHash == beforeHash && runtime.ReadModel.WorldVersion == beforeVersion,
+            "durable commit 失败时不得发布 candidate 到 live state");
+
+        var pending = (IReadOnlyList<RealtimeCommand>)typeof(RealtimeSnapshot)
+            .GetProperty("PendingCommands", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(runtime.CaptureSnapshot())!;
+        Require(pending.Count == 1 && pending[0].CommandId == command.CommandId,
+            "durable commit 失败时当前命令必须继续留在 inbox，不能静默丢失");
+
+        store.FailCommits = false;
+        var retried = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(retried.Succeeded && retried.CommandResults.Single().Accepted,
+            "存储恢复后同一命令必须能够重试并接纳");
+        Require(runtime.ReadModel.Shipments.Any(item => item.Id.Value == command.ShipmentId.Value),
+            "重试成功后运输单必须真实进入权威世界");
+        Require(store.LastCommitted is not null, "重试成功后必须产生 durable commit");
+    }
+
+    /// <summary>
+    /// P1-PERSIST-10/11：当前 codec 必须完整保存所有进入 canonical state 的场景字段以及
+    /// Escort/RaidLoss/Decree；否则减耗令或风险发生后的 SQLite 恢复会 hash 漂移。
+    /// </summary>
+    private static void ShouldRoundTripAllAuthoritativeScenarioFieldsThroughCodec()
+    {
+        var runtime = new RealtimeSimulationRuntime(
+            CreateNingyuanScenarioWorld(destinationGrain: 10_000, travelHours: 30 * 24));
+
+        var shipment = new CreateShipmentCommand(
+            "codec-full-state-shipment",
+            new CharacterId("works"),
+            new ShipmentId("shipment-codec-full-state"),
+            new RouteId("capital-ningyuan-grain"),
+            5_000,
+            runtime.ReadModel.GameTime.Value,
+            runtime.ReadModel.WorldVersion,
+            Escort: true);
+        Require(runtime.EnqueueCreateShipment(shipment).Queued, "完整 codec 夹具运输单必须入箱");
+        Require(runtime.AdvanceTo(runtime.ReadModel.GameTime).CommandResults.Single().Accepted,
+            "完整 codec 夹具运输单必须接纳");
+
+        var decree = CreateDecree(
+            runtime, "codec-full-state-decree", deadlineDays: 20, budget: 100,
+            kind: DecreeKind.RationReduction);
+        Require(runtime.EnqueueCreateDecree(decree).Queued, "完整 codec 夹具减耗令必须入箱");
+        Require(runtime.AdvanceTo(runtime.ReadModel.GameTime).CommandResults.Single().Accepted,
+            "完整 codec 夹具减耗令必须接纳");
+
+        // 推进一日，使 Readiness 与 Scenario 均脱离默认值。
+        var oneDay = runtime.AdvanceTo(new GameTime(runtime.ReadModel.GameTime.Value.AddDays(1)));
+        Require(oneDay.Succeeded, "完整 codec 夹具必须能推进一日");
+
+        // RaidLoss 通过测试反射设成非零，只为覆盖 codec 私有字段恢复；不作为产品写入口。
+        var state = GetRuntimeState(runtime);
+        var authoritativeShipment = state.Logistics.Shipments[new ShipmentId("shipment-codec-full-state")];
+        var applyRaidLoss = typeof(ShipmentState).GetMethod(
+            "ApplyRaidLoss", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new MissingMethodException(typeof(ShipmentState).FullName, "ApplyRaidLoss");
+        applyRaidLoss.Invoke(authoritativeShipment, [123L]);
+
+        var before = runtime.ReadModel;
+        Require(before.Scenario.DailyGrainDemand == ScenarioState.DesignReducedGrainDemand,
+            "完整 codec 夹具必须包含已生效减耗令");
+        Require(before.Decrees.Single().Status == DecreeStatus.Executing,
+            "完整 codec 夹具必须包含 active decree");
+        Require(before.Shipments.Single().Escort && before.Shipments.Single().RaidLossGrain == 123,
+            "完整 codec 夹具必须包含 Escort 与非零 RaidLoss");
+
+        var payload = SnapshotCodec.Serialize(runtime.CaptureSnapshot());
+        var restored = RealtimeSimulationRuntime.Restore(SnapshotCodec.Deserialize(payload));
+        var after = restored.ReadModel;
+
+        Require(restored.StateHash == runtime.StateHash,
+            "Scenario/Readiness/Decree/Escort/RaidLoss 完整 codec 往返后 canonical hash 必须一致");
+        Require(after.Scenario.DailyGrainDemand == before.Scenario.DailyGrainDemand &&
+                after.Scenario.LocalBurden == before.Scenario.LocalBurden &&
+                after.Scenario.SpentSilver == before.Scenario.SpentSilver,
+            "ScenarioState 关键字段必须完整往返");
+        Require(after.Readiness.ValueBasisPoints == before.Readiness.ValueBasisPoints &&
+                after.Readiness.ArrearsGrain == before.Readiness.ArrearsGrain &&
+                after.Readiness.ConsecutiveZeroGrainDays == before.Readiness.ConsecutiveZeroGrainDays,
+            "ReadinessState 必须完整往返");
+        Require(after.Decrees.Single() == before.Decrees.Single(),
+            "DecreeState 只读投影必须逐字段完整往返");
+        Require(after.Shipments.Single().Escort == before.Shipments.Single().Escort &&
+                after.Shipments.Single().RaidLossGrain == before.Shipments.Single().RaidLossGrain,
+            "Shipment Escort/RaidLoss 必须完整往返");
+    }
+
+    private sealed class ToggleCommitStore : ICommitStore
+    {
+        public bool FailCommits { get; set; }
+
+        public CommitPackage? LastCommitted { get; private set; }
+
+        public CommitReceipt CommitWorld(CommitPackage package)
+        {
+            if (FailCommits)
+            {
+                return new CommitReceipt(false, -1, "fault injection");
+            }
+
+            LastCommitted = package;
+            return new CommitReceipt(true, GetSnapshotState(package.Snapshot).WorldVersion, null);
+        }
+
+        public LoadedWorld? LoadCommittedWorld()
+        {
+            var committed = LastCommitted;
+            return committed is null
+                ? null
+                : new LoadedWorld(committed.Snapshot, GetSnapshotOutbox(committed.Snapshot));
+        }
+    }
+
     private static void ShouldLoadNingyuan1629InitialWorld()
     {
         var world = MingSim.Application.Scenarios.Ningyuan1629InitialWorld.Load();
@@ -2546,6 +2745,22 @@ internal static class Program
             "辖区内的目标应通过任命授权");
         Require(!authorizer.Check(world, new CharacterId("minister"), GameCapability.AllocateFinance, "dengzhou").Allowed,
             "辖区外的目标必须被拒（越权辖区）");
+    }
+
+    /// <summary>额度：数量/金额型动作显式传 amount 时，任命 Limit 必须作为硬上限参与授权。</summary>
+    private static void ShouldEnforceAppointmentLimitForAmountActions()
+    {
+        var world = CreateAppointmentWorld(limit: 5_000);
+        var authorizer = new CapabilityAuthorizer();
+        Require(authorizer.Check(world, new CharacterId("minister"), GameCapability.AllocateFinance,
+                resourceId: null, amount: 4_999).Allowed,
+            "金额低于任命 Limit 应允许");
+        Require(authorizer.Check(world, new CharacterId("minister"), GameCapability.AllocateFinance,
+                resourceId: null, amount: 5_000).Allowed,
+            "金额等于任命 Limit 应允许");
+        Require(!authorizer.Check(world, new CharacterId("minister"), GameCapability.AllocateFinance,
+                resourceId: null, amount: 5_001).Allowed,
+            "金额超过任命 Limit 必须拒绝");
     }
 
     /// <summary>到期：任命按半开区间 [EffectiveFrom, EffectiveTo) 生效，到期时刻即失效。</summary>

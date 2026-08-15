@@ -19,9 +19,8 @@ namespace MingSim.Domain.Authorization;
 /// 范围约定：
 /// - <see cref="Scope"/>：辖区范围，与 CapabilityGrant.ResourceId 相同的精确匹配语义；
 ///   为空表示不限辖区。Limit 为额度上限（石/两等）；为空表示无额度限制。
-///   本切片 <see cref="CapabilityAuthorizer"/> 的 Check 不接收金额参数，
-///   因此不执行额度裁决（doc 05 §4.3 的"金额/人数是否在限额"留待带金额的命令检查接入）；
-///   Limit 先随任命保存，保证状态与快照完整。
+///   <see cref="CapabilityAuthorizer"/> 的 Check 可接收可选 amount；数量/金额型动作传入 amount 时，
+///   `amount &gt; Limit` 必须拒绝，`amount == Limit` 允许。非数量型动作可不传 amount。
 /// - 生效区间是半开区间 [EffectiveFrom, EffectiveTo)：到期时刻即失效，
 ///   保证"已结束任职不能继续提供权限"（doc 06 §4.3 不变量）。
 /// </remarks>

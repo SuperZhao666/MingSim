@@ -97,6 +97,18 @@ internal static partial class Program
         var ruleIntent = result.Intents.Single();
         Require(ruleIntent is PlanLogisticsIntent,
             "ParseFailed 回退必须产出规则路径（Utility）的结构化意图");
+
+        // 路线 ID 合法也不能让模型自行填写超出候选快照可执行上限的数量；
+        // 否则会把明显过期/幻觉动作一直推到内核才拒绝，失去 candidate 协议的意义。
+        var route = context.Routes.Single();
+        var tooMuch = Math.Min(long.MaxValue, route.SourceGrain + 1);
+        var oversizedPlanner = new DecisionPlanner(
+            new UtilityMinisterAgent(MinisterFocus.Logistics),
+            new FakeModelProvider(
+                $"{{\"schema_version\":1,\"intent_type\":\"logistics.request_shipment\",\"parameters\":{{\"route_id\":\"{route.RouteId.Value}\",\"grain_quantity\":{tooMuch}}}}}"));
+        var oversized = oversizedPlanner.PlanAsync(request, context, now.Add(TimeSpan.FromMinutes(30))).GetAwaiter().GetResult();
+        Require(oversized.Source == DecisionSource.Rules && oversized.FallbackReason == ModelFallbackReason.ParseFailed,
+            "模型数量超过候选路线可执行上限必须 ParseFailed 回退");
     }
 
     /// <summary>

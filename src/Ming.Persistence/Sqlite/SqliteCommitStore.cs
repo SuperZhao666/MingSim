@@ -69,28 +69,10 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
     {
         lock (_gate)
         {
-            using var command = _connection.CreateCommand();
-            command.CommandText = """
-                SELECT ws.state_blob, m.current_world_version
-                FROM world_meta AS m
-                JOIN world_state AS ws
-                  ON ws.world_id = m.world_id AND ws.world_version = m.current_world_version
-                WHERE m.world_id = $world;
-                """;
-            command.Parameters.AddWithValue("$world", worldId.Value);
-            using var reader = command.ExecuteReader();
-            if (!reader.Read())
-            {
-                throw new KeyNotFoundException($"世界 {worldId} 不存在或尚未提交。");
-            }
-
-            var state = SnapshotCodec.DeserializeWorld(reader.GetFieldValue<byte[]>(0));
-            if (state.Id != worldId)
-            {
-                throw new InvalidDataException("状态行中的世界编号与请求不一致。");
-            }
-
-            return state;
+            // 快速状态行不是独立真相；统一走完整快照恢复与校验，避免 state_blob 被单独篡改后
+            // 绕过 snapshot/meta/journal 的一致性检查。
+            var snapshot = RestoreLatest(_databasePath, worldId);
+            return SnapshotReflection.GetState(snapshot).Clone();
         }
     }
 
@@ -205,56 +187,27 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             }
 
             VerifyStagedFacetsMatchSnapshot(snapshot);
-            var payload = SnapshotCodec.Serialize(snapshot);
-            var stateHash = snapshot.StateHash;
-            var payloadChecksum = snapshot.PayloadChecksum;
-
-            using var transaction = _connection.BeginTransaction(deferred: false);
-            try
+            long lastSequence = -1;
+            using (var command = _connection.CreateCommand())
             {
-                var current = ReadCurrentMeta();
-                var currentVersion = current?.CurrentWorldVersion ?? -1;
-                if (_pendingState.WorldVersion < currentVersion)
+                command.CommandText = "SELECT MAX(event_sequence) FROM event_journal WHERE world_id = $world;";
+                command.Parameters.AddWithValue("$world", _worldId.Value);
+                var value = command.ExecuteScalar();
+                if (value is not null && value is not DBNull)
                 {
-                    throw new InvalidOperationException(
-                        $"提交版本回退：库中当前版本 {currentVersion}，试图写入 {_pendingState.WorldVersion}。");
+                    lastSequence = Convert.ToInt64(value);
                 }
-
-                var isIdenticalRecommit = current is not null &&
-                    _pendingState.WorldVersion == currentVersion &&
-                    IsIdenticalLatestSnapshot(payload, current!.CurrentSnapshotSeq);
-                if (isIdenticalRecommit)
-                {
-                    // 幂等重提交：同一版本且快照字节完全相同，什么都不写，直接结束本次提交。
-                    transaction.Commit();
-                    return;
-                }
-
-                WriteStateRow(_pendingState!, stateHash);
-                AppendJournalDelta(_pendingEvents!);
-                var snapshotSeq = WriteSnapshotRow(payload, _pendingState!, stateHash, payloadChecksum);
-                // 先写 meta 占位、再计算校验和、最后回写：校验和布局从不包含 total_checksum 列本身，
-                // 避免"为了校验 meta 又要先知道 meta 里的校验和"的自引用（提交/恢复两侧布局必须完全一致）。
-                WriteMeta(_pendingState, stateHash, payloadChecksum, snapshotSeq, totalChecksum: "");
-                var totalChecksum = ComputeTotalChecksum();
-                UpdateTotalChecksum(totalChecksum);
-                transaction.Commit();
-            }
-            catch
-            {
-                transaction.Rollback();
-                throw;
-            }
-            finally
-            {
-                ClearPending();
             }
 
-            // COMMIT 之后做一次显式 checkpoint，让 .db 主文件自洽（等价于导出存档前的安全状态）。
-            using (var checkpoint = _connection.CreateCommand())
+            var delta = _pendingEvents
+                .Where(item => item.EventSequence > lastSequence)
+                .OrderBy(item => item.EventSequence)
+                .ToArray();
+            var receipt = CommitWorld(new CommitPackage(snapshot, delta, Array.Empty<InputOutcome>()));
+            ClearPending();
+            if (!receipt.Success)
             {
-                checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
-                checkpoint.ExecuteNonQuery();
+                throw new InvalidOperationException(receipt.Error ?? "SQLite 提交失败。");
             }
         }
     }
@@ -273,73 +226,147 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
     /// 但下一次提交会因"版本回退"守卫被拒——完整续玩需要显式修复存档指针，超出本方法职责
     /// （恢复必须只读，绝不覆盖原档）。
     /// </remarks>
-    public static RealtimeSnapshot RestoreLatest(string databasePath, WorldId worldId)
+    public static RealtimeSnapshot RestoreLatest(string databasePath, WorldId worldId) =>
+        RestoreLatestCore(databasePath, worldId).Snapshot;
+
+    private static (RealtimeSnapshot Snapshot, bool FellBack) RestoreLatestCore(string databasePath, WorldId worldId)
     {
         if (!File.Exists(databasePath))
         {
             throw new FileNotFoundException("存档数据库不存在。", databasePath);
         }
 
-        // Pooling=false：恢复是只读的一次性操作，Dispose 后必须立即释放文件句柄（与写路径一致）。
         using var connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadOnly;Pooling=false");
         connection.Open();
-        using (var command = connection.CreateCommand())
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT world_id, current_world_version, current_commit_id, current_state_hash,
+                   current_payload_checksum, current_snapshot_seq, total_checksum
+            FROM world_meta WHERE world_id = $world;
+            """;
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
         {
-            command.CommandText = "SELECT world_id, current_world_version, current_snapshot_seq, total_checksum FROM world_meta WHERE world_id = $world;";
-            command.Parameters.AddWithValue("$world", worldId.Value);
-            using var reader = command.ExecuteReader();
-            if (!reader.Read())
-            {
-                throw new InvalidDataException($"世界 {worldId} 没有已提交的提交记录。");
-            }
-
-            var storedWorldId = reader.GetString(0);
-            var currentWorldVersion = reader.GetInt64(1);
-            var currentSnapshotSeq = reader.GetInt64(2);
-            var storedChecksum = reader.GetString(3);
-            if (storedWorldId != worldId.Value)
-            {
-                throw new InvalidDataException("存档中的世界编号与请求不一致。");
-            }
-
-            var payload = ReadSnapshotPayload(connection, worldId, currentSnapshotSeq);
-            var actualChecksum = ComputeTotalChecksum(connection, worldId);
-            if (!StringComparer.Ordinal.Equals(actualChecksum, storedChecksum))
-            {
-                throw new InvalidDataException("存档内容校验失败：数据库可能被篡改或损坏。");
-            }
-
-            VerifyJournalContinuity(connection, worldId);
-            var (snapshot, fellBack) = ReadSnapshotWithFallback(connection, worldId, currentSnapshotSeq, payload);
-            VerifyJournalMatchesSnapshot(connection, worldId, snapshot, allowJournalLongerThanOutbox: fellBack);
-            return snapshot;
+            throw new InvalidDataException($"世界 {worldId} 没有已提交的提交记录。");
         }
+
+        var storedWorldId = reader.GetString(0);
+        var currentWorldVersion = reader.GetInt64(1);
+        var currentCommitId = reader.GetString(2);
+        var currentStateHash = reader.GetString(3);
+        var currentPayloadChecksum = reader.GetString(4);
+        var currentSnapshotSeq = reader.GetInt64(5);
+        var storedChecksum = reader.GetString(6);
+        if (storedWorldId != worldId.Value)
+        {
+            throw new InvalidDataException("存档中的世界编号与请求不一致。");
+        }
+        reader.Close();
+
+        var actualChecksum = ComputeTotalChecksum(connection, worldId);
+        if (!StringComparer.Ordinal.Equals(actualChecksum, storedChecksum))
+        {
+            throw new InvalidDataException("存档内容校验失败：状态/事件/元数据可能被篡改或损坏。");
+        }
+
+        VerifyJournalContinuity(connection, worldId);
+        var (snapshot, fellBack) = ReadSnapshotWithFallback(connection, worldId, currentSnapshotSeq);
+        if (!fellBack)
+        {
+            var state = SnapshotReflection.GetState(snapshot);
+            if (state.WorldVersion != currentWorldVersion ||
+                !StringComparer.Ordinal.Equals(state.CommitId, currentCommitId) ||
+                !StringComparer.Ordinal.Equals(snapshot.StateHash, currentStateHash) ||
+                !StringComparer.Ordinal.Equals(snapshot.PayloadChecksum, currentPayloadChecksum))
+            {
+                throw new InvalidDataException("当前快照与 world_meta 指针身份不一致，拒绝恢复。");
+            }
+        }
+
+        VerifyJournalMatchesSnapshot(connection, worldId, snapshot, allowJournalLongerThanOutbox: fellBack);
+        return (snapshot, fellBack);
     }
 
-    /// <summary>
-    /// 读取当前快照；损坏时按序列降序回退到上一个 READY 快照（doc 08 §15：Current 损坏
-    /// → 选择最新 READY Snapshot）。候选的 v1 旧档先迁移到 v2；迁移失败与解码失败同等对待——
-    /// 都意味着该快照不可读，尝试更早的 READY。全部候选都不可读时最后抛出（fail-closed，
-    /// 绝不发布半状态、绝不把不可读的存档静默当作成功恢复）。
-    /// </summary>
     private static (RealtimeSnapshot Snapshot, bool FellBack) ReadSnapshotWithFallback(
-        SqliteConnection connection, WorldId worldId, long currentSnapshotSeq, byte[] currentPayload)
+        SqliteConnection connection,
+        WorldId worldId,
+        long currentSnapshotSeq)
     {
         var seq = currentSnapshotSeq;
-        var payload = currentPayload;
+        Exception? lastFailure = null;
         while (true)
         {
             try
             {
-                var snapshot = SnapshotCodec.Deserialize(SnapshotCodec.MigrateV1ToV2(payload));
-                return (snapshot, seq < currentSnapshotSeq);
+                var row = ReadSnapshotRecord(connection, worldId, seq);
+                var snapshot = SnapshotCodec.Deserialize(SnapshotCodec.MigrateV1ToV2(row.Payload));
+                ValidateDecodedSnapshot(worldId, row, snapshot);
+                return (snapshot, seq != currentSnapshotSeq);
             }
-            catch (Exception exception) when (exception is InvalidDataException or EndOfStreamException && seq > 0)
+            catch (Exception exception) when (exception is InvalidDataException or EndOfStreamException)
             {
-                // 当前（或回退候选）快照载荷损坏：尝试上一个 READY 快照；绝不发布半状态。
-                seq--;
-                payload = ReadSnapshotPayload(connection, worldId, seq);
+                lastFailure = exception;
+                var previous = FindPreviousSnapshotSeq(connection, worldId, seq);
+                if (previous is null)
+                {
+                    throw new InvalidDataException("所有 READY 快照均不可恢复。", lastFailure);
+                }
+                seq = previous.Value;
             }
+        }
+    }
+
+    private static SnapshotRow ReadSnapshotRecord(SqliteConnection connection, WorldId worldId, long snapshotSeq)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT world_version, commit_id, state_hash, payload_checksum, snapshot_blob
+            FROM snapshots WHERE world_id = $world AND snapshot_seq = $seq;
+            """;
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        command.Parameters.AddWithValue("$seq", snapshotSeq);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            throw new InvalidDataException($"快照序号 {snapshotSeq} 不存在。");
+        }
+        return new SnapshotRow(
+            snapshotSeq,
+            reader.GetInt64(0),
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.GetFieldValue<byte[]>(4));
+    }
+
+    private static long? FindPreviousSnapshotSeq(SqliteConnection connection, WorldId worldId, long beforeSeq)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT MAX(snapshot_seq) FROM snapshots WHERE world_id = $world AND snapshot_seq < $seq;";
+        command.Parameters.AddWithValue("$world", worldId.Value);
+        command.Parameters.AddWithValue("$seq", beforeSeq);
+        var value = command.ExecuteScalar();
+        return value is null or DBNull ? null : Convert.ToInt64(value);
+    }
+
+    private static void ValidateDecodedSnapshot(WorldId worldId, SnapshotRow row, RealtimeSnapshot snapshot)
+    {
+        var state = SnapshotReflection.GetState(snapshot);
+        if (state.Id != worldId ||
+            state.WorldVersion != row.WorldVersion ||
+            !StringComparer.Ordinal.Equals(state.CommitId, row.CommitId) ||
+            !StringComparer.Ordinal.Equals(snapshot.StateHash, row.StateHash) ||
+            !StringComparer.Ordinal.Equals(snapshot.PayloadChecksum, row.PayloadChecksum))
+        {
+            throw new InvalidDataException($"快照 {row.SnapshotSeq} 与快照行元数据不一致。");
+        }
+
+        var (actualHash, actualChecksum) = RealtimeSnapshotHash.ComputeHashes(snapshot);
+        if (!StringComparer.Ordinal.Equals(actualHash, snapshot.StateHash) ||
+            !StringComparer.Ordinal.Equals(actualChecksum, snapshot.PayloadChecksum))
+        {
+            throw new InvalidDataException($"快照 {row.SnapshotSeq} 的内部 hash/checksum 校验失败。");
         }
     }
 
@@ -350,53 +377,209 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
     public CommitReceipt CommitWorld(CommitPackage package)
     {
         ArgumentNullException.ThrowIfNull(package);
-        try
-        {
-            var state = SnapshotReflection.GetState(package.Snapshot);
-            Commit(state);
-            Append(_worldId, package.JournalEvents);
-            Promote(Prepare(state, package.JournalEvents));
-            CommitAll(package.Snapshot);
-            return new CommitReceipt(true, state.WorldVersion, null);
-        }
-        catch (Exception exception)
-        {
-            return new CommitReceipt(false, -1, exception.Message);
-        }
-    }
-
-    /// <summary>
-    /// ICommitStore：把未改变世界的拒绝/过期结果写进 command_outcomes 表（同一写连接、单条 INSERT）。
-    /// 世界版本不变，重试同一命令时恢复路径可按 command_id 找到同一结论。
-    /// </summary>
-    public CommitReceipt RecordOutcome(InputOutcome outcome)
-    {
-        ArgumentNullException.ThrowIfNull(outcome);
         lock (_gate)
         {
-            using var transaction = _connection.BeginTransaction();
             try
             {
-                using var command = _connection.CreateCommand();
-                command.Transaction = transaction;
-                command.CommandText = """
-                    INSERT OR REPLACE INTO command_outcomes (world_id, command_id, outcome_code, message, world_version)
-                    VALUES ($world, $commandId, $code, $message, $version);
-                    """;
-                command.Parameters.AddWithValue("$world", _worldId.Value);
-                command.Parameters.AddWithValue("$commandId", outcome.CommandId);
-                command.Parameters.AddWithValue("$code", outcome.OutcomeCode);
-                command.Parameters.AddWithValue("$message", outcome.Message);
-                command.Parameters.AddWithValue("$version", outcome.WorldVersion);
-                command.ExecuteNonQuery();
-                transaction.Commit();
-                return new CommitReceipt(true, outcome.WorldVersion, null);
+                var state = SnapshotReflection.GetState(package.Snapshot);
+                if (state.Id != _worldId)
+                {
+                    return new CommitReceipt(false, state.WorldVersion, "提交快照的 WorldId 与存储实例不一致。");
+                }
+
+                var fullOutbox = SnapshotReflection.GetOutboxEvents(package.Snapshot);
+                ValidateJournalDeltaAgainstSnapshot(fullOutbox, package.JournalEvents);
+                var payload = SnapshotCodec.Serialize(package.Snapshot);
+
+                using var transaction = _connection.BeginTransaction(deferred: false);
+                try
+                {
+                    var current = ReadCurrentMeta(transaction);
+                    var currentVersion = current?.CurrentWorldVersion ?? -1;
+                    ValidateJournalDeltaAgainstStore(fullOutbox, package.JournalEvents, transaction);
+                    if (state.WorldVersion < currentVersion)
+                    {
+                        throw new InvalidOperationException(
+                            $"提交版本回退：库中当前版本 {currentVersion}，试图写入 {state.WorldVersion}。");
+                    }
+
+                    if (current is not null && IsIdenticalLatestSnapshot(payload, current.CurrentSnapshotSeq, transaction))
+                    {
+                        transaction.Commit();
+                        return new CommitReceipt(true, state.WorldVersion, null);
+                    }
+
+                    WriteStateRow(state, package.Snapshot.StateHash, transaction);
+                    AppendJournalDeltaExact(package.JournalEvents, transaction);
+                    WriteInputOutcomes(package.InputOutcomes, transaction);
+                    var snapshotSeq = WriteSnapshotRow(
+                        payload, state, package.Snapshot.StateHash, package.Snapshot.PayloadChecksum, transaction);
+                    WriteMeta(
+                        state, package.Snapshot.StateHash, package.Snapshot.PayloadChecksum,
+                        snapshotSeq, totalChecksum: "", transaction);
+                    var totalChecksum = ComputeTotalChecksum(_connection, _worldId, transaction);
+                    UpdateTotalChecksum(totalChecksum, transaction);
+                    transaction.Commit();
+                }
+                catch
+                {
+                    transaction.Rollback();
+                    throw;
+                }
+
+                using (var checkpoint = _connection.CreateCommand())
+                {
+                    checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+                    checkpoint.ExecuteNonQuery();
+                }
+
+                return new CommitReceipt(true, state.WorldVersion, null);
             }
             catch (Exception exception)
             {
-                transaction.Rollback();
-                return new CommitReceipt(false, outcome.WorldVersion, exception.Message);
+                return new CommitReceipt(false, -1, exception.Message);
             }
+        }
+    }
+
+    private static void ValidateJournalDeltaAgainstSnapshot(
+        IReadOnlyList<DomainEvent> fullOutbox,
+        IReadOnlyList<DomainEvent> delta)
+    {
+        if (delta.Count == 0)
+        {
+            return;
+        }
+
+        if (delta.Count > fullOutbox.Count)
+        {
+            throw new InvalidDataException("事件增量长度超过快照 outbox，拒绝提交。");
+        }
+
+        var offset = fullOutbox.Count - delta.Count;
+        for (var index = 0; index < delta.Count; index++)
+        {
+            var expected = SnapshotCodec.SerializeEvent(fullOutbox[offset + index]);
+            var actual = SnapshotCodec.SerializeEvent(delta[index]);
+            if (!expected.AsSpan().SequenceEqual(actual))
+            {
+                throw new InvalidDataException("事件增量不是快照 outbox 的精确后缀，拒绝提交。");
+            }
+        }
+    }
+
+    private void ValidateJournalDeltaAgainstStore(
+        IReadOnlyList<DomainEvent> fullOutbox,
+        IReadOnlyList<DomainEvent> delta,
+        SqliteTransaction transaction)
+    {
+        long count;
+        long lastSequence = -1;
+        using (var command = _connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT COUNT(*), MAX(event_sequence)
+                FROM event_journal WHERE world_id = $world;
+                """;
+            command.Parameters.AddWithValue("$world", _worldId.Value);
+            using var reader = command.ExecuteReader();
+            reader.Read();
+            count = reader.GetInt64(0);
+            if (!reader.IsDBNull(1))
+            {
+                lastSequence = reader.GetInt64(1);
+            }
+        }
+
+        var expectedExisting = fullOutbox.Count - delta.Count;
+        if (expectedExisting < 0 || count != expectedExisting)
+        {
+            throw new InvalidDataException(
+                $"快照 outbox 与已提交 journal 前缀不一致：库中 {count} 条，快照期望已有 {expectedExisting} 条。");
+        }
+
+        if ((count == 0 && lastSequence != -1) || (count > 0 && lastSequence != count - 1))
+        {
+            throw new InvalidDataException(
+                $"事件日志自身不连续：COUNT={count}，MAX(sequence)={lastSequence}。");
+        }
+
+        for (var index = 0; index < count; index++)
+        {
+            using var command = _connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT event_blob FROM event_journal
+                WHERE world_id = $world AND event_sequence = $sequence;
+                """;
+            command.Parameters.AddWithValue("$world", _worldId.Value);
+            command.Parameters.AddWithValue("$sequence", index);
+            var stored = command.ExecuteScalar() as byte[]
+                ?? throw new InvalidDataException($"事件日志缺少前缀序号 {index}。");
+            var expected = SnapshotCodec.SerializeEvent(fullOutbox[index]);
+            if (!stored.AsSpan().SequenceEqual(expected))
+            {
+                throw new InvalidDataException($"快照 outbox 与已提交 journal 在序号 {index} 处内容不一致。");
+            }
+        }
+    }
+
+    private void AppendJournalDeltaExact(IReadOnlyList<DomainEvent> delta, SqliteTransaction transaction)
+    {
+        long lastSequence = -1;
+        using (var lastCommand = _connection.CreateCommand())
+        {
+            lastCommand.Transaction = transaction;
+            lastCommand.CommandText = "SELECT MAX(event_sequence) FROM event_journal WHERE world_id = $world;";
+            lastCommand.Parameters.AddWithValue("$world", _worldId.Value);
+            var value = lastCommand.ExecuteScalar();
+            if (value is not null && value is not DBNull)
+            {
+                lastSequence = Convert.ToInt64(value);
+            }
+        }
+
+        var expected = lastSequence + 1;
+        foreach (var domainEvent in delta)
+        {
+            if (domainEvent.WorldId != _worldId || domainEvent.EventSequence != expected)
+            {
+                throw new InvalidDataException(
+                    $"事件日志增量不连续或世界不一致：期望序号 {expected}，实际 {domainEvent.EventSequence}。");
+            }
+
+            using var command = _connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                INSERT INTO event_journal (world_id, event_sequence, event_id, event_blob)
+                VALUES ($world, $sequence, $eventId, $blob);
+                """;
+            command.Parameters.AddWithValue("$world", _worldId.Value);
+            command.Parameters.AddWithValue("$sequence", domainEvent.EventSequence);
+            command.Parameters.AddWithValue("$eventId", domainEvent.EventId);
+            command.Parameters.AddWithValue("$blob", SnapshotCodec.SerializeEvent(domainEvent));
+            command.ExecuteNonQuery();
+            expected++;
+        }
+    }
+
+    private void WriteInputOutcomes(IReadOnlyList<InputOutcome> outcomes, SqliteTransaction transaction)
+    {
+        foreach (var outcome in outcomes)
+        {
+            using var command = _connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                INSERT OR REPLACE INTO command_outcomes (world_id, command_id, outcome_code, message, world_version)
+                VALUES ($world, $commandId, $code, $message, $version);
+                """;
+            command.Parameters.AddWithValue("$world", _worldId.Value);
+            command.Parameters.AddWithValue("$commandId", outcome.CommandId);
+            command.Parameters.AddWithValue("$code", outcome.OutcomeCode);
+            command.Parameters.AddWithValue("$message", outcome.Message);
+            command.Parameters.AddWithValue("$version", outcome.WorldVersion);
+            command.ExecuteNonQuery();
         }
     }
 
@@ -413,8 +596,14 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
 
         lock (_gate)
         {
-            var snapshot = RestoreLatest(_databasePath, _worldId);
-            return new LoadedWorld(snapshot, Read(_worldId));
+            var restored = RestoreLatestCore(_databasePath, _worldId);
+            return new LoadedWorld(
+                restored.Snapshot,
+                Read(_worldId),
+                restored.FellBack,
+                restored.FellBack
+                    ? "当前快照损坏，已回退到较早 READY 快照；该恢复仅供查看/导出，继续写入前必须显式修复存档指针。"
+                    : null);
         }
     }
 
@@ -643,6 +832,120 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
         _pendingSnapshot = null;
     }
 
+    private MetaRow? ReadCurrentMeta(SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT current_world_version, current_commit_id, current_snapshot_seq
+            FROM world_meta WHERE world_id = $world;
+            """;
+        command.Parameters.AddWithValue("$world", _worldId.Value);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? new MetaRow(reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2)) : null;
+    }
+
+    private bool IsIdenticalLatestSnapshot(byte[] payload, long currentSnapshotSeq, SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT snapshot_blob FROM snapshots WHERE world_id = $world AND snapshot_seq = $seq;";
+        command.Parameters.AddWithValue("$world", _worldId.Value);
+        command.Parameters.AddWithValue("$seq", currentSnapshotSeq);
+        var latest = command.ExecuteScalar() as byte[];
+        return latest is not null && payload.AsSpan().SequenceEqual(latest);
+    }
+
+    private void WriteStateRow(WorldState state, string stateHash, SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT OR REPLACE INTO world_state (world_id, world_version, commit_id, game_time_ticks, state_hash, state_blob)
+            VALUES ($world, $version, $commitId, $ticks, $hash, $blob);
+            """;
+        command.Parameters.AddWithValue("$world", state.Id.Value);
+        command.Parameters.AddWithValue("$version", state.WorldVersion);
+        command.Parameters.AddWithValue("$commitId", state.CommitId);
+        command.Parameters.AddWithValue("$ticks", state.GameTime.Value.UtcTicks);
+        command.Parameters.AddWithValue("$hash", stateHash);
+        command.Parameters.AddWithValue("$blob", SnapshotCodec.SerializeWorld(state));
+        command.ExecuteNonQuery();
+    }
+
+    private long WriteSnapshotRow(
+        byte[] payload,
+        WorldState state,
+        string stateHash,
+        string payloadChecksum,
+        SqliteTransaction transaction)
+    {
+        long snapshotSeq;
+        using (var seqCommand = _connection.CreateCommand())
+        {
+            seqCommand.Transaction = transaction;
+            seqCommand.CommandText = "SELECT MAX(snapshot_seq) FROM snapshots WHERE world_id = $world;";
+            seqCommand.Parameters.AddWithValue("$world", _worldId.Value);
+            var value = seqCommand.ExecuteScalar();
+            snapshotSeq = (value is null or DBNull ? 0L : Convert.ToInt64(value)) + 1;
+        }
+
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO snapshots (world_id, snapshot_seq, world_version, commit_id, state_hash, payload_checksum, snapshot_blob)
+            VALUES ($world, $seq, $version, $commitId, $hash, $checksum, $blob);
+            """;
+        command.Parameters.AddWithValue("$world", _worldId.Value);
+        command.Parameters.AddWithValue("$seq", snapshotSeq);
+        command.Parameters.AddWithValue("$version", state.WorldVersion);
+        command.Parameters.AddWithValue("$commitId", state.CommitId);
+        command.Parameters.AddWithValue("$hash", stateHash);
+        command.Parameters.AddWithValue("$checksum", payloadChecksum);
+        command.Parameters.AddWithValue("$blob", payload);
+        command.ExecuteNonQuery();
+        return snapshotSeq;
+    }
+
+    private void WriteMeta(
+        WorldState state,
+        string stateHash,
+        string payloadChecksum,
+        long snapshotSeq,
+        string totalChecksum,
+        SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT OR REPLACE INTO world_meta (
+                world_id, schema_version, current_world_version, current_commit_id,
+                current_game_time_ticks, current_state_hash, current_payload_checksum,
+                current_snapshot_seq, total_checksum)
+            VALUES ($world, $schema, $version, $commitId, $ticks, $hash, $checksum, $seq, $total);
+            """;
+        command.Parameters.AddWithValue("$world", _worldId.Value);
+        command.Parameters.AddWithValue("$schema", SchemaVersion);
+        command.Parameters.AddWithValue("$version", state.WorldVersion);
+        command.Parameters.AddWithValue("$commitId", state.CommitId);
+        command.Parameters.AddWithValue("$ticks", state.GameTime.Value.UtcTicks);
+        command.Parameters.AddWithValue("$hash", stateHash);
+        command.Parameters.AddWithValue("$checksum", payloadChecksum);
+        command.Parameters.AddWithValue("$seq", snapshotSeq);
+        command.Parameters.AddWithValue("$total", totalChecksum);
+        command.ExecuteNonQuery();
+    }
+
+    private void UpdateTotalChecksum(string totalChecksum, SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "UPDATE world_meta SET total_checksum = $total WHERE world_id = $world;";
+        command.Parameters.AddWithValue("$world", _worldId.Value);
+        command.Parameters.AddWithValue("$total", totalChecksum);
+        command.ExecuteNonQuery();
+    }
+
     private MetaRow? ReadCurrentMeta()
     {
         using var command = _connection.CreateCommand();
@@ -698,83 +1001,130 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
     /// 历史行虽然不参与当前指针读取，但仍在库内，同样纳入校验。代价是恢复时 O(总行数)，
     /// MVP 规模可接受；日志量增长后应改为链式/分片校验（见 PR 剩余风险）。
     /// </remarks>
-    private string ComputeTotalChecksum()
-    {
-        using var command = _connection.CreateCommand();
-        command.CommandText = """
-            SELECT 'meta', world_id, schema_version, current_world_version, current_commit_id,
-                   current_game_time_ticks, current_state_hash, current_payload_checksum,
-                   current_snapshot_seq, ''
-            FROM world_meta WHERE world_id = $world
-            UNION ALL
-            SELECT 'state', world_id, world_version, 0, commit_id, game_time_ticks, state_hash, '', 0, ''
-            FROM world_state WHERE world_id = $world
-            UNION ALL
-            SELECT 'journal', world_id, event_sequence, 0, event_id, 0, '', '', 0, ''
-            FROM event_journal WHERE world_id = $world
-            UNION ALL
-            SELECT 'snapshot', world_id, snapshot_seq, 0, commit_id, 0, state_hash, payload_checksum, 0, ''
-            FROM snapshots WHERE world_id = $world;
-            """;
-        command.Parameters.AddWithValue("$world", _worldId.Value);
-        using var stream = new MemoryStream();
-        using var writer = new BinaryWriter(stream, new UTF8Encoding(false), leaveOpen: true);
-        writer.Write(ChecksumMagic);
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
-        {
-            writer.Write(reader.GetString(0));
-            writer.Write(reader.GetString(1));
-            writer.Write(reader.GetInt64(2));
-            writer.Write(reader.GetInt64(3));
-            writer.Write(reader.GetString(4));
-            writer.Write(reader.GetInt64(5));
-            writer.Write(reader.GetString(6));
-            writer.Write(reader.GetString(7));
-            writer.Write(reader.GetInt64(8));
-            writer.Write(reader.GetString(9));
-        }
-
-        writer.Flush();
-        return Convert.ToHexString(SHA256.HashData(stream.ToArray()));
-    }
+    private string ComputeTotalChecksum() => ComputeTotalChecksum(_connection, _worldId, transaction: null);
 
     /// <summary>恢复侧重算校验和：布局与提交侧完全一致（meta 行不含 total_checksum 列，第 10 列固定 ''）。</summary>
-    private static string ComputeTotalChecksum(SqliteConnection connection, WorldId worldId)
+    private static string ComputeTotalChecksum(
+        SqliteConnection connection,
+        WorldId worldId,
+        SqliteTransaction? transaction = null)
     {
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT 'meta', world_id, schema_version, current_world_version, current_commit_id,
-                   current_game_time_ticks, current_state_hash, current_payload_checksum,
-                   current_snapshot_seq, ''
-            FROM world_meta WHERE world_id = $world
-            UNION ALL
-            SELECT 'state', world_id, world_version, 0, commit_id, game_time_ticks, state_hash, '', 0, ''
-            FROM world_state WHERE world_id = $world
-            UNION ALL
-            SELECT 'journal', world_id, event_sequence, 0, event_id, 0, '', '', 0, ''
-            FROM event_journal WHERE world_id = $world
-            UNION ALL
-            SELECT 'snapshot', world_id, snapshot_seq, 0, commit_id, 0, state_hash, payload_checksum, 0, ''
-            FROM snapshots WHERE world_id = $world;
-            """;
-        command.Parameters.AddWithValue("$world", worldId.Value);
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream, new UTF8Encoding(false), leaveOpen: true);
         writer.Write(ChecksumMagic);
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+
+        static void WriteBlob(BinaryWriter writer, byte[] blob)
         {
-            writer.Write(reader.GetString(0));
-            writer.Write(reader.GetString(1));
-            writer.Write(reader.GetInt64(2));
-            writer.Write(reader.GetInt64(3));
-            writer.Write(reader.GetString(4));
-            writer.Write(reader.GetInt64(5));
-            writer.Write(reader.GetString(6));
-            writer.Write(reader.GetString(7));
-            writer.Write(reader.GetInt64(8));
-            writer.Write(reader.GetString(9));
+            writer.Write(blob.Length);
+            writer.Write(blob);
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT world_id, schema_version, current_world_version, current_commit_id,
+                       current_game_time_ticks, current_state_hash, current_payload_checksum,
+                       current_snapshot_seq
+                FROM world_meta WHERE world_id = $world;
+                """;
+            command.Parameters.AddWithValue("$world", worldId.Value);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                writer.Write("meta");
+                writer.Write(reader.GetString(0));
+                writer.Write(reader.GetInt64(1));
+                writer.Write(reader.GetInt64(2));
+                writer.Write(reader.GetString(3));
+                writer.Write(reader.GetInt64(4));
+                writer.Write(reader.GetString(5));
+                writer.Write(reader.GetString(6));
+                writer.Write(reader.GetInt64(7));
+            }
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT world_id, world_version, commit_id, game_time_ticks, state_hash, state_blob
+                FROM world_state WHERE world_id = $world ORDER BY world_version;
+                """;
+            command.Parameters.AddWithValue("$world", worldId.Value);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                writer.Write("state");
+                writer.Write(reader.GetString(0));
+                writer.Write(reader.GetInt64(1));
+                writer.Write(reader.GetString(2));
+                writer.Write(reader.GetInt64(3));
+                writer.Write(reader.GetString(4));
+                WriteBlob(writer, reader.GetFieldValue<byte[]>(5));
+            }
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT world_id, event_sequence, event_id, event_blob
+                FROM event_journal WHERE world_id = $world ORDER BY event_sequence;
+                """;
+            command.Parameters.AddWithValue("$world", worldId.Value);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                writer.Write("journal");
+                writer.Write(reader.GetString(0));
+                writer.Write(reader.GetInt64(1));
+                writer.Write(reader.GetString(2));
+                WriteBlob(writer, reader.GetFieldValue<byte[]>(3));
+            }
+        }
+
+        // snapshot_blob 自身由 snapshot.StateHash/PayloadChecksum + 行/Meta identity 交叉校验；
+        // 这里故意只把快照清单纳入整库链，使单个损坏快照仍可按 READY 回退，而不会因总校验先失败失去恢复能力。
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT world_id, snapshot_seq, world_version, commit_id, state_hash, payload_checksum
+                FROM snapshots WHERE world_id = $world ORDER BY snapshot_seq;
+                """;
+            command.Parameters.AddWithValue("$world", worldId.Value);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                writer.Write("snapshot");
+                writer.Write(reader.GetString(0));
+                writer.Write(reader.GetInt64(1));
+                writer.Write(reader.GetInt64(2));
+                writer.Write(reader.GetString(3));
+                writer.Write(reader.GetString(4));
+                writer.Write(reader.GetString(5));
+            }
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT world_id, command_id, outcome_code, message, world_version
+                FROM command_outcomes WHERE world_id = $world ORDER BY command_id;
+                """;
+            command.Parameters.AddWithValue("$world", worldId.Value);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                writer.Write("outcome");
+                writer.Write(reader.GetString(0));
+                writer.Write(reader.GetString(1));
+                writer.Write(reader.GetString(2));
+                writer.Write(reader.GetString(3));
+                writer.Write(reader.GetInt64(4));
+            }
         }
 
         writer.Flush();
@@ -868,13 +1218,12 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             {
                 var journalSequence = crossReader.GetInt64(1);
                 var journalEvent = SnapshotCodec.DeserializeEvent(crossReader.GetFieldValue<byte[]>(0));
-                if (journalSequence != index ||
-                    !StringComparer.Ordinal.Equals(journalEvent.EventId, outbox[index].EventId) ||
-                    journalEvent.WorldVersion != outbox[index].WorldVersion ||
-                    journalEvent.EventSequence != index)
+                var expectedBytes = SnapshotCodec.SerializeEvent(outbox[index]);
+                var actualBytes = SnapshotCodec.SerializeEvent(journalEvent);
+                if (journalSequence != index || !expectedBytes.AsSpan().SequenceEqual(actualBytes))
                 {
                     throw new InvalidDataException(
-                        $"事件日志与快照 outbox 在第 {index} 条事件处不一致（序号/EventId/WorldVersion），存档损坏。");
+                        $"事件日志与快照 outbox 在第 {index} 条事件处内容不一致，存档损坏。");
                 }
 
                 index++;
@@ -886,6 +1235,14 @@ public sealed class SqliteCommitStore : IWorldStore, IAuditJournal, ISnapshotSto
             }
         }
     }
+
+    private sealed record SnapshotRow(
+        long SnapshotSeq,
+        long WorldVersion,
+        string CommitId,
+        string StateHash,
+        string PayloadChecksum,
+        byte[] Payload);
 
     private sealed record MetaRow(long CurrentWorldVersion, string CurrentCommitId, long CurrentSnapshotSeq);
 }

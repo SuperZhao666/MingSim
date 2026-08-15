@@ -39,7 +39,12 @@ internal static class SyntheticYearLongRun
         var wall = Stopwatch.StartNew();
         // 前半段（1..第 183 日）：不间断主实例推进，商店最新提交即第 183 日完整状态。
         RunYearScript(runtime, epoch, fromDay: 0, toDay: MidRunRestoreDay, timings, ref peakManaged);
-        var restored = RealtimeSimulationRuntime.RestoreFromStore(store);
+        // 重放实例用无商店 Restore（旧语义）：它是纯重放，不向共享商店写提交；
+        // RestoreFromStore 的"恢复后继续持久化"语义（PERSIST-03）由 SmokeTests 的
+        // 提交商店往返验收覆盖，这里只验证恢复后重放的终局 hash 与不间断运行一致。
+        var loaded = store.LoadCommittedWorld();
+        Program.Require(loaded is not null, $"第 {MidRunRestoreDay} 日后商店必须能加载已提交世界");
+        var restored = RealtimeSimulationRuntime.Restore(loaded!.Snapshot);
         Program.Require(restored.ReadModel.GameTime.Value == epoch.Value.AddDays(MidRunRestoreDay),
             $"恢复点必须等于第 {MidRunRestoreDay} 日（由商店最新提交保证）：{restored.ReadModel.GameTime.Value} vs {epoch.Value.AddDays(MidRunRestoreDay)}");
         // 后半段（184..365 日）：主实例继续推进；恢复实例从同一状态推进同一输入流。
@@ -86,7 +91,7 @@ internal static class SyntheticYearLongRun
             advance.Stop();
             timings.Add(advance.Elapsed.Ticks / 10);
             Program.Require(result.Succeeded && result.Errors.Count == 0,
-                $"合成世界第 {day} 天推进失败：{string.Join("; ", result.Errors.Select(error => error.Code))}");
+                $"合成世界第 {day} 天推进失败：{string.Join("; ", result.Errors.Select(error => $"{error.Code}:{error.Message}"))}");
             // 与 90 日脚本一致：任何命令拒绝都显式失败，不允许补给链静默退化。
             Program.Require(result.CommandResults.All(item => item.Accepted),
                 $"合成世界第 {day} 天出现命令拒绝：{string.Join("; ", result.CommandResults.Where(item => !item.Accepted).Select(item => $"{item.CommandId}:{string.Join(",", item.Errors.Select(error => error.Code))}"))}");

@@ -32,9 +32,14 @@ public static class RealtimeWorldBridge
     {
         const string relative = "content/scenarios/ming_1629/world.json";
         if (File.Exists(relative)) return relative;
-        var fromRes = ProjectSettings.GlobalizePath("res://../../content/scenarios/ming_1629/world.json");
-        if (File.Exists(fromRes)) return fromRes;
+
+        // project.godot 位于仓库根，因此正式 Godot 资源路径是 res://content/...。
+        // 保留旧 src/Ming.Godot 工作目录回退，仅用于历史 worktree/工具调用兼容。
+        var fromProject = ProjectSettings.GlobalizePath("res://content/scenarios/ming_1629/world.json");
+        if (File.Exists(fromProject)) return fromProject;
+        var legacy = ProjectSettings.GlobalizePath("res://../../content/scenarios/ming_1629/world.json");
+        if (File.Exists(legacy)) return legacy;
         throw new FileNotFoundException(
-            $"找不到宁远 1629 剧本：已尝试 {relative} 与 {fromRes}。", relative);
+            $"找不到宁远 1629 剧本：已尝试 {relative}、{fromProject} 与 {legacy}。", relative);
     }
 }

@@ -3,6 +3,7 @@ using MingSim.Agents.Audit;
 using MingSim.Agents.Decision;
 using MingSim.Agents.Providers;
 using MingSim.Agents.Realtime;
+using MingSim.Agents.Runtime;
 using MingSim.Application.Host;
 using MingSim.Domain;
 using MingSim.Domain.Authorization;
@@ -102,6 +103,42 @@ internal static partial class Program
         RequireThrows<InvalidOperationException>(() => budget.Settle(overrun, 50), "重复结算同一预留必须拒绝");
         Require(budget.SpentTokens == 90 && budget.SpentCostMillis == 90,
             "被拒绝的归属/重复结算不得改变记账");
+    }
+
+    /// <summary>
+    /// P1-AGENT-04 hard cap：预算预留必须覆盖 request + Provider 声明的最大响应。
+    /// 如果最坏情况额度放不下，模型调用次数必须为 0；不能只 reserve prompt 后让单次大响应穿透上限。
+    /// </summary>
+    private static void ShouldReserveRequestAndMaximumResponseBeforeCallingProvider()
+    {
+        var world = CreateTwoAgentWorld();
+        var context = new AgentContextCompiler().Compile(world, new CharacterId("duliaoxiang-slot"));
+        var request = new DecisionRequest(
+            "hard-cap-response",
+            new CharacterId("duliaoxiang-slot"),
+            world.WorldVersion,
+            world.GameTime,
+            world.GameTime.Add(TimeSpan.FromHours(1)));
+        var provider = new FakeModelProvider(
+            """{"schema_version":1,"intent_type":"logistics.request_shipment","parameters":{"route_id":"capital-ningyuan-grain","grain_quantity":200}}""",
+            maxResponseTokens: 10_000);
+        // 总预算显著小于“请求 + 10000 响应上限”，必须在 Provider 前被闸门拒绝。
+        var budget = new ModelBudgetTracker(
+            new ModelBudget(MaxTokens: 2_000, MaxCostMillis: long.MaxValue, CostPerTokenMillis: 0));
+        var planner = new DecisionPlanner(
+            new UtilityMinisterAgent(MinisterFocus.Logistics),
+            provider,
+            budget);
+
+        var result = planner.PlanAsync(request, context, world.GameTime).GetAwaiter().GetResult();
+
+        Require(provider.CallCount == 0,
+            "request + maxResponse 放不进预算时必须 0 次 Provider 调用");
+        Require(result.Source == DecisionSource.Rules &&
+                result.FallbackReason == ModelFallbackReason.BudgetExceeded,
+            "hard cap 预留失败必须显式回退规则路径");
+        Require(budget.SpentTokens == 0,
+            "预留失败不得消耗任何预算");
     }
 
     /// <summary>
@@ -213,15 +250,16 @@ internal static partial class Program
         var world = CreateTwoAgentWorld();
         var runtime = new RealtimeSimulationRuntime(world);
         var budget = new ModelBudgetTracker(
-            new ModelBudget(MaxTokens: 100_000, MaxCostMillis: long.MaxValue, CostPerTokenMillis: 0));
+            new ModelBudget(MaxTokens: 5_000, MaxCostMillis: long.MaxValue, CostPerTokenMillis: 0));
         var audit = new ModelAuditLog();
-        // 首位角色返回 1M 字符的巨型响应：padding 字段被解析器固定忽略，但响应 token
-        // 估算（约 25 万 token）会把预算彻底用尽。
-        var padding = new string('x', 1_000_000);
+        // 首位角色声明 4000 token 最大响应并返回接近上限的合法 JSON padding；
+        // 预留时 request+maxResponse 能放入预算，结算后只剩很小余量，后位角色必须在调用前被拦截。
+        var padding = new string('x', 15_000);
         var hugeJson = "{\"schema_version\":1,\"intent_type\":\"logistics.request_shipment\",\"parameters\":{\"route_id\":\"capital-ningyuan-grain\",\"grain_quantity\":200},\"padding\":\"" + padding + "\"}";
-        var providerA = new FakeModelProvider(hugeJson);
+        var providerA = new FakeModelProvider(hugeJson, maxResponseTokens: 4_000);
         var providerB = new FakeModelProvider(
-            """{"schema_version":1,"intent_type":"logistics.request_shipment","parameters":{"route_id":"capital-ningyuan-grain","grain_quantity":200}}""");
+            """{"schema_version":1,"intent_type":"logistics.request_shipment","parameters":{"route_id":"capital-ningyuan-grain","grain_quantity":200}}""",
+            maxResponseTokens: 2_000);
         var host = new AgentDecisionHost(runtime,
         [
             new HostedAgent(new CharacterId("duliaoxiang-slot"),
@@ -236,7 +274,8 @@ internal static partial class Program
         var first = batch.Decisions.Single(decision => decision.ActorId.Value == "duliaoxiang-slot");
         Require(first.Source == DecisionSource.Model, "首位角色预算充足时必须走模型路径");
         Require(providerA.CallCount == 1, "首位角色必须恰好发起一次模型调用");
-        Require(budget.IsExhausted, "首位角色的大响应结算后预算必须耗尽");
+        Require(budget.SpentTokens > 3_000 && budget.SpentTokens < 5_000,
+            $"首位角色应消耗大部分但不得突破 hard cap（实际 {budget.SpentTokens}/5000）");
 
         var second = batch.Decisions.Single(decision => decision.ActorId.Value == "hubu-slot");
         Require(second.Source == DecisionSource.Rules && second.FallbackReason == ModelFallbackReason.BudgetExceeded,

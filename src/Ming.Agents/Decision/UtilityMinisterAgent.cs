@@ -86,7 +86,7 @@ public sealed class UtilityMinisterAgent : IAgentDecisionSource
 
     private static bool CanConvertArmy(AgentContext context) =>
         context.Capabilities.Contains(GameCapability.ConvertArmy) &&
-        context.Armies.Any(army => army.Auxiliaries >= 1_000);
+        context.Armies.Any(army => army.Auxiliaries >= 1_000 && army.AllowedCapabilities.Contains(GameCapability.ConvertArmy));
 
     private static bool CanPlanLogistics(AgentContext context) =>
         context.Capabilities.Contains(GameCapability.PlanLogistics) &&
@@ -108,7 +108,8 @@ public sealed class UtilityMinisterAgent : IAgentDecisionSource
     private static WorldIntent BuildConvertArmyIntent(AgentContext context)
     {
         // Decide 只在 CanConvertArmy 成立时调用本方法，因此一定存在可转化军队。
-        var army = context.Armies.First(candidate => candidate.Auxiliaries >= 1_000);
+        var army = context.Armies.First(candidate =>
+            candidate.Auxiliaries >= 1_000 && candidate.AllowedCapabilities.Contains(GameCapability.ConvertArmy));
         return new ConvertArmyIntent(
             $"agent-convert-frontier-1000-{context.WorldVersion}",
             context.ActorId,

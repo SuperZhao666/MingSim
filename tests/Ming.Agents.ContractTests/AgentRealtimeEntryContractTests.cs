@@ -440,8 +440,8 @@ internal static partial class Program
     }
 
     /// <summary>
-    /// 预算记账（M6）：成功调用按 请求+响应 token 估算记账（长整型，避免浮点）；超大响应耗尽预算后，
-    /// 下一次决策在调用前被闸门拦截并回退 Utility。
+    /// 预算记账（M6）：成功调用按 请求+响应 token 估算记账；Provider 若返回超过自己声明的
+    /// MaxResponseTokens，结果必须 fail-closed 且最多消耗已预留额度，随后余额不足时下一次调用在发起前被拦截。
     /// </summary>
     private static void ShouldFallBackToUtilityAfterBudgetExhaustedByUsage()
     {
@@ -470,13 +470,14 @@ internal static partial class Program
         Require(budget.SpentTokens > 0, "成功调用后必须按请求+响应 token 记账");
 
         var second = planner.PlanAsync(request, context, acceptedGameTime).GetAwaiter().GetResult();
-        Require(second.Source == DecisionSource.Model, "超大响应本身仍可解析（多余字段固定忽略）");
-        Require(budget.SpentTokens >= 100_000, "超大响应的记账必须耗尽预算");
-        Require(budget.IsExhausted, "记账后预算必须处于耗尽状态");
+        Require(second.Source == DecisionSource.Rules && second.FallbackReason == ModelFallbackReason.ProviderFailed,
+            "Provider 超过声明的最大响应后必须丢弃模型结果并回退 Utility");
+        Require(budget.SpentTokens < 100_000,
+            "超额响应只能消耗预留上限，预算记账不得突破 MaxTokens");
 
         var third = planner.PlanAsync(request, context, acceptedGameTime).GetAwaiter().GetResult();
         Require(third.Source == DecisionSource.Rules && third.FallbackReason == ModelFallbackReason.BudgetExceeded,
-            "预算耗尽后的下一次决策必须回退 Utility 并明确原因");
+            "剩余预算不足以覆盖 request+MaxResponse 时必须在调用前回退 Utility");
         Require(provider.CallCount == 2, "只有前两次真正调用模型，第三次被预算闸门拦截");
     }
 
@@ -786,9 +787,14 @@ internal static partial class Program
     /// 契约测试用的假 Provider：只返回预先写好的文本，不联网、不携带任何密钥；
     /// succeeded 为 false 时模拟模型失败/超时。CallCount 记录实际发起的模型调用次数。
     /// </summary>
-    private sealed class FakeModelProvider(string content, bool succeeded = true) : IModelProvider
+    private sealed class FakeModelProvider(
+        string content,
+        bool succeeded = true,
+        int maxResponseTokens = 512) : IModelProvider
     {
         public int CallCount { get; private set; }
+
+        public int MaxResponseTokens => maxResponseTokens;
 
         public Task<ModelResponse> GenerateAsync(
             ModelRequest request,
@@ -804,6 +810,10 @@ internal static partial class Program
     private sealed class SequencedFakeModelProvider(params string[] contents) : IModelProvider
     {
         public int CallCount { get; private set; }
+
+        // 该测试 Provider 显式声明较大的输出窗口：第一次小响应会返还大部分预留，
+        // 第二次故意违反 90k token 上限，用于验证 hard-cap fail-closed。
+        public int MaxResponseTokens => 90_000;
 
         public Task<ModelResponse> GenerateAsync(
             ModelRequest request,

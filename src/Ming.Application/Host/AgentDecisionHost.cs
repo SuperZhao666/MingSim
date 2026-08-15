@@ -112,8 +112,11 @@ public sealed class AgentDecisionHost
             // 绝不因权威版本推进而漂移成新命令，导致同一逻辑决策重复执行（doc 08 §8）。
             // 注意：这里用的是调用方快照版本（world.WorldVersion），不是逐角色推进后的
             // 权威版本——权威版本只用于命令提交时的 ExpectedWorldVersion 盖章（见下）。
-            var context = _contextCompiler.Compile(world, agent.ActorId);
-            var decisionId = BuildDecisionId(agent.ActorId, context.WorldVersion, acceptedAt);
+            // 每位角色都从 Runtime 重新捕获 detached authoritative snapshot：前一角色已经消耗的
+            // 粮食/运力/任命/权限必须真实反映到下一角色上下文，不能只刷新 WorldVersion。
+            var authoritativeWorld = _runtime.CaptureDetachedWorldSnapshot();
+            var context = _contextCompiler.Compile(authoritativeWorld, agent.ActorId);
+            var decisionId = BuildDecisionId(agent.ActorId, world.WorldVersion, acceptedAt);
             var request = new DecisionRequest(
                 decisionId,
                 agent.ActorId,
@@ -128,7 +131,7 @@ public sealed class AgentDecisionHost
             // 保持不变，既保逐角色版本新鲜度，又让重试命中原始 CommandId。
             var authoritativeVersion = _runtime.ReadModel.WorldVersion;
             var submitted = StampAuthoritativeVersion(result.Intents, authoritativeVersion);
-            var submissions = _entry.Submit(world, submitted);
+            var submissions = _entry.Submit(authoritativeWorld, submitted);
             decisions.Add(new HostedAgentDecision(
                 agent.ActorId, decisionId, result.Source, result.FallbackReason, submitted, submissions));
 

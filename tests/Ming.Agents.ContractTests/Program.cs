@@ -68,6 +68,7 @@ internal static partial class Program
             ShouldExposeRouteCandidatesAndArmyAdjacentDestinationsInAgentContext();
             ShouldAllowOnlyOneConcurrentReservationAtTheCap();
             ShouldSettleReservationWithRefundOfUnusedQuota();
+            ShouldReserveRequestAndMaximumResponseBeforeCallingProvider();
             ShouldSubmitTwoHostedAgentsWithoutVersionConflict();
             ShouldDeduplicateRetriedBatchAfterPartialSubmission();
             ShouldNotCallModelOrBlockWorldWhenReservationFails();

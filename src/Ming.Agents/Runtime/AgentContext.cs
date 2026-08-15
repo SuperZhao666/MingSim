@@ -11,7 +11,8 @@ public sealed record ArmyObservation(
     long Auxiliaries,
     long LineInfantry,
     int TrainingDays,
-    IReadOnlyList<ProvinceId> AdjacentDestinations);
+    IReadOnlyList<ProvinceId> AdjacentDestinations,
+    IReadOnlySet<GameCapability> AllowedCapabilities);
 
 /// <summary>
 /// 代理能看到的粮运路线候选摘要（从权威世界状态裁剪，只含最小可行动字段）。

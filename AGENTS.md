@@ -321,10 +321,13 @@ Merge
 - 自己 merge
 - 自己 approve
 
-合并执行者（唯一）：
+合并执行者：
 
-只有总控（Principal Engineer）在 PR Gate 全部满足后执行 Squash merge 并删除远程分支；
-任何子代理不得审查、批准、合并或删除自己的分支。
+- 常规情况下，只有总控（Principal Engineer）在 PR Gate 全部满足后执行 Squash merge 并删除远程分支。
+- **总控接管并亲自产生提交时的唯一例外**：该提交通过独立审查与全部机器门禁后，必须由一个与 Developer/Independent Reviewer/该提交作者均不同的 **Merge Controller** 执行机械性 merge。Merge Controller 只能核验当前 head SHA 与门禁、执行 merge/删分支，禁止改代码、禁止给出 Independent Review、禁止改写门禁结果。
+- 任何提交作者都不得合并自己的提交；任何子代理不得审查、批准、合并或删除自己的分支。
+
+这个例外用于消除“只有 Principal 能 merge”与“Principal 接管提交后不得 merge 自己提交”的自指死锁；它不降低任何 PR Gate。
 
 SHA 绑定与标签状态机：
 
@@ -449,6 +452,7 @@ Framework
 - 第一原则的推论：任何子代理随时可能停摆、失联、或带着未完成状态消失。流水线必须随时可被总控接管：
   总控有权直接完成机械性收尾（解决合并冲突、补漏、提交），但总控接管产生的提交与任何普通提交同等待遇——
   必须由 Independent Reviewer 对新 SHA 独立审查，总控不得审查、绑定或合并自己的提交；
+  该场景由上文定义的独立 Merge Controller 在门禁全部满足后执行机械合并。
   接管只缩短机械步骤，绝不缩短审查门禁。
 - 接管动作的审计载体 = 该 PR 的正文与独立审查记录（与一切变更相同的载体）；载体缺位即视为未接管。
 - 关键路径不要只押一个子代理而不设总控兜底；长任务拆成可验证的小步，避免"死后留下半成品现场"。

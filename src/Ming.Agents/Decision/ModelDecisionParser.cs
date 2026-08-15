@@ -112,9 +112,18 @@ public class ModelDecisionParser
 
         // P1-AGENT-02：route_id 必须属于上下文候选集（真实存在且可行动的路线）；
         // 模型不能自行发明不存在的路线，否则 ParseFailed 回退规则路径。
-        if (!context.Routes.Any(route => route.RouteId.Value == routeId))
+        var route = context.Routes.FirstOrDefault(candidate => candidate.RouteId.Value == routeId);
+        if (route is null)
         {
             return Failure($"logistics.request_shipment 的 route_id={routeId} 不在当前可行动路线候选集中。");
+        }
+
+        var remainingCapacity = Math.Max(0, route.RouteCapacity - route.InTransitGrain);
+        var maximumQuantity = Math.Min(route.SourceGrain, Math.Min(route.DestinationHeadroom, remainingCapacity));
+        if (quantity > maximumQuantity)
+        {
+            return Failure(
+                $"logistics.request_shipment 的 grain_quantity={quantity} 超过当前候选路线可执行上限 {maximumQuantity}。");
         }
 
         return Success([
@@ -151,7 +160,8 @@ public class ModelDecisionParser
             return Failure($"military.move_army 的 army_id={armyId} 不在当前军队候选集中。");
         }
 
-        if (!army.AdjacentDestinations.Any(destination => destination.Value == destinationId))
+        if (!army.AllowedCapabilities.Contains(GameCapability.MoveArmy) ||
+            !army.AdjacentDestinations.Any(destination => destination.Value == destinationId))
         {
             return Failure($"military.move_army 的 destination_id={destinationId} 不是军队 {armyId} 的邻接合法目的地。");
         }

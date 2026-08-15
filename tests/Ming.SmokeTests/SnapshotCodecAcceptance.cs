@@ -129,16 +129,44 @@ internal static class SnapshotCodecAcceptance
     private static void CodecRoundTripsPendingInboxCommands()
     {
         var runtime = new RealtimeSimulationRuntime(Program.CreateNingyuanWorld());
+        var model = runtime.ReadModel;
         Program.Require(runtime.EnqueueCreateShipment(Program.CreateShipment(runtime, "codec-pending", 200)).Queued,
-            "待处理命令测试应该进入收件箱");
-        var snapshot = runtime.CaptureSnapshot(); // 快照时命令仍在收件箱（未推进）
+            "待处理粮运命令应该进入收件箱");
+        Program.Require(runtime.EnqueueCreateDecree(new CreateDecreeCommand(
+            "codec-pending-decree",
+            new CharacterId("works"),
+            new DecreeId("codec-pending-decree"),
+            "codec pending decree",
+            new ProvinceId("liaodong"),
+            100,
+            new CharacterId("works"),
+            new GameTime(model.GameTime.Value.AddDays(3)),
+            "",
+            "codec",
+            LinkedShipmentId: null,
+            model.GameTime.Value,
+            model.WorldVersion,
+            DecreeKind.General)).Queued,
+            "待处理政令命令应该进入收件箱");
+        Program.Require(runtime.EnqueueApproveDecree(new ApproveDecreeCommand(
+            "codec-pending-approve",
+            new CharacterId("works"),
+            new DecreeId("codec-pending-decree"),
+            model.GameTime.Value,
+            model.WorldVersion)).Queued,
+            "待处理批准命令应该进入收件箱");
+
+        var snapshot = runtime.CaptureSnapshot(); // 快照时三种命令仍在收件箱（未推进）
         var restored = RealtimeSimulationRuntime.Restore(SnapshotCodec.Deserialize(SnapshotCodec.Serialize(snapshot)));
-        Program.Require(restored.StateHash == runtime.StateHash, "含待处理收件箱的快照往返后 hash 必须一致");
+        Program.Require(restored.StateHash == runtime.StateHash,
+            "含 Shipment/CreateDecree/ApproveDecree 待处理命令的快照往返后 hash 必须一致");
         var originalResult = runtime.AdvanceTo(runtime.ReadModel.GameTime);
         var restoredResult = restored.AdvanceTo(restored.ReadModel.GameTime);
         Program.Require(originalResult.ReadModel.StateHash == restoredResult.ReadModel.StateHash &&
-                        originalResult.ReadModel.WorldVersion == restoredResult.ReadModel.WorldVersion,
-            "恢复后的待处理命令必须按同一顺序接纳并产生同一结果");
+                        originalResult.ReadModel.WorldVersion == restoredResult.ReadModel.WorldVersion &&
+                        originalResult.CommandResults.Select(item => (item.CommandId, item.Accepted))
+                            .SequenceEqual(restoredResult.CommandResults.Select(item => (item.CommandId, item.Accepted))),
+            "恢复后的完整 RealtimeCommand union 必须按同一顺序产生同一结果");
     }
 
     /// <summary>
@@ -164,9 +192,9 @@ internal static class SnapshotCodecAcceptance
         Program.RequireThrows<InvalidDataException>(() => SnapshotCodec.Deserialize(fixture));
 
         var migrated = SnapshotCodec.MigrateV1ToV2(fixture);
-        Program.Require(migrated[5] == 2, "迁移后必须写回当前 v2 格式版本字节");
+        Program.Require(migrated[5] == 3, "迁移后必须写回当前 v3 格式版本字节");
         var migratedV2 = SnapshotCodec.MigrateV1ToV2(v2Payload);
-        Program.Require(migratedV2.SequenceEqual(v2Payload), "已是 v2 的载荷迁移必须幂等原样返回");
+        Program.Require(migratedV2.SequenceEqual(v2Payload), "已是当前 v3 的载荷迁移必须幂等原样返回");
 
         var migratedSnapshot = SnapshotCodec.Deserialize(migrated);
         Program.Require(Program.GetSnapshotState(migratedSnapshot).Appointments.Count == 0,

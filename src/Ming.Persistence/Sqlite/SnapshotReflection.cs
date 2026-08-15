@@ -2,6 +2,8 @@ using System.Reflection;
 using MingSim.Domain;
 using MingSim.Domain.Characters;
 using MingSim.Domain.Economy;
+using MingSim.Domain.Decrees;
+using MingSim.Domain.Scenario;
 using MingSim.Domain.Events;
 using MingSim.Domain.Military;
 using MingSim.Domain.Realtime;
@@ -50,6 +52,24 @@ internal static class SnapshotReflection
         nameof(WorldState.CommitId), BindingFlags.Instance | BindingFlags.Public)!;
     private static readonly MethodInfo WorldSetMovementMethod = typeof(WorldState).GetMethod(
         "SetMovement", BindingFlags.Instance | BindingFlags.NonPublic)!;
+    private static readonly PropertyInfo WorldReadinessProperty = typeof(WorldState).GetProperty(
+        nameof(WorldState.Readiness), BindingFlags.Instance | BindingFlags.Public)!;
+    private static readonly MethodInfo WorldAddDecreeMethod = typeof(WorldState).GetMethod(
+        "AddDecree", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+    private static readonly PropertyInfo ScenarioSpentSilverProperty = typeof(ScenarioState).GetProperty(
+        nameof(ScenarioState.SpentSilver), BindingFlags.Instance | BindingFlags.Public)!;
+    private static readonly PropertyInfo ScenarioStartProperty = typeof(ScenarioState).GetProperty(
+        nameof(ScenarioState.ScenarioStartGameTime), BindingFlags.Instance | BindingFlags.Public)!;
+    private static readonly PropertyInfo ScenarioHardFailureProperty = typeof(ScenarioState).GetProperty(
+        nameof(ScenarioState.HardFailureReported), BindingFlags.Instance | BindingFlags.Public)!;
+    private static readonly PropertyInfo ScenarioRationReductionProperty = typeof(ScenarioState).GetProperty(
+        nameof(ScenarioState.RationReductionActive), BindingFlags.Instance | BindingFlags.Public)!;
+
+    private static readonly PropertyInfo ReadinessArrearsProperty = typeof(ReadinessState).GetProperty(
+        nameof(ReadinessState.ArrearsGrain), BindingFlags.Instance | BindingFlags.Public)!;
+    private static readonly PropertyInfo ReadinessZeroDaysProperty = typeof(ReadinessState).GetProperty(
+        nameof(ReadinessState.ConsecutiveZeroGrainDays), BindingFlags.Instance | BindingFlags.Public)!;
 
     private static readonly PropertyInfo CharacterLoyaltyProperty = typeof(CharacterState).GetProperty(
         nameof(CharacterState.Loyalty), BindingFlags.Instance | BindingFlags.Public)!;
@@ -68,6 +88,10 @@ internal static class SnapshotReflection
         nameof(ShipmentState.DeliveredGrain), BindingFlags.Instance | BindingFlags.Public)!;
     private static readonly PropertyInfo ShipmentLossProperty = typeof(ShipmentState).GetProperty(
         nameof(ShipmentState.LossGrain), BindingFlags.Instance | BindingFlags.Public)!;
+    private static readonly PropertyInfo ShipmentEscortProperty = typeof(ShipmentState).GetProperty(
+        nameof(ShipmentState.Escort), BindingFlags.Instance | BindingFlags.Public)!;
+    private static readonly PropertyInfo ShipmentRaidLossProperty = typeof(ShipmentState).GetProperty(
+        nameof(ShipmentState.RaidLossGrain), BindingFlags.Instance | BindingFlags.Public)!;
     private static readonly MethodInfo LogisticsAddShipmentMethod = typeof(LogisticsState).GetMethod(
         "AddShipment", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
@@ -77,6 +101,10 @@ internal static class SnapshotReflection
         nameof(FacilityState.ProducedThisTurn), BindingFlags.Instance | BindingFlags.Public)!;
     private static readonly MethodInfo IndustryAddMethod = typeof(IndustryState).GetMethod(
         "Add", BindingFlags.Instance | BindingFlags.NonPublic)!;
+    private static readonly MethodInfo InventoryGetOrCreateMethod = typeof(InventoryState).GetMethod(
+        "GetOrCreate", BindingFlags.Instance | BindingFlags.NonPublic)!;
+    private static readonly MethodInfo ResourceTryReserveMethod = typeof(ResourceStock).GetMethod(
+        "TryReserve", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
     private static readonly MethodInfo ArmyAddTrainingDaysMethod = typeof(ArmyState).GetMethod(
         "AddTrainingDays", BindingFlags.Instance | BindingFlags.NonPublic)!;
@@ -228,18 +256,66 @@ internal static class SnapshotReflection
     }
 
     /// <summary>恢复运输单的终态字段（private set，Clone 之外没有公开写入口）。</summary>
-    public static void SetShipmentCompletion(ShipmentState shipment, ShipmentStatus status, GameTime? departedAt, GameTime? arrivedAt, long delivered, long loss)
+    public static void SetShipmentCompletion(
+        ShipmentState shipment,
+        ShipmentStatus status,
+        GameTime? departedAt,
+        GameTime? arrivedAt,
+        long delivered,
+        long loss,
+        bool escort = false,
+        long raidLossGrain = 0)
     {
         ShipmentStatusProperty.SetValue(shipment, status);
         ShipmentDepartedAtProperty.SetValue(shipment, departedAt);
         ShipmentArrivedAtProperty.SetValue(shipment, arrivedAt);
         ShipmentDeliveredProperty.SetValue(shipment, delivered);
         ShipmentLossProperty.SetValue(shipment, loss);
+        ShipmentEscortProperty.SetValue(shipment, escort);
+        ShipmentRaidLossProperty.SetValue(shipment, raidLossGrain);
     }
+
+    /// <summary>恢复场景累计支出、起点、硬失败报告与减耗状态。</summary>
+    public static void SetScenarioDetails(
+        ScenarioState scenario, long spentSilver, GameTime scenarioStart, bool hardFailureReported, bool rationReductionActive)
+    {
+        ScenarioSpentSilverProperty.SetValue(scenario, spentSilver);
+        ScenarioStartProperty.SetValue(scenario, scenarioStart);
+        ScenarioHardFailureProperty.SetValue(scenario, hardFailureReported);
+        ScenarioRationReductionProperty.SetValue(scenario, rationReductionActive);
+    }
+
+    /// <summary>恢复前线战备及欠饷/连续断粮计数，并替换 WorldState 默认战备实例。</summary>
+    public static void SetReadiness(WorldState world, ReadinessState readiness, long arrearsGrain, int consecutiveZeroDays)
+    {
+        ReadinessArrearsProperty.SetValue(readiness, arrearsGrain);
+        ReadinessZeroDaysProperty.SetValue(readiness, consecutiveZeroDays);
+        WorldReadinessProperty.SetValue(world, readiness);
+    }
+
+    /// <summary>恢复一道权威政令（internal AddDecree）。</summary>
+    public static void AddDecree(WorldState world, DecreeState decree) =>
+        WorldAddDecreeMethod.Invoke(world, [decree]);
 
     /// <summary>恢复运输单到物流账本（internal AddShipment）。</summary>
     public static void AddShipment(LogisticsState logistics, ShipmentState shipment) =>
         LogisticsAddShipmentMethod.Invoke(logistics, [shipment]);
+
+    /// <summary>恢复 Inventory 中每类物资的 Reserved 数量。</summary>
+    public static void RestoreInventoryReservations(InventoryState inventory, IReadOnlyDictionary<string, long> reservedByType)
+    {
+        foreach (var (resourceType, reserved) in reservedByType)
+        {
+            if (reserved <= 0) continue;
+            var stock = (ResourceStock)(InventoryGetOrCreateMethod.Invoke(inventory, [resourceType])
+                ?? throw new InvalidDataException($"无法恢复物资 {resourceType}。"));
+            var ok = (bool)(ResourceTryReserveMethod.Invoke(stock, [reserved]) ?? false);
+            if (!ok)
+            {
+                throw new InvalidDataException($"物资 {resourceType} 的 Reserved={reserved} 超出库存，存档损坏。");
+            }
+        }
+    }
 
     /// <summary>恢复工坊状态（internal Add）与 private set 字段。</summary>
     public static void AddFacility(IndustryState industry, FacilityState facility, FacilityStatus status, long producedThisTurn)

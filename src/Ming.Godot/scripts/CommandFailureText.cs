@@ -19,6 +19,7 @@ public static class CommandFailureText
         ["IDEMPOTENCY_CONFLICT"] = "同一命令编号携带了不同的命令内容。",
         ["UNKNOWN_COMMAND"] = "未知的实时命令类型。",
         ["INVALID_SPEED"] = "实时速度必须在 0.25 到 5 倍之间。",
+        ["RECOVERY_READ_ONLY"] = "当前从损坏存档回退到只读恢复点；可查看/导出，但不能继续推进或提交命令。",
 
         // 政令（CreateDecreeCommand / ApplyDecree）
         ["INVALID_DECREE_GOAL"] = "政令目标不能为空。",
@@ -26,8 +27,15 @@ public static class CommandFailureText
         ["INVALID_DECREE_BUDGET"] = "政令预算必须为正数。",
         ["DECREE_DEADLINE_IN_PAST"] = "政令期限必须晚于当前时间。",
         ["RESPONSIBLE_ACTOR_NOT_FOUND"] = "政令承办人不存在。",
+        ["DECREE_ISSUER_UNAUTHORIZED"] = "政令签发人不存在或没有签发政令的授权。",
+        ["DECREE_APPROVER_UNAUTHORIZED"] = "请饷批准人没有财权授权。",
         ["DECREE_RESPONSIBLE_UNAUTHORIZED"] = "政令承办人没有所需能力的授权。",
         ["DECREE_BUDGET_EXCEEDS_TREASURY"] = "国库银两不足以批准该政令预算。",
+        ["DECREE_NOT_FOUND"] = "政令不存在。",
+        ["DECREE_NOT_PENDING_APPROVAL"] = "该政令当前不处于待批准状态。",
+        ["DECREE_SHIPMENT_NOT_FOUND"] = "政令绑定的运输单不存在。",
+        ["DECREE_SHIPMENT_ALREADY_ARRIVED"] = "运输单已抵达，不能再绑定或批准该绑定政令。",
+        ["DECREE_SHIPMENT_ALREADY_BOUND"] = "该运输单已被另一道有效政令占用。",
 
         // 粮运/行军等其他命令（本面板不直接发起，但顶栏结果区会显示）
         ["ARMY_NOT_FOUND"] = "军队不存在。",
