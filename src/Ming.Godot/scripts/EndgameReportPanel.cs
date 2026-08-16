@@ -53,6 +53,24 @@ public partial class EndgameReportPanel : Panel
         _body.Size = new Vector2(628, 340);
         _body.AutowrapMode = TextServer.AutowrapMode.WordSmart;
 
+        // 水墨插画（候选资产，纯展示）：加载失败时静默跳过，不影响面板功能。
+        var art = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/art/panels/endgame-review.png");
+        if (art != null)
+        {
+            // 注意：ExpandMode 必须先于 Texture/Size 赋值，否则 Size 会被纹理最小尺寸钳制。
+            var illustration = new TextureRect
+            {
+                Name = "EndgameArtIllustration",
+                ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+                StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+                MouseFilter = MouseFilterEnum.Ignore,
+                Texture = art,
+                Position = new Vector2(568, 20),
+                Size = new Vector2(148, 107),
+            };
+            AddChild(illustration);
+        }
+
         var close = AddButton(this, "合上复盘", new Rect2(560, 548, 128, 40));
         close.Name = "CloseEndgameReport";
         close.Pressed += Close;
