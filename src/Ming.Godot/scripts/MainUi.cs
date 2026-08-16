@@ -206,6 +206,22 @@ public partial class MainUi : Control
         var titleWash = AddInkWash(_deskLayer, "DeskTitleWash", new Rect2(34, 24, 392, 78));
         AddLabel(titleWash, "大明御书房", new Vector2(20, 10), 30, "#F0E2C8", true);
         AddLabel(titleWash, "崇祯二年 · 春分前后", new Vector2(24, 48), 14, "#D3C19F");
+        // 水墨装饰边框（候选资产）：标题右侧小巧点缀，KeepAspect、忽略鼠标、不遮文字按钮。
+        var titleFrameTexture = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/art/mainui/ink-frame-cartouche.png");
+        if (titleFrameTexture is not null)
+        {
+            var titleFrame = new TextureRect
+            {
+                Name = "DeskTitleInkFrame",
+                Position = new Vector2(436, 12),
+                Size = new Vector2(150, 109),
+                Texture = titleFrameTexture,
+                ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+                StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+                MouseFilter = MouseFilterEnum.Ignore
+            };
+            _deskLayer.AddChild(titleFrame);
+        }
         var provenanceWash = AddInkWash(_deskLayer, "BackgroundProvenanceWash", new Rect2(34, 112, 244, 42));
         var backgroundProvenance = AddLabel(provenanceWash, "DESIGN · 艺术合成背景", new Vector2(16, 10), 13, "#D3C19F");
         backgroundProvenance.Name = "BackgroundProvenance";
@@ -215,9 +231,12 @@ public partial class MainUi : Control
         _readModelNotice.Name = "ReadModelNotice";
 
         var deskMapTexture = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/maps/ming_1629-physical.png");
+        // 黄昏背景画面已自带案上山水地图，可见多边形叠加会"双重地图"：
+        // 只藏可见图层，保留下方 DeskMapScroll 不可见点击区与交互。
         var deskMapPreview = new Polygon2D
         {
             Name = "DeskMapPreview",
+            Visible = false,
             Polygon =
             [
                 new Vector2(438, 463),
@@ -321,6 +340,22 @@ public partial class MainUi : Control
         };
         sheet.AddThemeStyleboxOverride("panel", MakePaperStyle());
         _deskLayer.AddChild(sheet);
+        // 奏疏展开插画（候选资产）：右上角小图，先于文字加入，不遮正文与按钮。
+        var scrollArt = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/art/mainui/memorial-open-scroll.png");
+        if (scrollArt is not null)
+        {
+            var illustration = new TextureRect
+            {
+                Name = "MemorialScrollArt",
+                Position = new Vector2(470, 30),
+                Size = new Vector2(160, 116),
+                Texture = scrollArt,
+                ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+                StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+                MouseFilter = MouseFilterEnum.Ignore
+            };
+            sheet.AddChild(illustration);
+        }
         _sheetTitle = AddLabel(sheet, "", new Vector2(58, 48), 28, "#342A1F", true);
         _sheetMeta = AddLabel(sheet, "", new Vector2(60, 98), 13, "#816B4C");
         _sheetBody = AddLabel(sheet, "", new Vector2(60, 152), 17, "#3D352A");
@@ -432,7 +467,9 @@ public partial class MainUi : Control
 
     private void AddBackground()
     {
-        var texture = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/backgrounds/ming-imperial-study-desk-map.png");
+        // 黄昏变体候选资产；加载失败时回退原背景，保证不崩。
+        var texture = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/art/mainui/study-desk-dusk.png")
+            ?? GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/backgrounds/ming-imperial-study-desk-map.png");
         var background = new TextureRect
         {
             Name = "StudyBackground",
