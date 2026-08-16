@@ -65,17 +65,50 @@ public partial class GuidePanel : Panel
 
         AddThemeStyleboxOverride("panel", MainUi.MakePaperStyle());
         AddThemeConstantOverride("shadow_size", 0);
-        SetAnchorsAndOffsetsPreset(LayoutPreset.Center);
+        // 锚点保持场景默认的 TopLeft；此前误用 Center 预设会让 Position 叠加上半屏偏移，面板整体被移出视口。
         Size = new Vector2(760, 560);
         Position = new Vector2(420, 200);
         CustomMinimumSize = Size;
         Visible = false;
 
-        _heading = AddLabel(this, "", new Vector2(52, 42), 28, "#342A1F", true);
+        // 顶部水墨横幅与小导师肖像（候选资产，纯展示）：加载失败时静默跳过，不影响引导功能。
+        var portraitArt = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/art/panels/minister-portrait.png");
+        if (portraitArt != null)
+        {
+            // 注意：ExpandMode 必须先于 Texture/Size 赋值，否则 Size 会被纹理最小尺寸钳制。
+            var portrait = new TextureRect
+            {
+                Name = "GuideArtPortrait",
+                ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+                StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+                MouseFilter = MouseFilterEnum.Ignore,
+                Texture = portraitArt,
+                Position = new Vector2(52, 8),
+                Size = new Vector2(72, 76),
+            };
+            AddChild(portrait);
+        }
+        var bannerArt = GD.Load<Texture2D>("res://assets/ui/generated/ming_ui_v2/art/panels/guide-banner.png");
+        if (bannerArt != null)
+        {
+            var banner = new TextureRect
+            {
+                Name = "GuideArtBanner",
+                ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+                StretchMode = TextureRect.StretchModeEnum.KeepAspectCovered,
+                MouseFilter = MouseFilterEnum.Ignore,
+                Texture = bannerArt,
+                Position = new Vector2(140, 8),
+                Size = new Vector2(560, 68),
+            };
+            AddChild(banner);
+        }
+
+        _heading = AddLabel(this, "", new Vector2(52, 88), 28, "#342A1F", true);
         _heading.Name = "GuideStepTitle";
-        _content = AddLabel(this, "", new Vector2(52, 96), 18, "#3D352A");
+        _content = AddLabel(this, "", new Vector2(52, 136), 18, "#3D352A");
         _content.Name = "GuideStepBody";
-        _content.Size = new Vector2(660, 250);
+        _content.Size = new Vector2(660, 228);
         _content.AutowrapMode = TextServer.AutowrapMode.WordSmart;
 
         _actionHint = AddLabel(this, "", new Vector2(52, 372), 14, "#8A5B24");
