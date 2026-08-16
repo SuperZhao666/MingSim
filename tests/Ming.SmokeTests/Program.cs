@@ -65,6 +65,10 @@ internal static class Program
             ShouldCaptureSnapshotsAtomicallyUnderConcurrency();
             ShouldKeepEventIdentityAndCommitMetadataStable();
             ShouldAuditPauseAndSpeedAsCommands();
+            ShouldCharacterizeMarchAdjacencyCheck();
+            ShouldCharacterizeSameTimeEventOrdering();
+            ShouldCharacterizePauseHoldsDueEventsUntilResume();
+            ShouldCharacterizeSpeedBoundariesAndScaling();
             ShouldDisableLegacyTurnCommitPath();
             ShouldRejectDecreeWithoutResponsibleCapability();
             ShouldRejectDecreeWhenTreasuryOrDeadlineInvalid();
@@ -971,6 +975,233 @@ internal static class Program
         Require(runtime.ReadModel.GameTime.Value == gameTimeBeforeSpeedElapsed.Value.AddHours(1) &&
                 remainderAfterSpeedElapsed > remainderBeforeSpeedElapsed,
             "切换倍速后必须继续使用既有余数，并按新速度累计后再提交整小时");
+    }
+
+    // ===== 特征测试：刻画实时内核当前行为（行军邻接 / 同刻排序 / 暂停与速度） =====
+
+    /// <summary>
+    /// 行军相邻检查：目标必须存在且与出发地相邻。不存在、不相邻、自环均归入
+    /// PROVINCE_NOT_ADJACENT 且不产生任何提交；相邻目标接纳后建立 MovementState
+    /// 并以 phase=1 调度 ArmyArrival。
+    /// </summary>
+    private static void ShouldCharacterizeMarchAdjacencyCheck()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateMarchTopologyWorld());
+        var version = runtime.ReadModel.WorldVersion;
+
+        // 目标省份存在但与出发地不相邻 -> 结构化拒绝，不建立 MovementState，不递增版本。
+        var nonAdjacent = new MoveArmyCommand("march-non-adjacent", new CharacterId("war"), new ArmyId("army-1"),
+            new ProvinceId("far"), FixedUtc, version, TravelHours: 2);
+        Require(runtime.EnqueueMoveArmy(nonAdjacent).Queued, "不相邻行军命令应进入收件箱等待安全点判定");
+        var rejectedFar = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!rejectedFar.CommandResults.Single().Accepted, "目标省份不相邻时必须拒绝行军");
+        Require(rejectedFar.CommandResults.Single().Errors.Any(error => error.Code == "PROVINCE_NOT_ADJACENT"),
+            "不相邻拒绝必须带 PROVINCE_NOT_ADJACENT 错误码");
+        Require(rejectedFar.ReadModel.WorldVersion == version, "行军拒绝不能递增 WorldVersion");
+        Require(rejectedFar.ReadModel.Movements.Count == 0, "被拒行军不能建立 MovementState");
+        Require(!rejectedFar.Events.Any(domainEvent => domainEvent.EventType == "ArmyMarchStarted"),
+            "被拒行军不能产生 ArmyMarchStarted 事件");
+
+        // 目标省份不存在 -> 当前实现把“不存在”与“不相邻”合并为同一错误码。
+        var missing = new MoveArmyCommand("march-missing", new CharacterId("war"), new ArmyId("army-1"),
+            new ProvinceId("ghost"), FixedUtc, version, 2);
+        Require(runtime.EnqueueMoveArmy(missing).Queued, "不存在省份的行军命令应进入收件箱");
+        var rejectedMissing = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!rejectedMissing.CommandResults.Single().Accepted, "目标省份不存在时必须拒绝行军");
+        Require(rejectedMissing.CommandResults.Single().Errors.Any(error => error.Code == "PROVINCE_NOT_ADJACENT"),
+            "不存在省份也归入 PROVINCE_NOT_ADJACENT");
+        Require(rejectedMissing.ReadModel.WorldVersion == version, "不存在省份拒绝不能递增版本");
+
+        // 目标等于出发地 -> 省份不自邻，同样被 PROVINCE_NOT_ADJACENT 拒绝。
+        var selfLoop = new MoveArmyCommand("march-self", new CharacterId("war"), new ArmyId("army-1"),
+            new ProvinceId("origin"), FixedUtc, version, 2);
+        Require(runtime.EnqueueMoveArmy(selfLoop).Queued, "自环行军命令应进入收件箱");
+        var rejectedSelf = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(!rejectedSelf.CommandResults.Single().Accepted, "自环行军必须被拒绝");
+        Require(rejectedSelf.CommandResults.Single().Errors.Any(error => error.Code == "PROVINCE_NOT_ADJACENT"),
+            "自环行军归入 PROVINCE_NOT_ADJACENT");
+
+        // 相邻目标 -> 接纳，建立 MovementState，调度 phase=1 的 ArmyArrival。
+        var adjacent = new MoveArmyCommand("march-adjacent", new CharacterId("war"), new ArmyId("army-1"),
+            new ProvinceId("near"), FixedUtc, version, 3);
+        Require(runtime.EnqueueMoveArmy(adjacent).Queued, "相邻行军命令应进入收件箱");
+        var accepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(accepted.CommandResults.Single().Accepted, "相邻行军必须被接纳");
+        Require(accepted.ReadModel.WorldVersion == version + 1, "接纳行军必须递增 WorldVersion");
+        Require(accepted.ReadModel.Movements.Count == 1, "接纳行军必须建立唯一 MovementState");
+        var movement = accepted.ReadModel.Movements.Single();
+        Require(movement.ActionId == "move-march-adjacent", "MovementState.ActionId 必须派生自命令编号");
+        Require(movement.ArmyId == new ArmyId("army-1"), "MovementState 必须绑定行军军队");
+        Require(movement.Origin == new ProvinceId("origin") && movement.Destination == new ProvinceId("near"),
+            "MovementState 必须记录权威出发地与目的地");
+        Require(movement.DueGameTime == accepted.ReadModel.GameTime.Add(TimeSpan.FromHours(3)),
+            "MovementState 到期时间必须为接纳时刻加行军时长");
+        var arrival = accepted.ReadModel.ScheduledActions.Single(action => action.EventType == "ArmyArrival");
+        Require(arrival.Phase == 1 && arrival.Priority == 0, "ArmyArrival 必须以 phase=1、priority=0 调度");
+        Require(arrival.DueGameTime == movement.DueGameTime, "ArmyArrival 到期时间必须与 MovementState 一致");
+        Require(accepted.Events.Any(domainEvent => domainEvent.EventType == "ArmyMarchStarted"),
+            "接纳行军必须产生 ArmyMarchStarted 事件");
+    }
+
+    /// <summary>
+    /// 同时刻事件稳定顺序：两个 ArmyArrival 同刻、同 phase、同 priority 时，
+    /// 必须按 CreationSequence（调度先后）稳定排序；只读 Scheduler 与事件产出顺序一致。
+    /// </summary>
+    private static void ShouldCharacterizeSameTimeEventOrdering()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateTwoArmyWorld());
+        var start = runtime.ReadModel.GameTime;
+        var version = runtime.ReadModel.WorldVersion;
+
+        // 两支军队同时出发、同样时长 -> 两个 ArmyArrival 同刻、同 phase(1)、同 priority(0)。
+        var firstMove = new MoveArmyCommand("order-first", new CharacterId("war"), new ArmyId("army-a"),
+            new ProvinceId("capital"), FixedUtc, version, TravelHours: 2);
+        Require(runtime.EnqueueMoveArmy(firstMove).Queued, "第一条行军应进入收件箱");
+        var firstAccepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(firstAccepted.CommandResults.Single().Accepted, "第一条行军应被接纳");
+
+        var secondMove = new MoveArmyCommand("order-second", new CharacterId("war"), new ArmyId("army-b"),
+            new ProvinceId("frontier"), FixedUtc, firstAccepted.ReadModel.WorldVersion, TravelHours: 2);
+        Require(runtime.EnqueueMoveArmy(secondMove).Queued, "第二条行军应进入收件箱");
+        var secondAccepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(secondAccepted.CommandResults.Single().Accepted, "第二条行军应被接纳");
+
+        // 只读 Scheduler 必须按 (DueGameTime, Phase, Priority, CreationSequence) 排序。
+        var scheduledArrivals = runtime.ReadModel.ScheduledActions
+            .Where(action => action.EventType == "ArmyArrival")
+            .ToArray();
+        Require(scheduledArrivals.Length == 2, "应恰好调度两个 ArmyArrival");
+        Require(scheduledArrivals[0].DueGameTime == scheduledArrivals[1].DueGameTime,
+            "两个 ArmyArrival 必须同刻到期");
+        Require(scheduledArrivals[0].Phase == 1 && scheduledArrivals[1].Phase == 1,
+            "ArmyArrival 必须同 phase=1");
+        Require(scheduledArrivals[0].Priority == scheduledArrivals[1].Priority,
+            "ArmyArrival 必须同 priority=0");
+        Require(scheduledArrivals[0].CreationSequence < scheduledArrivals[1].CreationSequence,
+            "同刻同 phase 事件必须按创建顺序稳定排列");
+        Require(scheduledArrivals[0].EventId == "army-arrival-order-first" &&
+                scheduledArrivals[1].EventId == "army-arrival-order-second",
+            "Scheduler 顺序必须反映入队顺序");
+        Require(scheduledArrivals[0].DueGameTime == start.Add(TimeSpan.FromHours(2)),
+            "两个 ArmyArrival 必须在出发后 2 小时同刻到期");
+
+        // 推进到共同到期时刻：ArmyArrived 事件也必须按同一创建顺序产出。
+        var due = scheduledArrivals[0].DueGameTime;
+        var arrival = runtime.AdvanceTo(due);
+        var arrivedArmies = arrival.Events
+            .Where(domainEvent => domainEvent.EventType == "ArmyArrived")
+            .Select(domainEvent => domainEvent.Data["army_id"])
+            .ToArray();
+        Require(arrivedArmies.Length == 2, "必须产出两个 ArmyArrived 事件");
+        Require(arrivedArmies[0] == "army-a" && arrivedArmies[1] == "army-b",
+            "同刻抵达事件必须按 CreationSequence 顺序产出");
+        Require(arrival.ReadModel.Armies.First(army => army.Id == new ArmyId("army-a")).LocationId == new ProvinceId("capital"),
+            "army-a 必须抵达 capital");
+        Require(arrival.ReadModel.Armies.First(army => army.Id == new ArmyId("army-b")).LocationId == new ProvinceId("frontier"),
+            "army-b 必须抵达 frontier");
+        Require(arrival.ReadModel.Movements.Count == 0, "抵达后 MovementState 必须清除");
+    }
+
+    /// <summary>
+    /// 暂停行为：暂停后即使推进到到期之后，到期事件也不能结算、时间与军队位置冻结；
+    /// 恢复后被挂起的到期事件按原到期时刻结算。
+    /// </summary>
+    private static void ShouldCharacterizePauseHoldsDueEventsUntilResume()
+    {
+        var runtime = new RealtimeSimulationRuntime(CreateWorld());
+        var start = runtime.ReadModel.GameTime;
+        var version = runtime.ReadModel.WorldVersion;
+
+        // 接纳一条 1 小时行军 -> 到期事件排在 start+1h。
+        var move = CreateMove(runtime, "pause-hold", FixedUtc, expectedVersion: version, travelHours: 1);
+        Require(runtime.EnqueueMoveArmy(move).Queued, "行军命令应进入收件箱");
+        var accepted = runtime.AdvanceTo(runtime.ReadModel.GameTime);
+        Require(accepted.CommandResults.Single().Accepted, "行军命令应被接纳");
+        Require(accepted.ReadModel.Movements.Count == 1, "接纳行军必须建立 MovementState");
+        var due = accepted.ReadModel.Movements.Single().DueGameTime;
+        Require(due == start.Add(TimeSpan.FromHours(1)), "行军到期时间必须为出发后 1 小时");
+
+        // 暂停后推进到到期之后 -> 时间、军队位置、在途状态全部冻结，到期事件不结算。
+        runtime.SetPaused(true);
+        var paused = runtime.AdvanceTo(new GameTime(start.Value.AddHours(2)));
+        Require(paused.IsPaused, "暂停后结果必须反映暂停状态");
+        Require(paused.ReadModel.GameTime == start, "暂停期间游戏时间不能推进");
+        Require(paused.ReadModel.Movements.Count == 1, "暂停期间在途 MovementState 必须保留");
+        Require(!paused.Events.Any(domainEvent => domainEvent.EventType == "ArmyArrived"),
+            "暂停期间到期事件不能结算");
+        Require(paused.ReadModel.Armies.Single().LocationId == new ProvinceId("frontier"),
+            "暂停期间军队位置不能改变");
+
+        // 恢复后推进到同一目标 -> 被挂起的到期事件按原到期时刻结算。
+        runtime.SetPaused(false);
+        var resumed = runtime.AdvanceTo(new GameTime(start.Value.AddHours(2)));
+        Require(!resumed.IsPaused, "恢复后结果必须反映运行状态");
+        Require(resumed.ReadModel.GameTime.Value == start.Value.AddHours(2), "恢复后时间必须推进到目标");
+        Require(resumed.ReadModel.Movements.Count == 0, "恢复后到期行军必须结算并清除 MovementState");
+        Require(resumed.Events.Any(domainEvent => domainEvent.EventType == "ArmyArrived"),
+            "恢复后被挂起的到期事件必须结算");
+        Require(resumed.ReadModel.Armies.Single().LocationId == new ProvinceId("capital"),
+            "恢复后军队必须抵达目的地");
+    }
+
+    /// <summary>
+    /// 速度行为：0.25 与 5.0 闭区间合法、区间外抛异常；速度线性缩放游戏时间；
+    /// 速度状态经快照往返保持并继续按保存的速度缩放。
+    /// </summary>
+    private static void ShouldCharacterizeSpeedBoundariesAndScaling()
+    {
+        // 速度边界：0.25 与 5.0 闭区间合法，区间外抛 ArgumentOutOfRangeException。
+        var boundary = new RealtimeSimulationRuntime(CreateWorld());
+        boundary.SetSpeed(0.25);
+        var minSpeed = boundary.AdvanceTo(boundary.ReadModel.GameTime);
+        Require(minSpeed.CommandResults.Single().Accepted && minSpeed.Speed == 0.25,
+            "速度下界 0.25 必须被接纳");
+        boundary.SetSpeed(5.0);
+        var maxSpeed = boundary.AdvanceTo(boundary.ReadModel.GameTime);
+        Require(maxSpeed.CommandResults.Single().Accepted && maxSpeed.Speed == 5.0,
+            "速度上界 5.0 必须被接纳");
+        RequireThrows<ArgumentOutOfRangeException>(() => boundary.SetSpeed(0.24));
+        RequireThrows<ArgumentOutOfRangeException>(() => boundary.SetSpeed(5.01));
+        RequireThrows<ArgumentOutOfRangeException>(() => boundary.SetSpeed(-1.0));
+
+        // 速度线性缩放游戏时间：1 现实秒在 speed=1 下推进 6 游戏小时。
+        var speedOne = new RealtimeSimulationRuntime(CreateWorld());
+        var beforeOne = speedOne.ReadModel.GameTime;
+        speedOne.Advance(TimeSpan.FromSeconds(1));
+        Require(speedOne.ReadModel.GameTime.Value == beforeOne.Value.AddHours(6),
+            "speed=1 时 1 现实秒必须推进 6 游戏小时");
+
+        // speed=2 下推进 12 游戏小时。
+        var speedTwo = new RealtimeSimulationRuntime(CreateWorld());
+        speedTwo.SetSpeed(2.0);
+        speedTwo.AdvanceTo(speedTwo.ReadModel.GameTime);
+        var beforeTwo = speedTwo.ReadModel.GameTime;
+        speedTwo.Advance(TimeSpan.FromSeconds(1));
+        Require(speedTwo.ReadModel.GameTime.Value == beforeTwo.Value.AddHours(12),
+            "speed=2 时 1 现实秒必须推进 12 游戏小时");
+
+        // speed=0.5 下推进 3 游戏小时。
+        var speedHalf = new RealtimeSimulationRuntime(CreateWorld());
+        speedHalf.SetSpeed(0.5);
+        speedHalf.AdvanceTo(speedHalf.ReadModel.GameTime);
+        var beforeHalf = speedHalf.ReadModel.GameTime;
+        speedHalf.Advance(TimeSpan.FromSeconds(1));
+        Require(speedHalf.ReadModel.GameTime.Value == beforeHalf.Value.AddHours(3),
+            "speed=0.5 时 1 现实秒必须推进 3 游戏小时");
+
+        // 速度状态经快照往返保持，并继续按保存的速度缩放。
+        var snapshotted = new RealtimeSimulationRuntime(CreateWorld());
+        snapshotted.SetSpeed(3.0);
+        snapshotted.AdvanceTo(snapshotted.ReadModel.GameTime);
+        var snapshot = snapshotted.CaptureSnapshot();
+        var restored = RealtimeSimulationRuntime.Restore(snapshot);
+        Require(restored.ReadModel.StateHash == snapshotted.ReadModel.StateHash,
+            "速度切换后快照 canonical hash 必须一致");
+        Require(restored.Speed == 3.0, "恢复后速度状态必须保持");
+        var beforeRestored = restored.ReadModel.GameTime;
+        restored.Advance(TimeSpan.FromSeconds(1));
+        Require(restored.ReadModel.GameTime.Value == beforeRestored.Value.AddHours(18),
+            "恢复后必须按保存的速度继续缩放（3 倍 -> 18 游戏小时）");
     }
 
     // ===== P0 玩法规则（I2A 宁远急饷）新增验收 =====
@@ -2438,6 +2669,59 @@ internal static class Program
                 new CharacterPersonality(true, true, true, false))],
             capabilityGrants: [new CapabilityGrant(new CharacterId("war"), GameCapability.MoveArmy, "army-1")],
             armies: [new ArmyState(new ArmyId("army-1"), "测试军", new ProvinceId("frontier"), 10_000, 3_000)]);
+    }
+
+    /// <summary>三省份拓扑：origin↔near 相邻，far 存在但与 origin 不相邻，用于刻画行军邻接校验。</summary>
+    internal static WorldState CreateMarchTopologyWorld()
+    {
+        var map = new MapDefinition(
+            "march-topology",
+            [
+                new ProvinceDefinition(new ProvinceId("origin"), "出发地", [new ProvinceId("near")]),
+                new ProvinceDefinition(new ProvinceId("near"), "相邻地", [new ProvinceId("origin"), new ProvinceId("far")]),
+                new ProvinceDefinition(new ProvinceId("far"), "远地", [new ProvinceId("near")]),
+            ]);
+        return WorldState.CreateInitial(
+            new WorldId("march-world"),
+            1,
+            200_000,
+            map,
+            currentTime: FixedUtc,
+            [new CharacterState(new CharacterId("war"), "兵部角色",
+                new CharacterAttributes(60, 40, 80, 50, 60),
+                new CharacterPersonality(true, true, true, false))],
+            capabilityGrants: [new CapabilityGrant(new CharacterId("war"), GameCapability.MoveArmy, "army-1")],
+            armies: [new ArmyState(new ArmyId("army-1"), "测试军", new ProvinceId("origin"), 10_000, 3_000)]);
+    }
+
+    /// <summary>两军世界：army-a 在 frontier、army-b 在 capital，war 对两军均有 MoveArmy 授权。</summary>
+    internal static WorldState CreateTwoArmyWorld()
+    {
+        var map = new MapDefinition(
+            "two-army-map",
+            [
+                new ProvinceDefinition(new ProvinceId("frontier"), "边地", [new ProvinceId("capital")]),
+                new ProvinceDefinition(new ProvinceId("capital"), "京师", [new ProvinceId("frontier")]),
+            ]);
+        return WorldState.CreateInitial(
+            new WorldId("two-army-world"),
+            1,
+            200_000,
+            map,
+            currentTime: FixedUtc,
+            [new CharacterState(new CharacterId("war"), "兵部角色",
+                new CharacterAttributes(60, 40, 80, 50, 60),
+                new CharacterPersonality(true, true, true, false))],
+            capabilityGrants:
+            [
+                new CapabilityGrant(new CharacterId("war"), GameCapability.MoveArmy, "army-a"),
+                new CapabilityGrant(new CharacterId("war"), GameCapability.MoveArmy, "army-b"),
+            ],
+            armies:
+            [
+                new ArmyState(new ArmyId("army-a"), "甲军", new ProvinceId("frontier"), 10_000, 3_000),
+                new ArmyState(new ArmyId("army-b"), "乙军", new ProvinceId("capital"), 8_000, 2_000),
+            ]);
     }
 
     /// <summary>
